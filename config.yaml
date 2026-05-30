@@ -1,0 +1,17 @@
+api:
+  host: 127.0.0.1
+  port: 8766
+
+docs_dir: docs/
+
+anthropic:
+  model_extract: claude-haiku-4-5-20251001
+  model_analyze: claude-sonnet-4-6
+
+db:
+  sqlite: db/knowledge.db
+  vectors: db/vectors/
+
+extractor:
+  chunk_size: 1500
+  min_content_len: 100

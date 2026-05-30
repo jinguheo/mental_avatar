@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+
+# DB / 벡터 저장소
+db/knowledge.db
+db/vectors/
+
+# 문서 (개인 파일)
+docs/
+
+# 로그
+*.log
+
+# Python 환경
+.venv/
+env/
+
+# graphify 임시 파일
+.graphify_detect.json
+.graphify_python
+graphify-out/
+
+# playwright 캐시
+.playwright-mcp/
+
+# Claude session cache
+.claude_session_key
