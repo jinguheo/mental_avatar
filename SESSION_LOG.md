@@ -252,3 +252,49 @@ python watcher/import_existing.py
 - [ ] 주체별 큐 실제 배치 처리 검증
 
 ---
+
+## 2026-05-30 (세션 6) — Avatar Studio (모드 A: 영상)
+
+### 논의 / 결정
+- 실제 얼굴 + 합성 아바타 + 목소리 UI 구축 요청
+- 파이프라인 확정: **텍스트 → Coqui XTTS v2(내 목소리 클로닝) → SadTalker(립싱크) → mp4**
+- 얼굴: 업로드 방식 / 목소리: 본인 wav 샘플 등록(클로닝) / 실시간 불필요(배치 생성)
+- 용도: 발표·홍보 자료, 웹 임베드(클라우드 배포는 Phase 3, 클라우드 미정)
+- UI: my-dashboard 사이드바 "◉ 아바타" 탭 추가 (별도 앱 아님)
+- **모드 B (3D 인터랙티브)는 Phase 2로 분리** — 모드 A 완성 후 착수
+  - Inworld AI 조사: 3D 모델 직접 생성 X(avatar-agnostic), Ready Player Me/MetaHuman 연결.
+    실시간 대화가 본업, 음성 클로닝 무료. 웹 패키지(RPM + Inworld Web SDK + three.js)로 결정.
+
+### 핵심 변경 (deviation)
+- SadTalker(numpy 1.23.4) ↔ Coqui XTTS(numpy≥1.24.3) **의존성 충돌**
+  → conda 환경 분리: `avatar`=SadTalker+Flask, `xtts`=Coqui TTS. server.py가 subprocess로 각각 호출.
+
+### 완료
+- [x] 설계 스펙 + 구현 플랜 작성 (docs/superpowers/) — brainstorming→writing-plans→executing-plans
+- [x] SadTalker 클론 (D:\MyWork\SadTalker) + 모델 8개 다운로드 완료
+      (256/512 safetensors, mapping x2, gfpgan weights x4)
+- [x] Flask 엔드포인트 3개 추가 (api/server.py):
+      `/avatar/register_voice`, `/avatar/voice_status`, `/avatar/tts_generate`
+- [x] 프론트: AvatarStudio.tsx 신규 + Sidebar/View타입/App.tsx 라우팅
+- [x] **검증(GPU 불필요분 전부 통과):**
+      - register_voice(8s wav 저장+duration), voice_status(false→true), tts_generate 입력검증(400)
+      - 브라우저 E2E: 아바타 탭 렌더 + "목소리 등록됨 ✓" (프론트↔백 연동 확인)
+      - 스크린샷: avatar-studio-verify.png
+- [x] git push 완료 (mental_avatar master, my_dashboard main)
+
+### 미완 (내일 이어서)
+- [ ] **설치 미완** — torch 2.5.1+cu121 다운로드 중단됨(세션 종료). 재실행 필요:
+      `D:\MyWork\mental-avatar\docs\superpowers\plans\2026-05-30-avatar-studio.md` Task 1 참고
+      1) avatar: `pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121`
+      2) avatar: `pip install -r D:\MyWork\SadTalker\requirements.txt`
+      3) `conda create -n xtts python=3.11 -y` → 같은 torch 설치 → `pip install coqui-tts`
+- [ ] **예상 이슈**: basicsr 1.4.2가 torchvision 0.20의 제거된 `functional_tensor` import →
+      `degradations.py`의 `torchvision.transforms.functional_tensor` → `functional` 한 줄 패치
+- [ ] SadTalker 샘플 실행 검증 → tts_generate 풀 파이프라인 curl → 브라우저 영상 생성 E2E (Task 6)
+
+### 현재 상태
+- 코드: 완료·커밋·푸시 ✅  /  설치: 미완(torch 단계)  /  모델: 완료 ✅
+- 서버 8766 / 대시보드 5173 — 세션 종료 시 함께 종료됨 (내일 재시작)
+- 환경: avatar(SadTalker용, torch 설치중), xtts(미생성)
+
+---
