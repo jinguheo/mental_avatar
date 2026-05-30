@@ -642,7 +642,7 @@ SADTALKER_DIR   = Path(r"D:\MyWork\SadTalker")
 AVATAR_TMP      = Path(__file__).parent.parent / "tmp" / "avatar"
 AVATAR_DATA     = Path(__file__).parent.parent / "data"
 VOICE_SAMPLE    = AVATAR_DATA / "voice_sample.wav"
-PYTHON_EXE      = r"C:\Users\oem\miniconda3\envs\avatar\python.exe"   # SadTalker
+PYTHON_EXE      = r"C:\Users\oem\miniconda3\envs\avatar\python.exe"   # SadTalker (numpy 1.26 패치판)
 XTTS_PYTHON_EXE = r"C:\Users\oem\miniconda3\envs\xtts\python.exe"     # Coqui XTTS v2
 
 
@@ -695,7 +695,9 @@ def avatar_tts_generate():
 
     # 1) XTTS v2 TTS (xtts 환경의 python으로 subprocess 실행)
     tts_script = f"""
-import sys
+import sys, os
+os.environ["COQUI_TOS_AGREED"] = "1"
+os.environ["TTS_HOME"] = r"D:\\MyWork\\mental-avatar\\models"
 sys.stdout.reconfigure(encoding='utf-8')
 from TTS.api import TTS
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
@@ -727,9 +729,12 @@ tts.tts_to_file(
         "--still", "--preprocess", "full",
         "--enhancer", "gfpgan", "--size", "512",
     ]
+    # SadTalker가 bare `ffmpeg`를 os.system으로 호출 → ffmpeg.exe 위치를 PATH에 주입
+    sad_env = dict(os.environ)
+    sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
     try:
         subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
-                       capture_output=True, timeout=300)
+                       capture_output=True, timeout=300, env=sad_env)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "SadTalker failed", "detail": e.stderr.decode(errors="replace")}), 500
     except subprocess.TimeoutExpired:

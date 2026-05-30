@@ -336,3 +336,39 @@ torch는 양쪽 환경 정상화 완료, 의존성 단계에서 막힘.
 - SadTalker 샘플 실행 → tts_generate 풀 파이프라인 → 브라우저 영상 생성
 
 ---
+
+### 세션 6 — 모드 A E2E 완성 ✅ (텍스트→목소리→영상 전체 작동)
+풀 파이프라인 검증 완료: `POST /avatar/tts_generate` → HTTP 200, 18.3s 512x512 mp4(811KB, 영상+클로닝 음성).
+XTTS(목소리)·SadTalker(영상) 개별 + 통합 모두 성공.
+
+**환경 구성 (최종):**
+- avatar: Flask 서버 + SadTalker (numpy 1.26.4) + chromadb/pandas
+- xtts: Coqui TTS (transformers 4.56.1)
+- 둘 다 torch 2.5.1+cu121
+
+**⚠️ git 밖 패치 (환경/모델 재생성 시 반드시 재적용):**
+1. `<avatar>/Lib/site-packages/basicsr/data/degradations.py` L8:
+   `torchvision.transforms.functional_tensor` → `torchvision.transforms.functional`
+2. `D:\MyWork\SadTalker\src\face3d\util\my_awing_arch.py` L18: `np.float` → `np.float32`
+3. `D:\MyWork\SadTalker\src\face3d\util\preprocess.py` L101:
+   `np.array([w0,h0,s,t[0],t[1]])` → `...float(t[0]),float(t[1])])` (numpy 1.24+ ragged 방지)
+4. `D:\MyWork\SadTalker\ffmpeg.exe` = imageio-ffmpeg 번들 복사 (SadTalker가 bare ffmpeg 호출)
+
+**server.py 핵심 (api/server.py):**
+- PYTHON_EXE=avatar(SadTalker), XTTS_PYTHON_EXE=xtts
+- TTS 스크립트에 `COQUI_TOS_AGREED=1`, `TTS_HOME=D:\MyWork\mental-avatar\models`
+- SadTalker subprocess env PATH에 SadTalker 디렉토리 주입(ffmpeg)
+
+**디스크 정리 (C: 4.2GB→12.9GB):**
+- pip 캐시 삭제 + pip cache-dir를 D:\MyWork\mental-avatar\.pipcache로
+- XTTS 모델 → D:\MyWork\mental-avatar\models\tts (C: junction은 크로스볼륨 WinError 649로 제거, TTS_HOME으로 대체)
+- conda clean --all
+
+**출력 위치 (전부 D:):** tmp/avatar/<uuid>/, 결과 mp4 tmp/e2e_avatar.mp4
+
+### 다음 (모드 A 잔여 / 모드 B)
+- 브라우저 대시보드 아바타 탭에서 실사용 E2E (얼굴 업로드+텍스트) 최종 확인
+- start_dashboard.bat에 xtts 환경 의존성 반영 여부 점검
+- 모드 B(3D 인터랙티브, Phase 2): Ready Player Me + Inworld + three.js
+
+---
