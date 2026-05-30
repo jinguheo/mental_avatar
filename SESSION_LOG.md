@@ -298,3 +298,26 @@ python watcher/import_existing.py
 - 환경: avatar(SadTalker용, torch 설치중), xtts(미생성)
 
 ---
+
+### 세션 6 추가 (설치 디버깅 — 미완, 내일 이어서)
+torch는 양쪽 환경 정상화 완료, 의존성 단계에서 막힘.
+
+**해결됨:**
+- avatar torch `2.5.1+cu121 cuda True` ✅ (force-reinstall, 캐시 wheel 정상 — 재다운로드 불필요)
+- xtts torch CUDA ✅
+- torch 2.4GB wheel은 pip 캐시에 완전 보관됨(재다운로드 X)
+
+**남은 이슈 2개 (내일):**
+1. **avatar SadTalker 의존성** — py311 wheel 없는 핀 때문에 막힘:
+   - scikit-image==0.19.3 → 소스빌드 실패(clang 없음) → 0.22.0으로 교체했더니
+   - scikit-image 0.22 ↔ **imageio==2.19.3 충돌**(ResolutionImpossible)
+   - 다음 시도: `tmp/sadtalker_reqs_py311.txt`에서 imageio 핀도 제거(또는 imageio>=2.27),
+     `pip install --prefer-binary -r` 재실행. numpy는 이미 1.26.4로 패치됨.
+2. **xtts coqui-tts 0.27.5 ↔ transformers 버전**:
+   - 5.9.0=`isin_mps_friendly` 제거 / 4.46=`is_torch_greater_or_equal` 없음 / 4.49=`is_torchcodec_available` 없음
+   - 호환 구간 ~4.50~4.5x. 다음 시도: `pip install "transformers==4.52.4"` (또는 coqui-tts 0.27.5 의존성 확인)
+
+**그 다음 (Task 6):** basicsr functional_tensor 패치 → SadTalker 샘플 → tts_generate 풀 파이프라인 → 브라우저 영상 E2E.
+파일: 서버 api/server.py, 패치 reqs tmp/sadtalker_reqs_py311.txt, 플랜 docs/superpowers/plans/2026-05-30-avatar-studio.md
+
+---
