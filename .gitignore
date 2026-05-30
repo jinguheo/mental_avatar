@@ -28,3 +28,9 @@ graphify-out/
 
 # Claude session cache
 .claude_session_key
+models/
+.pipcache/
+tmp/
+data/
+avatar-studio-verify.png
+*.png
