@@ -114,6 +114,41 @@ D:\MyWork\my-dashboard\src\
 ```
 
 ## Out of Scope (Phase 1)
-- 클라우드 배포 / 공개 embed URL → Phase 2
+- 클라우드 배포 / 공개 embed URL → Phase 3
 - GPT 대본 자동 생성 → 추후
 - 영상 히스토리 저장 → 추후
+
+---
+
+## Phase 2 (예정): 3D 인터랙티브 아바타 — "모드 B"
+
+> 결정(2026-05-30): 모드 A(SadTalker 영상) 완성 후 착수. 웹 패키지 방식.
+
+Phase 1의 모드 A는 **2D 평면 영상(mp4)** — 발표/홍보 영상 파일용, 비대화형.
+모드 B는 **360도 회전 + 실시간 대화형 3D 아바타** — 웹 임베드용. 공유 코드 거의 없음 (별도 트랙).
+
+### 파이프라인 (모드 B)
+```
+셀카 → Ready Player Me (3D 아바타 모델 생성, 무료)
+        ↓ .glb
+   three.js / react-three-fiber 웹 뷰어 (360도 회전)
+        ↓
+   Inworld Web SDK (두뇌 LLM + TTS + 립싱크 viseme)
+        ↓
+   대시보드에 임베드된 실시간 대화형 아바타
+```
+
+### Inworld AI 조사 결과 (2026-05-30)
+- **3D 모델 직접 생성 안 함** — "avatar-agnostic". 모델은 외부에서 가져와 연결.
+  - 소스: Ready Player Me(셀카→3D, 무료), MetaHuman, 커스텀(블렌드셰이프+viseme)
+- **Interactive가 본업**: 실시간 대화, 감정 표현, 장기 기억
+- **TTS 내장 + 제로샷 음성 클로닝 무료** (Phase 1의 XTTS 대체 가능)
+- **립싱크**: viseme 타임스탬프 제공, Unity/Unreal/웹 SDK
+- **가격**: Agent Runtime 무료, TTS $15~25/1M자, 음성 클로닝 무료
+- 실시간 아바타 영상은 HeyGen Live Avatar와 파트너십
+- 참고: https://inworld.ai/ , https://docs.inworld.ai/ , https://readyplayer.me/integrations/inworld-character-engine-for-ai-npcs
+
+### Phase 2 설계 시 결정할 것
+- mental-avatar 지식그래프를 Inworld 캐릭터의 "기억/지식"으로 주입할지 (1인칭 자기 요약 연동)
+- 음성: Phase 1 XTTS 재사용 vs Inworld TTS 클로닝으로 통일
+- 렌더링: react-three-fiber로 대시보드 탭 내 임베드
