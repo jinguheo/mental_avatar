@@ -171,3 +171,84 @@ python watcher/import_existing.py
 - dashboard MCP: http://127.0.0.1:8765 ✅ 실행 중 (kg.* 프록시 검증 완료)
 
 ---
+
+## 2026-05-30 (세션 5) — Phase 4 UI + Wiki + graphify + 큐 시스템
+
+### 완료된 작업
+
+#### 1. DB 초기화 + 재import
+- [x] `db/knowledge.db` + `db/vectors/` 삭제 후 클린 재초기화
+- [x] 샘플 노트 5개 파일 생성 (vision_system, step_parsing, image_alignment, business_model, ai_roadmap)
+- [x] docs/ 전체 13개 파일 import (note:6, pdf:3, pptx:4) — unknown 0개
+
+#### 2. 대시보드 KG 패널 UI (Phase 4) 완성
+- [x] `KnowledgeGraph.tsx` — 탭 4개: 검색·요약 / 그래프 / 파일 / Wiki
+- [x] 검색 탭: 시맨틱 검색 + 통계 바 + 아바타 요약 (streamClaudeWeb 직접 호출로 전환)
+- [x] 그래프 탭: force-directed SVG + 필터 (문서/개념/전체) + 문서·개념 노드 구분 시각화
+- [x] App.tsx에 `settings` props 연결
+
+#### 3. claude_mcp.py 개선
+- [x] `my-dashboard/.claude_session_key` 자동 로드 (만료 시 재연결 안내)
+- [x] MCP 서버(8765) 자동 감지 + 빈 session_key 처리
+
+#### 4. extractor.py 개선
+- [x] 키워드 기반 fallback 토픽 추출 추가 (LLM 없이도 topics 생성)
+- [x] 12개 주제 시드 (컴퓨터 비전, CAD/도면 처리, 이미지 정렬, 품질 검증 등)
+
+#### 5. graph.py 개선
+- [x] `upsert_entity()` — entity 노드 중복 방지 upsert
+- [x] `_entity_id_by_name()` — 이름으로 entity 노드 조회
+
+#### 6. 벡터 유사도 엣지 자동 생성
+- [x] `/graph/link_similar` 엔드포인트 추가
+- [x] 임계값 기반 similar_to 엣지 자동 생성
+- [x] 현재 KG: nodes 41, edges 251
+
+#### 7. Wiki 생성 파이프라인 (Ollama → Claude)
+- [x] `core/wiki.py` 신규:
+  - Ollama(`gemma4:e2b`) 1차 구조화 요약 (JSON 형식)
+  - Claude MCP 2차 wiki 형식 재구성
+  - 개념 노드 → KG entity 연결 (`_link_concepts_to_node`)
+- [x] `db/init_db.py`에 `wiki_pages` 테이블 추가
+- [x] `/wiki/list`, `/wiki/<id>`, `/wiki/generate`, `/wiki/generate_all` 엔드포인트
+- [x] Wiki 탭 UI: 페이지 목록 + 마크다운 렌더링(react-markdown)
+- [x] 전체 생성 결과: 40개 wiki 페이지 (ollama_only 상태 — Claude rate limit)
+- [x] KG entity 437개 자동 추출 (wiki 생성 시 개념 → entity 노드 연결)
+
+#### 8. 파일 탭 → 주체별 처리 큐로 개편
+- [x] `core/queue_mgr.py` 신규:
+  - `subjects` 테이블: 폴더 단위 주체 관리
+  - `processing_queue` 테이블: 파일별 처리 상태 추적
+  - `auto_discover_subjects()`: docs/ 하위 폴더 자동 등록
+  - `process_next()`: ingest + wiki 생성 배치 처리
+- [x] `/subjects`, `/queue`, `/queue/process`, `/queue/reset_errors` 엔드포인트
+- [x] 파일 탭 UI 3-View: 주체 목록 / 큐 상태 / 파일 직접 열기
+- [x] 주체 5개 자동 등록: other(6), pdf(3), pptx(4), word(0), excel(0)
+
+#### 9. graphify 통합
+- [x] `pip install graphifyy` 설치
+- [x] docs/ 폴더 대상 graphify 파이프라인 실행:
+  - 43 nodes, 48 edges, 9 communities
+  - 5개 하이퍼엣지 (Core Verification Pipeline, STEP Processing Stack 등)
+- [x] `graphify-out/graph.html` — 브라우저 인터랙티브 그래프
+- [x] God Node: `3Dto2DVerify System` (16 edges — 모든 커뮤니티 연결)
+- [x] Surprising: DepthAny PDF → 2D Projection, Agentic Flow → Predictive Maintenance
+
+#### 10. GitHub 초기 push
+- [x] `git init` + remote 설정 + `.gitignore` 정비
+- [x] 초기 커밋 (29파일, 2729줄)
+- [x] https://github.com/jinguheo/mental_avatar push 완료
+
+### 현재 시스템 상태
+- avatar API: http://127.0.0.1:8766 ✅
+- dashboard: http://localhost:5173 ✅
+- DB: nodes 478 (concept:437, note:6, pdf:3, pptx:32), edges 905
+- Wiki: 40페이지 (ollama_only — Claude 세션 재연결 시 done으로 업그레이드 가능)
+
+### 다음 세션 할 일
+- [ ] Claude.ai 세션 재연결 → wiki `done` 상태 업그레이드
+- [ ] ANTHROPIC_API_KEY `.env` 추가 (선택) → 더 안정적인 LLM 연결
+- [ ] graphify `--update` 로 새 문서 증분 처리
+- [ ] 주체별 큐 실제 배치 처리 검증
+
+---
