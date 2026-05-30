@@ -56,17 +56,21 @@ Expected: `True`
 C:\Users\oem\miniconda3\Scripts\conda.exe run -n avatar pip install -r D:\MyWork\SadTalker\requirements.txt
 ```
 
-- [ ] **Step 4: Coqui XTTS v2 설치**
+- [ ] **Step 4: Coqui XTTS v2 — 별도 conda 환경 `xtts`에 설치**
+
+> **DEVIATION (2026-05-30):** SadTalker는 `numpy==1.23.4`를 고정하고 Coqui TTS는 `numpy>=1.24.3`를 요구해 한 환경 공존 불가. subprocess 구조이므로 환경을 분리한다. SadTalker는 `avatar`, TTS는 `xtts` 환경에서 실행.
 
 ```powershell
-C:\Users\oem\miniconda3\Scripts\conda.exe run -n avatar pip install TTS
+C:\Users\oem\miniconda3\Scripts\conda.exe create -n xtts python=3.11 -y
+C:\Users\oem\miniconda3\Scripts\conda.exe run -n xtts pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+C:\Users\oem\miniconda3\Scripts\conda.exe run -n xtts pip install coqui-tts
 ```
 
 확인:
 ```powershell
-C:\Users\oem\miniconda3\envs\avatar\python.exe -c "from TTS.api import TTS; print('OK')"
+C:\Users\oem\miniconda3\envs\xtts\python.exe -c "from TTS.api import TTS; import torch; print('OK', torch.cuda.is_available())"
 ```
-Expected: `OK`
+Expected: `OK True`
 
 - [ ] **Step 5: SadTalker 모델 다운로드**
 
@@ -130,7 +134,8 @@ SADTALKER_DIR  = Path(r"D:\MyWork\SadTalker")
 AVATAR_TMP     = Path(__file__).parent.parent / "tmp" / "avatar"
 AVATAR_DATA    = Path(__file__).parent.parent / "data"
 VOICE_SAMPLE   = AVATAR_DATA / "voice_sample.wav"
-PYTHON_EXE     = r"C:\Users\oem\miniconda3\envs\avatar\python.exe"
+PYTHON_EXE     = r"C:\Users\oem\miniconda3\envs\avatar\python.exe"   # SadTalker
+XTTS_PYTHON_EXE = r"C:\Users\oem\miniconda3\envs\xtts\python.exe"    # Coqui XTTS v2
 ```
 
 - [ ] **Step 3: `/avatar/register_voice` 엔드포인트 추가 (상수 정의 바로 아래)**
@@ -198,8 +203,8 @@ tts.tts_to_file(
     tts_script_path.write_text(tts_script, encoding="utf-8")
 
     try:
-        subprocess.run([PYTHON_EXE, str(tts_script_path)],
-                       check=True, capture_output=True, timeout=120)
+        subprocess.run([XTTS_PYTHON_EXE, str(tts_script_path)],
+                       check=True, capture_output=True, timeout=180)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "TTS failed", "detail": e.stderr.decode(errors="replace")}), 500
     except subprocess.TimeoutExpired:
