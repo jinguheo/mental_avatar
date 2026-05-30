@@ -321,3 +321,18 @@ torch는 양쪽 환경 정상화 완료, 의존성 단계에서 막힘.
 파일: 서버 api/server.py, 패치 reqs tmp/sadtalker_reqs_py311.txt, 플랜 docs/superpowers/plans/2026-05-30-avatar-studio.md
 
 ---
+
+### 세션 6 — 설치 완료 ✅ (의존성 전부 해결)
+**작동하는 설정 (재현용):**
+- avatar(SadTalker): torch==2.5.1+cu121, torchvision==0.20.1, torchaudio==2.5.1
+  + `setup/sadtalker_reqs_py311.txt` (numpy 1.26.4, scikit-image 0.22.0, imageio>=2.27 로 py311 호환)
+  + **basicsr 패치**: `site-packages/basicsr/data/degradations.py` line8
+    `torchvision.transforms.functional_tensor` → `torchvision.transforms.functional`
+- xtts(Coqui): torch==2.5.1+cu121 + coqui-tts 0.27.5 + **transformers==4.56.1** (4.54~4.56 구간만 호환)
+- 검증: avatar/xtts 양쪽 import 전부 통과, torch.cuda.is_available()=True
+
+**남은 것 = Task 6 (영상 생성 E2E)만:**
+- 첫 tts_generate 실행 시 XTTS v2 모델 ~1.8GB 자동 다운로드됨(최초 1회)
+- SadTalker 샘플 실행 → tts_generate 풀 파이프라인 → 브라우저 영상 생성
+
+---
