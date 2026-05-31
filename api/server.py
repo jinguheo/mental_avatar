@@ -671,6 +671,48 @@ def avatar_voice_status():
     return jsonify({"registered": VOICE_SAMPLE.exists()})
 
 
+@app.route("/avatar/tts_only", methods=["POST"])
+def avatar_tts_only():
+    """얼굴 없이 XTTS 음성 WAV만 생성 — 3D 아바타 립싱크용"""
+    text = request.form.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    if not VOICE_SAMPLE.exists():
+        return jsonify({"error": "voice sample not registered"}), 400
+
+    import uuid as _uuid
+    job_dir = AVATAR_TMP / _uuid.uuid4().hex
+    job_dir.mkdir(parents=True, exist_ok=True)
+    speech_path = job_dir / "speech.wav"
+
+    tts_script = f"""
+import sys, os
+os.environ["COQUI_TOS_AGREED"] = "1"
+os.environ["TTS_HOME"] = r"D:\\MyWork\\mental-avatar\\models"
+sys.stdout.reconfigure(encoding='utf-8')
+from TTS.api import TTS
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+tts.tts_to_file(
+    text={repr(text)},
+    speaker_wav={repr(str(VOICE_SAMPLE))},
+    language="ko",
+    file_path={repr(str(speech_path))}
+)
+"""
+    script_path = job_dir / "run_tts.py"
+    script_path.write_text(tts_script, encoding="utf-8")
+    try:
+        subprocess.run([XTTS_PYTHON_EXE, str(script_path)],
+                       check=True, capture_output=True, timeout=180)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "TTS failed", "detail": e.stderr.decode(errors="replace")}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "TTS timeout"}), 500
+
+    return send_file(str(speech_path), mimetype="audio/wav",
+                     as_attachment=False, download_name="speech.wav")
+
+
 @app.route("/avatar/tts_generate", methods=["POST"])
 def avatar_tts_generate():
     face_file = request.files.get("face")
@@ -734,13 +776,13 @@ tts.tts_to_file(
     sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
     try:
         subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
-                       capture_output=True, timeout=300, env=sad_env)
+                       capture_output=True, timeout=600, env=sad_env)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "SadTalker failed", "detail": e.stderr.decode(errors="replace")}), 500
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "SadTalker timeout after 300s"}), 500
+        return jsonify({"error": "SadTalker timeout after 600s"}), 500
 
-    mp4_files = list(result_dir.glob("*.mp4"))
+    mp4_files = list(result_dir.rglob("*.mp4"))
     if not mp4_files:
         return jsonify({"error": "no output video found"}), 500
 

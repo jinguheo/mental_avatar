@@ -110,6 +110,22 @@ def init():
 
     CREATE INDEX IF NOT EXISTS idx_queue_subject ON processing_queue(subject_id);
     CREATE INDEX IF NOT EXISTS idx_queue_status  ON processing_queue(status);
+
+    CREATE TABLE IF NOT EXISTS user_profile (
+        key         TEXT PRIMARY KEY,
+        value       TEXT NOT NULL,
+        updated_at  DATETIME DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_sync (
+        id          TEXT PRIMARY KEY,
+        source      TEXT NOT NULL,
+        source_id   TEXT NOT NULL,
+        title       TEXT,
+        content     TEXT,
+        synced_at   DATETIME DEFAULT (datetime('now','localtime')),
+        UNIQUE(source, source_id)
+    );
     """)
 
     conn.commit()
