@@ -1,6 +1,7 @@
 """Wiki 생성 파이프라인 — Ollama 1차 요약 → Claude.ai 2차 재구성 → KG 개념 연결"""
 import uuid
 import re
+import os
 import json
 import urllib.request
 from db.init_db import get_conn
@@ -115,8 +116,21 @@ def generate_wiki(node_id: str, title: str, content: str, file_path: str) -> dic
     page_id = existing["id"] if existing else str(uuid.uuid4())
 
     try:
+        # 0단계: 텍스트가 빈약하면 시각 모델(gemma)로 이미지/슬라이드 직접 이해
+        vision_note = ""
+        from . import vision
+        if vision.is_sparse(content) and os.path.exists(file_path):
+            src_ext = os.path.splitext(file_path)[1].lower()
+            if src_ext in (".pdf", ".pptx", ".ppt", ".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+                vision_note = vision.describe_document(file_path, title=title)
+                if vision_note:
+                    # 시각 이해 결과를 본문 콘텐츠로 사용 (이후 단계가 이를 구조화)
+                    content = vision_note
+
         # 1단계: Ollama 구조화 추출
         ollama_data = _ollama_extract(title, content)
+        if vision_note:
+            ollama_data["_vision"] = True
         ollama_summary = json.dumps(ollama_data, ensure_ascii=False, indent=2)
 
         # 2단계: KG에 개념 노드 연결 (항상 실행)
@@ -195,3 +209,83 @@ def get_wiki_page(page_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM wiki_pages WHERE id=?", (page_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+# 요약 대상 조건: 텍스트가 충분하거나(>50자), 시각 모델로 읽을 수 있는 파일(pdf/pptx/이미지)
+_SUMMARIZABLE = """(
+    length(content) > 50
+    OR lower(file_path) LIKE '%.pdf'
+    OR lower(file_path) LIKE '%.pptx'
+    OR lower(file_path) LIKE '%.ppt'
+    OR lower(file_path) LIKE '%.png'
+    OR lower(file_path) LIKE '%.jpg'
+    OR lower(file_path) LIKE '%.jpeg'
+)"""
+
+
+def count_missing() -> dict:
+    """요약이 필요한 파일(file_path) 수 반환.
+    wiki는 file_path 단위로 저장되므로 노드(청크)가 아닌 파일 기준으로 집계.
+    텍스트가 없어도 시각 모델로 읽을 수 있는 파일(pdf/pptx/이미지)은 포함한다."""
+    conn = get_conn()
+    file_total = conn.execute(
+        f"SELECT COUNT(DISTINCT COALESCE(file_path, id)) FROM nodes "
+        f"WHERE type='chunk' AND {_SUMMARIZABLE}"
+    ).fetchone()[0]
+    summarized = conn.execute(
+        "SELECT COUNT(DISTINCT file_path) FROM wiki_pages "
+        "WHERE status IN ('done','ollama_only')"
+    ).fetchone()[0]
+    return_val = {
+        "node_total": file_total,
+        "summarized": summarized,
+        "missing": max(0, file_total - summarized),
+    }
+    conn.close()
+    return return_val
+
+
+def auto_summarize_missing(job: dict, limit: int = 200) -> None:
+    """wiki 없는 파일을 찾아 순서대로 요약. job dict에 진행 상태를 업데이트 (백그라운드 스레드용).
+    wiki는 file_path 단위이므로 파일별 대표 노드(첫 청크) 하나만 요약한다.
+    텍스트가 빈약한 pdf/pptx/이미지는 generate_wiki 내부에서 시각 모델로 처리된다."""
+    conn = get_conn()
+    rows = conn.execute(f"""
+        SELECT n.id, n.title, n.content, n.file_path
+        FROM nodes n
+        WHERE n.type = 'chunk'
+          AND {_SUMMARIZABLE}
+          AND COALESCE(n.file_path, n.id) NOT IN (
+              SELECT file_path FROM wiki_pages
+              WHERE status IN ('done', 'ollama_only')
+          )
+        GROUP BY COALESCE(n.file_path, n.id)
+        ORDER BY MIN(n.created_at) ASC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    items = [dict(r) for r in rows]
+    conn.close()
+
+    job["total"]  = len(items)
+    job["done"]   = 0
+    job["failed"] = 0
+    job["running"] = True
+
+    for item in items:
+        if job.get("cancel"):
+            break
+        try:
+            generate_wiki(
+                node_id=item["id"],
+                title=item["title"] or "(제목 없음)",
+                content=item["content"],
+                file_path=item["file_path"] or item["id"],
+            )
+            job["done"] += 1
+        except Exception as e:
+            job["failed"] += 1
+            print(f"[auto_summarize] 실패 {item['title']}: {e}")
+        job["current"] = item["title"] or item["id"]
+
+    job["running"] = False
+    job["current"] = ""

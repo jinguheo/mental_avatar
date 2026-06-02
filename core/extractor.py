@@ -1,7 +1,11 @@
-"""엔티티·관계·토픽·인사이트 추출 — dashboard MCP 우선, API 키 fallback, 키워드 fallback"""
+"""엔티티·관계·토픽·인사이트 추출 — Ollama 우선, MCP → API 키 → 키워드 fallback"""
 import re
 import json
+import urllib.request
 from . import env
+
+OLLAMA_URL   = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "gemma4:e2b"
 
 EXTRACT_PROMPT = """다음 문서에서 지식 그래프 구성 요소를 추출하세요.
 
@@ -9,7 +13,7 @@ EXTRACT_PROMPT = """다음 문서에서 지식 그래프 구성 요소를 추출
 문서 내용:
 {content}
 
-아래 JSON 형식으로만 응답하세요 (다른 텍스트 없이):
+반드시 아래 JSON 형식으로만 응답하세요 (다른 텍스트 없이):
 {{
   "entities": [
     {{"name": "엔티티명", "type": "concept|person|tool|paper|organization|technology", "description": "간략 설명"}}
@@ -18,12 +22,10 @@ EXTRACT_PROMPT = """다음 문서에서 지식 그래프 구성 요소를 추출
     {{"from": "엔티티A", "to": "엔티티B", "relation": "relates_to|part_of|cites|implements|contradicts|applied_to"}}
   ],
   "topics": ["주제1", "주제2"],
-  "key_insights": ["핵심 인사이트1", "핵심 인사이트2"],
-  "questions_raised": ["이 문서가 제기하는 질문1"],
+  "key_insights": ["핵심 인사이트1"],
   "importance": 0.7
 }}"""
 
-# 키워드 기반 토픽 시드
 _TOPIC_SEEDS = [
     (r'비전|카메라|조명|이미지|영상|촬영', '컴퓨터 비전'),
     (r'STEP|CAD|도면|3D|투영|파싱', 'CAD/도면 처리'),
@@ -41,28 +43,40 @@ _TOPIC_SEEDS = [
 
 
 def _keyword_fallback(title: str, content: str) -> dict:
-    """정규식 기반 토픽 추출 — LLM 없이 동작하는 fallback."""
     text = f"{title} {content}"
-    topics = []
-    for pattern, topic in _TOPIC_SEEDS:
-        if re.search(pattern, text, re.IGNORECASE):
-            topics.append(topic)
+    topics = [topic for pattern, topic in _TOPIC_SEEDS if re.search(pattern, text, re.IGNORECASE)]
     return {
-        "entities": [],
-        "relations": [],
-        "topics": topics[:5],
-        "key_insights": [],
-        "questions_raised": [],
-        "importance": 0.5,
+        "entities": [], "relations": [],
+        "topics": topics[:5], "key_insights": [], "importance": 0.5,
     }
 
 
 def _parse_json(text: str) -> dict:
+    # ```json ... ``` 블록 제거
     if "```" in text:
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        m = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
+        if m:
+            text = m.group(1)
     return json.loads(text.strip())
+
+
+def _via_ollama(title: str, content: str) -> dict:
+    """Ollama 로컬 모델로 엔티티/토픽 추출"""
+    prompt = EXTRACT_PROMPT.format(title=title, content=content[:3000])
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0.1},
+    }).encode()
+    req = urllib.request.Request(
+        OLLAMA_URL, data=payload,
+        headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        body = json.loads(resp.read())
+    text = body["message"]["content"].strip()
+    return _parse_json(text)
 
 
 def _via_mcp(title: str, content: str) -> dict:
@@ -86,21 +100,29 @@ def _via_api(title: str, content: str) -> dict:
 
 
 def extract(title: str, content: str) -> dict:
-    """텍스트에서 KG 구성 요소 추출. MCP 우선 → API 키 → 키워드 fallback."""
-    # 1순위: dashboard MCP
+    """KG 구성 요소 추출.
+    순서: Ollama → MCP(dashboard) → Anthropic API 키 → 키워드 fallback"""
+
+    # 1순위: Ollama (로컬, 항상 시도)
+    try:
+        return _via_ollama(title, content)
+    except Exception as e:
+        print(f"[extractor] Ollama 실패, MCP 재시도: {e}")
+
+    # 2순위: dashboard MCP
     try:
         from . import claude_mcp
         if claude_mcp.is_available():
             return _via_mcp(title, content)
     except Exception as e:
-        print(f"[extractor] MCP 실패, API 키로 재시도: {e}")
+        print(f"[extractor] MCP 실패, API 키 재시도: {e}")
 
-    # 2순위: ANTHROPIC_API_KEY
+    # 3순위: ANTHROPIC_API_KEY
     if env.get("ANTHROPIC_API_KEY"):
         try:
             return _via_api(title, content)
         except Exception as e:
             print(f"[extractor] API 키 실패: {e}")
 
-    # 3순위: 키워드 기반 fallback
+    # 4순위: 키워드 기반 fallback
     return _keyword_fallback(title, content)

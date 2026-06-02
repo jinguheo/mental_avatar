@@ -395,6 +395,104 @@ def wiki_generate_all():
     return jsonify(results)
 
 
+# ── 자동 요약 + Graphify 자동 실행 (백그라운드) ──────────
+import threading as _threading
+from core import graphify_runner as _grunner
+
+_auto_job: dict    = {"running": False, "total": 0, "done": 0, "failed": 0, "current": "", "cancel": False}
+_graphify_job: dict = {"running": False, "stage": "", "nodes": 0, "edges": 0,
+                        "communities": 0, "exported": 0, "error": ""}
+
+
+def _run_summarize_then_graphify(job: dict, limit: int) -> None:
+    """요약 완료 후 자동으로 graphify 실행"""
+    wiki.auto_summarize_missing(job, limit)
+    # 요약이 하나라도 성공했으면 graphify 실행
+    if job.get("done", 0) > 0 and not job.get("cancel"):
+        _graphify_job.update({"running": True, "stage": "시작", "error": ""})
+        _grunner.run_graphify(_graphify_job)
+
+
+@app.route("/wiki/auto_summarize/status", methods=["GET"])
+def wiki_auto_status():
+    """자동 요약 + graphify 진행 상태 조회"""
+    missing = wiki.count_missing()
+    return jsonify({**_auto_job, **missing, "graphify": _graphify_job})
+
+
+@app.route("/wiki/auto_summarize/start", methods=["POST"])
+def wiki_auto_start():
+    """미요약 노드를 백그라운드에서 자동 요약 시작 → 완료 후 graphify 자동 실행"""
+    global _auto_job
+    if _auto_job.get("running"):
+        return jsonify({"error": "이미 실행 중입니다"}), 409
+    limit = int((request.get_json(silent=True) or {}).get("limit", 200))
+    _auto_job = {"running": True, "total": 0, "done": 0, "failed": 0, "current": "", "cancel": False}
+    t = _threading.Thread(target=_run_summarize_then_graphify, args=(_auto_job, limit), daemon=True)
+    t.start()
+    return jsonify({"started": True})
+
+
+@app.route("/wiki/auto_summarize/cancel", methods=["POST"])
+def wiki_auto_cancel():
+    """실행 중인 자동 요약 취소"""
+    _auto_job["cancel"] = True
+    return jsonify({"cancel": True})
+
+
+@app.route("/graphify/run", methods=["POST"])
+def graphify_run():
+    """Graphify를 즉시 수동 실행 (백그라운드)"""
+    global _graphify_job
+    if _graphify_job.get("running"):
+        return jsonify({"error": "이미 실행 중입니다"}), 409
+    _graphify_job = {"running": True, "stage": "시작", "nodes": 0, "edges": 0,
+                     "communities": 0, "exported": 0, "error": ""}
+    t = _threading.Thread(target=_grunner.run_graphify, args=(_graphify_job,), daemon=True)
+    t.start()
+    return jsonify({"started": True})
+
+
+@app.route("/graphify/status", methods=["GET"])
+def graphify_status():
+    """Graphify 실행 상태 조회"""
+    html_exists = (_grunner.OUT_DIR / "graph.html").exists()
+    return jsonify({**_graphify_job, "html_ready": html_exists})
+
+
+@app.route("/graphify/graph.html", methods=["GET"])
+def graphify_html():
+    """생성된 graph.html 서빙"""
+    html_path = _grunner.OUT_DIR / "graph.html"
+    if not html_path.exists():
+        return "graph.html 없음 — Graphify를 먼저 실행하세요", 404
+    return send_file(str(html_path), mimetype="text/html")
+
+
+@app.route("/wiki/export", methods=["POST"])
+def wiki_export():
+    """Wiki 페이지를 마크다운 파일로 내보내기 (graphify 연동용)"""
+    data = request.get_json(silent=True) or {}
+    export_dir = data.get("dir", os.path.join(os.path.dirname(__file__), "..", "graphify-wiki"))
+    export_dir = os.path.abspath(export_dir)
+    os.makedirs(export_dir, exist_ok=True)
+
+    pages = wiki.list_wiki_pages()
+    written = 0
+    for page in pages:
+        if not page.get("wiki_content"):
+            continue
+        safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (page["title"] or page["id"]))
+        safe_name = safe_name.strip()[:80] or page["id"]
+        fpath = os.path.join(export_dir, f"{safe_name}.md")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(f"---\nfile_path: {page['file_path']}\nstatus: {page['status']}\n---\n\n")
+            f.write(page["wiki_content"])
+        written += 1
+
+    return jsonify({"success": True, "written": written, "dir": export_dir})
+
+
 @app.route("/profile/me", methods=["GET"])
 def profile_get():
     return jsonify({"profile": avatar_core.get_profile(), "labels": avatar_core.PROFILE_LABELS})

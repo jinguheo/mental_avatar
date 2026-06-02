@@ -50,7 +50,6 @@ def delete_subject(subject_id: str):
 
 
 def scan_subject(subject_id: str) -> dict:
-    """주체 폴더를 스캔해서 새 파일을 큐에 추가"""
     conn = get_conn()
     subject = conn.execute("SELECT * FROM subjects WHERE id=?", (subject_id,)).fetchone()
     if not subject:
@@ -108,45 +107,67 @@ def list_queue(subject_id: str = "", status: str = "") -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _set_queue_status(qid: str, status: str, error: str = ""):
+    """짧은 커넥션으로 큐 상태만 업데이트 — DB lock 최소화"""
+    conn = get_conn()
+    if status == "done":
+        conn.execute(
+            "UPDATE processing_queue SET status='done', processed_at=datetime('now','localtime'), error=NULL WHERE id=?",
+            (qid,)
+        )
+    elif status == "error":
+        conn.execute(
+            "UPDATE processing_queue SET status='error', error=? WHERE id=?",
+            (error[:500], qid)
+        )
+    else:
+        conn.execute("UPDATE processing_queue SET status=? WHERE id=?", (status, qid))
+    conn.commit()
+    conn.close()
+
+
 def process_next(subject_id: str = "", limit: int = 5) -> dict:
-    """pending 항목을 가져와 ingest + wiki 생성까지 처리"""
-    from . import wiki
+    """pending 항목을 가져와 ingest + 엔티티 추출 + wiki 생성까지 처리.
+    각 단계마다 커넥션을 열고 닫아 SQLite lock 방지."""
     from watcher.parsers import parse_file
-    from . import graph, embeddings
+    from . import graph, embeddings, wiki
     import hashlib
 
+    # ── pending 항목 조회 (짧은 커넥션) ──
     conn = get_conn()
     where = "status='pending'"
-    params = []
+    params: list = []
     if subject_id:
         where += " AND subject_id=?"; params.append(subject_id)
     rows = conn.execute(
         f"SELECT * FROM processing_queue WHERE {where} ORDER BY queued_at ASC LIMIT ?",
         params + [limit]
     ).fetchall()
+    items = [dict(r) for r in rows]
+    conn.close()
 
-    results = {"processed": 0, "failed": 0, "items": []}
+    results: dict = {"processed": 0, "failed": 0, "items": []}
 
-    for row in rows:
-        qid = row["id"]
+    for row in items:
+        qid   = row["id"]
         fpath = row["file_path"]
         fname = row["file_name"]
 
-        # processing 상태로 변경
-        conn.execute("UPDATE processing_queue SET status='processing' WHERE id=?", (qid,))
-        conn.commit()
+        # processing 표시 (짧은 커넥션)
+        _set_queue_status(qid, "processing")
 
         try:
-            # 1. ingest
+            # ── 1. 파일 파싱 ──
             chunks = parse_file(fpath)
             if not chunks:
                 raise ValueError("파싱 실패 또는 지원하지 않는 형식")
 
+            # ── 2. KG 노드 + 벡터 저장 (커넥션은 graph/embeddings 내부에서 관리) ──
             node_ids = []
             for chunk in chunks:
-                title   = chunk.get("title", fname)
-                content = chunk.get("content", "")
-                meta    = chunk.get("meta", {})
+                title       = chunk.get("title", fname)
+                content     = chunk.get("content", "")
+                meta        = chunk.get("meta", {})
                 source_type = meta.get("source_type", "unknown")
                 chunk_idx   = meta.get("chunk_index", 0)
                 fhash       = hashlib.md5(content.encode()).hexdigest()[:12]
@@ -163,38 +184,57 @@ def process_next(subject_id: str = "", limit: int = 5) -> dict:
                 })
                 node_ids.append(nid)
 
-            # 2. wiki 생성 (첫 청크 기준)
+            # ── 3. 엔티티/토픽 추출 (Ollama → MCP → API key → keyword) ──
             if node_ids and chunks[0].get("content", ""):
-                wiki.generate_wiki(
-                    node_id=node_ids[0],
-                    title=chunks[0].get("title", fname),
-                    content=chunks[0].get("content", ""),
-                    file_path=fpath,
-                )
+                try:
+                    from . import extractor
+                    first_title   = chunks[0].get("title", fname)
+                    first_content = chunks[0].get("content", "")
+                    extracted = extractor.extract(first_title, first_content)
+                    nid0 = node_ids[0]
+                    for topic in extracted.get("topics", []):
+                        graph.link_node_topic(nid0, topic)
+                    for ent in extracted.get("entities", []):
+                        ename = ent.get("name", "").strip()
+                        if not ename:
+                            continue
+                        eid = graph.upsert_entity(ename, ent.get("type", "concept"), ent.get("description", ""))
+                        graph.add_edge(nid0, eid, "mentions", 1.0)
+                    importance = extracted.get("importance", 0.5)
+                    graph.update_importance(nid0, importance - 0.5)
+                except Exception as ex:
+                    print(f"[queue] 엔티티 추출 경고 (무시됨): {ex}")
 
-            conn.execute(
-                "UPDATE processing_queue SET status='done', processed_at=datetime('now','localtime') WHERE id=?",
-                (qid,)
-            )
+            # ── 4. Wiki 생성 (Ollama 사용, 실패해도 done 처리) ──
+            wiki_status = "skipped"
+            if node_ids and chunks[0].get("content", ""):
+                try:
+                    result = wiki.generate_wiki(
+                        node_id=node_ids[0],
+                        title=chunks[0].get("title", fname),
+                        content=chunks[0].get("content", ""),
+                        file_path=fpath,
+                    )
+                    wiki_status = result.get("status", "done")
+                except Exception as ex:
+                    print(f"[queue] wiki 생성 경고 (무시됨): {ex}")
+
+            _set_queue_status(qid, "done")
             results["processed"] += 1
-            results["items"].append({"file": fname, "status": "done", "nodes": len(node_ids)})
+            results["items"].append({
+                "file": fname, "status": "done",
+                "nodes": len(node_ids), "wiki": wiki_status
+            })
 
         except Exception as e:
-            conn.execute(
-                "UPDATE processing_queue SET status='error', error=? WHERE id=?",
-                (str(e), qid)
-            )
+            _set_queue_status(qid, "error", str(e))
             results["failed"] += 1
             results["items"].append({"file": fname, "status": "error", "error": str(e)})
 
-        conn.commit()
-
-    conn.close()
     return results
 
 
 def reset_errors(subject_id: str = ""):
-    """error 상태 항목을 pending으로 되돌리기"""
     conn = get_conn()
     if subject_id:
         conn.execute(
@@ -210,7 +250,6 @@ def reset_errors(subject_id: str = ""):
 
 
 def auto_discover_subjects() -> dict:
-    """docs/ 하위 폴더를 주체로 자동 등록"""
     added = 0
     for entry in os.scandir(DOCS_DIR):
         if not entry.is_dir():
