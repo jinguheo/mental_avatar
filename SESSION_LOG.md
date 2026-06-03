@@ -372,3 +372,75 @@ XTTS(목소리)·SadTalker(영상) 개별 + 통합 모두 성공.
 - 모드 B(3D 인터랙티브, Phase 2): Ready Player Me + Inworld + three.js
 
 ---
+
+## 2026-06-03 (세션 9) — 3D 아바타 Face Mesh, STT/VAD 음성대화, 웹캠 캡처
+
+### 프로젝트 최종 목적 (사용자 명확화)
+외형(3D+2D) + 지식(문서 KG) + 행동/성격(대화 패턴) — 3축으로 "나와 똑같은 아바타" 구축.
+내가 읽은 문서, 대화 내용, 영상 등을 학습해 점차 나를 닮아가는 시스템.
+
+### 완료 항목
+
+#### 1. Graphify LLM 추출 업그레이드 (`core/graphify_runner.py`)
+- Ollama gemma4:e2b로 엔티티/관계 JSON 추출
+- 전역 엔티티 ID 재사용 (문서 간 노드 병합)
+- iris 랜드마크(468+) 제외, buildTriangles() 런타임 추출
+
+#### 2. 모드 A 비동기 영상 생성
+- `POST /avatar/generate_async` → job_id 즉시 반환
+- `GET /avatar/job/<id>` 3초 폴링, 단계 표시 (TTS→SadTalker→완료)
+- AvatarStudio.tsx: 📷 웹캠 촬영, 🎙 마이크 녹음, 📁 파일 선택
+
+#### 3. PDF/DOCX 업로드 → 큐 자동 등록
+- `POST /upload` 엔드포인트 + `enqueue_file()`
+- IngestTab: txt/md → 즉시 KG, pdf/docx → 큐 등록
+
+#### 4. Graphify 자동 트리거 확장
+- `/queue/process` 완료 후 done>0이면 Graphify 자동 실행
+
+#### 5. 3D 아바타 Face Mesh (Avatar3DStudio.tsx)
+- OrthographicCamera: landmark → world 좌표 직접 매핑
+- VideoTexture UV 매핑 (uv.x=lm.x, uv.y=1-lm.y, scaleX(-1) 보정)
+- 비디오 비율 자동 동기화 (video.videoWidth/Height)
+- 스케일 0.96 보정
+- MediaPipe 로컬 서빙 (`/mediapipe/wasm`, `/mediapipe/models`)
+
+#### 6. STT (faster-whisper)
+- `POST /stt/transcribe` — webm → ffmpeg → small 모델 → 한국어 텍스트
+- faster-whisper avatar 환경 설치 완료
+
+#### 7. VAD 자동 음성 대화
+- 🎤 클릭 → 음성 감지 대기 (임계값 20)
+- 말하면 자동 녹음 → 1.5초 침묵 시 자동 전송
+- Whisper STT → Claude AI → XTTS → 3D 아바타 립싱크
+- ⏺ 단발 녹음 모드도 지원
+
+#### 8. 웹캠 녹화 → 립싱크 영상
+- `POST /avatar/record_generate` — 오디오 webm → ffmpeg WAV → SadTalker 직접
+- 3D 아바타 탭에서 🎙 녹화 시작/완료 버튼
+
+#### 9. Claude 연결 개선
+- Anthropic API Key 직접 호출 fallback (MCP 없어도 동작)
+- 세션 만료(403) 시 2단계 자동 재연결
+- 🔄 재연결 버튼 (채팅 패널 우상단)
+- App.tsx 시작 시 claudeWebAutoConnect 자동 호출
+
+#### 10. my-dashboard 동기화
+- Avatar3DStudio.tsx: VAD 연속 대화 추가
+- AvatarStudio.tsx: 웹캠 촬영, 마이크 녹음 동기화
+
+#### 11. Graphify 설치
+- `pip install -e D:\MyWork\verilog\tools\graphify` (avatar 환경)
+
+### 알려진 이슈
+- Chrome 148 v20 암호화로 Claude.ai 세션 자동 갱신 불가
+  - 해결: F12→Application→Cookies→sessionKey 복사 → PowerShell로 MCP 저장
+- mental-avatar frontend (5174) Vite 수동 시작 필요
+
+### 다음 할 것
+1. Claude.ai 세션 갱신
+2. 프로파일 UI (`/profile/me` 연동)
+3. 행동/성격 학습 (대화 패턴 분석)
+4. Graphify 커뮤니티 레이블 LLM 자동 생성
+
+---
