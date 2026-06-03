@@ -40,6 +40,7 @@ export default function Avatar3DStudio({ settings }: Props) {
   const sceneRef    = useRef<THREE.Scene | null>(null)
   const cameraRef   = useRef<THREE.OrthographicCamera | null>(null)
   const faceMeshRef = useRef<THREE.Mesh | null>(null)
+  const headBackRef = useRef<THREE.Mesh | null>(null)   // 뒷머리 타원체
   const wireRef     = useRef<THREE.LineSegments | null>(null)
   const videoTexRef = useRef<THREE.VideoTexture | null>(null)
   const rafRef      = useRef<number>(0)
@@ -112,6 +113,14 @@ export default function Avatar3DStudio({ settings }: Props) {
     const faceMesh = new THREE.Mesh(faceGeo, faceMat)
     faceMeshRef.current = faceMesh
     scene.add(faceMesh)
+
+    // 뒷머리 타원체 (SphereGeometry → scale로 타원 표현)
+    const headGeo = new THREE.SphereGeometry(1, 32, 32)
+    const headMat = new THREE.MeshLambertMaterial({ color: 0xf0c090, side: THREE.FrontSide })
+    const headBack = new THREE.Mesh(headGeo, headMat)
+    headBack.visible = false   // 트래킹 시작 후 표시
+    headBackRef.current = headBack
+    scene.add(headBack)
 
     // Wireframe
     const wireGeo = new THREE.BufferGeometry()
@@ -227,6 +236,39 @@ export default function Avatar3DStudio({ settings }: Props) {
         ;(wire.material as THREE.LineBasicMaterial).color.setHSL(0.55 + open * 0.1, 1, 0.5 + open * 0.2)
       }
     }
+
+    // 뒷머리 타원체 업데이트 (귀-귀 width, 이마-턱 height 기반)
+    const head = headBackRef.current
+    if (head && lms.length > 454) {
+      const cam = cameraRef.current
+      const aspect = cam ? cam.right : 1
+      const S = 0.96
+
+      const toW = (lm: LM) => ({
+        x: -(lm.x - 0.5) * 2 * aspect * S,
+        y: -(lm.y - 0.5) * 2 * S,
+      })
+
+      const lEar  = toW(lms[234])   // 왼쪽 귀
+      const rEar  = toW(lms[454])   // 오른쪽 귀
+      const top   = toW(lms[10])    // 이마 상단
+      const chin  = toW(lms[152])   // 턱
+      const nose  = toW(lms[4])     // 코끝 (중심)
+
+      const hw = Math.abs(lEar.x - rEar.x) * 0.5          // 반너비
+      const hh = Math.abs(top.y  - chin.y)  * 0.55         // 반높이
+      const hd = hw * 0.85                                  // 깊이 (너비의 85%)
+
+      const cx = (lEar.x + rEar.x) * 0.5   // 중심 X
+      const cy = (top.y  + chin.y)  * 0.5   // 중심 Y
+
+      head.position.set(cx, cy, -0.52 - hd * 0.3)  // 얼굴 뒤쪽
+      head.scale.set(hw, hh, hd)
+      head.visible = true
+
+      // 피부색을 비디오 코끝 픽셀에서 근사 (VideoTexture가 있으면 약간 적용)
+      ;(head.material as THREE.MeshLambertMaterial).color.setHex(0xf0c090)
+    }
   }, [showWire])
 
   const trackLoop = useCallback((lm: unknown) => {
@@ -319,6 +361,7 @@ export default function Avatar3DStudio({ settings }: Props) {
       const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
       mat.map = null; mat.opacity = 0; mat.needsUpdate = true
     }
+    if (headBackRef.current) headBackRef.current.visible = false
     videoTexRef.current?.dispose()
     videoTexRef.current = null
     setStatus('idle'); setStatusMsg('')
