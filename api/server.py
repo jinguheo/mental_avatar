@@ -281,6 +281,35 @@ def decay():
 
 DOCS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "docs"))
 SUPPORTED_EXT = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".txt", ".md"}
+UPLOAD_DIR = os.path.join(DOCS_DIR, "uploads")
+
+
+@app.route("/upload", methods=["POST"])
+def upload_file():
+    """파일 업로드 → docs/uploads/ 저장 → 큐 자동 등록"""
+    if "file" not in request.files:
+        return jsonify({"error": "file 필드 없음"}), 400
+
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "파일명 없음"}), 400
+
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in SUPPORTED_EXT:
+        return jsonify({"error": f"지원하지 않는 형식: {ext}"}), 400
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    # 동일 파일명 충돌 방지
+    safe_name = f.filename.replace(" ", "_")
+    dest = os.path.join(UPLOAD_DIR, safe_name)
+    if os.path.exists(dest):
+        base, ext2 = os.path.splitext(safe_name)
+        dest = os.path.join(UPLOAD_DIR, f"{base}_{uuid.uuid4().hex[:6]}{ext2}")
+
+    f.save(dest)
+    result = queue_mgr.enqueue_file(dest)
+    return jsonify({"saved": dest, **result})
 
 
 @app.route("/files/list", methods=["GET"])
@@ -717,10 +746,19 @@ def queue_list():
 
 @app.route("/queue/process", methods=["POST"])
 def queue_process():
-    data = request.get_json(silent=True) or {}
-    sid = data.get("subject_id", "")
+    data  = request.get_json(silent=True) or {}
+    sid   = data.get("subject_id", "")
     limit = int(data.get("limit", 5))
-    return jsonify(queue_mgr.process_next(sid, limit))
+    result = queue_mgr.process_next(sid, limit)
+
+    # 큐 처리로 새 파일이 완료되면 Graphify 자동 트리거
+    if result.get("done", 0) > 0 and not _graphify_job.get("running"):
+        _graphify_job.update({"running": True, "stage": "시작", "error": ""})
+        t = _threading.Thread(target=_grunner.run_graphify, args=(_graphify_job,), daemon=True)
+        t.start()
+        result["graphify_triggered"] = True
+
+    return jsonify(result)
 
 
 @app.route("/queue/reset_errors", methods=["POST"])
@@ -735,6 +773,55 @@ def health():
     return jsonify({"status": "ok", "port": 8766})
 
 
+# ── STT (faster-whisper) ──────────────────────────────────
+_whisper_model = None
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        _whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+    return _whisper_model
+
+STT_TMP = Path(__file__).parent.parent / "tmp" / "stt"
+
+@app.route("/stt/transcribe", methods=["POST"])
+def stt_transcribe():
+    """오디오 파일 → 텍스트 변환 (faster-whisper)"""
+    audio = request.files.get("audio")
+    if not audio:
+        return jsonify({"error": "audio 필요"}), 400
+
+    STT_TMP.mkdir(parents=True, exist_ok=True)
+    ext = Path(audio.filename or "audio.webm").suffix or ".webm"
+    tmp_in  = STT_TMP / f"{uuid.uuid4().hex}{ext}"
+    tmp_wav = STT_TMP / f"{uuid.uuid4().hex}.wav"
+    audio.save(str(tmp_in))
+
+    # webm/ogg → wav 변환 (ffmpeg)
+    ffmpeg = str(SADTALKER_DIR / "ffmpeg.exe")
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", "-i", str(tmp_in), "-ar", "16000", "-ac", "1", str(tmp_wav)],
+            check=True, capture_output=True, timeout=30
+        )
+    except Exception as e:
+        tmp_in.unlink(missing_ok=True)
+        return jsonify({"error": f"오디오 변환 실패: {e}"}), 500
+    finally:
+        tmp_in.unlink(missing_ok=True)
+
+    try:
+        model = _get_whisper()
+        segments, info = model.transcribe(str(tmp_wav), language="ko", beam_size=5)
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        return jsonify({"text": text, "language": info.language})
+    except Exception as e:
+        return jsonify({"error": f"STT 실패: {e}"}), 500
+    finally:
+        tmp_wav.unlink(missing_ok=True)
+
+
 # ── Avatar Studio ────────────────────────────────────────────
 SADTALKER_DIR   = Path(r"D:\MyWork\SadTalker")
 AVATAR_TMP      = Path(__file__).parent.parent / "tmp" / "avatar"
@@ -742,6 +829,9 @@ AVATAR_DATA     = Path(__file__).parent.parent / "data"
 VOICE_SAMPLE    = AVATAR_DATA / "voice_sample.wav"
 PYTHON_EXE      = r"C:\Users\oem\miniconda3\envs\avatar\python.exe"   # SadTalker (numpy 1.26 패치판)
 XTTS_PYTHON_EXE = r"C:\Users\oem\miniconda3\envs\xtts\python.exe"     # Coqui XTTS v2
+
+# 비동기 생성 잡 저장소  {job_id: {stage, error, mp4_path}}
+_avatar_jobs: dict = {}
 
 
 @app.route("/avatar/register_voice", methods=["POST"])
@@ -809,6 +899,205 @@ tts.tts_to_file(
 
     return send_file(str(speech_path), mimetype="audio/wav",
                      as_attachment=False, download_name="speech.wav")
+
+
+def _run_avatar_job(job_id: str, face_path: Path, text: str, job_dir: Path) -> None:
+    """백그라운드 스레드: TTS → SadTalker 순서로 실행."""
+    job = _avatar_jobs[job_id]
+    speech_path = job_dir / "speech.wav"
+
+    # 1) TTS
+    job["stage"] = "tts"
+    tts_script = f"""
+import sys, os
+os.environ["COQUI_TOS_AGREED"] = "1"
+os.environ["TTS_HOME"] = r"D:\\MyWork\\mental-avatar\\models"
+sys.stdout.reconfigure(encoding='utf-8')
+from TTS.api import TTS
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+tts.tts_to_file(
+    text={repr(text)},
+    speaker_wav={repr(str(VOICE_SAMPLE))},
+    language="ko",
+    file_path={repr(str(speech_path))}
+)
+"""
+    tts_script_path = job_dir / "run_tts.py"
+    tts_script_path.write_text(tts_script, encoding="utf-8")
+    try:
+        subprocess.run([XTTS_PYTHON_EXE, str(tts_script_path)],
+                       check=True, capture_output=True, timeout=180)
+    except subprocess.CalledProcessError as e:
+        job["stage"] = "error"
+        job["error"] = f"TTS 실패: {e.stderr.decode(errors='replace')[:300]}"
+        return
+    except subprocess.TimeoutExpired:
+        job["stage"] = "error"
+        job["error"] = "TTS 타임아웃"
+        return
+
+    # 2) SadTalker
+    job["stage"] = "sadtalker"
+    result_dir = job_dir / "result"
+    cmd = [
+        PYTHON_EXE, str(SADTALKER_DIR / "inference.py"),
+        "--driven_audio", str(speech_path),
+        "--source_image", str(face_path),
+        "--result_dir",   str(result_dir),
+        "--still", "--preprocess", "full",
+        "--enhancer", "gfpgan", "--size", "512",
+    ]
+    sad_env = dict(os.environ)
+    sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
+    try:
+        subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
+                       capture_output=True, timeout=600, env=sad_env)
+    except subprocess.CalledProcessError as e:
+        job["stage"] = "error"
+        job["error"] = f"SadTalker 실패: {e.stderr.decode(errors='replace')[:300]}"
+        return
+    except subprocess.TimeoutExpired:
+        job["stage"] = "error"
+        job["error"] = "SadTalker 타임아웃 (600s)"
+        return
+
+    mp4_files = list(result_dir.rglob("*.mp4"))
+    if not mp4_files:
+        job["stage"] = "error"
+        job["error"] = "출력 영상 없음"
+        return
+
+    job["stage"] = "done"
+    job["mp4_path"] = str(mp4_files[0])
+
+
+@app.route("/avatar/generate_async", methods=["POST"])
+def avatar_generate_async():
+    """비동기 영상 생성: job_id 즉시 반환 후 백그라운드에서 TTS+SadTalker 실행."""
+    face_file = request.files.get("face")
+    text      = request.form.get("text", "").strip()
+
+    if not face_file:
+        return jsonify({"error": "face file required"}), 400
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    if not VOICE_SAMPLE.exists():
+        return jsonify({"error": "voice sample not registered"}), 400
+
+    job_id  = str(uuid.uuid4())
+    job_dir = AVATAR_TMP / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    face_ext  = Path(face_file.filename).suffix or ".jpg"
+    face_path = job_dir / f"face{face_ext}"
+    face_file.save(str(face_path))
+
+    _avatar_jobs[job_id] = {"stage": "queued", "error": "", "mp4_path": None}
+    t = _threading.Thread(target=_run_avatar_job,
+                          args=(job_id, face_path, text, job_dir), daemon=True)
+    t.start()
+    return jsonify({"job_id": job_id})
+
+
+def _run_record_job(job_id: str, face_path: Path, audio_path: Path, job_dir: Path) -> None:
+    """녹화 기반 잡: 오디오를 WAV로 변환 후 SadTalker 직접 실행 (XTTS 생략)."""
+    job = _avatar_jobs[job_id]
+    speech_path = job_dir / "speech.wav"
+
+    # 오디오 → WAV 변환 (ffmpeg)
+    job["stage"] = "audio_convert"
+    ffmpeg_path = str(SADTALKER_DIR / "ffmpeg.exe")
+    try:
+        subprocess.run(
+            [ffmpeg_path, "-y", "-i", str(audio_path), "-ar", "16000", "-ac", "1", str(speech_path)],
+            check=True, capture_output=True, timeout=60
+        )
+    except Exception as e:
+        job["stage"] = "error"
+        job["error"] = f"오디오 변환 실패: {e}"
+        return
+
+    # SadTalker 립싱크
+    job["stage"] = "sadtalker"
+    result_dir = job_dir / "result"
+    cmd = [
+        PYTHON_EXE, str(SADTALKER_DIR / "inference.py"),
+        "--driven_audio", str(speech_path),
+        "--source_image", str(face_path),
+        "--result_dir",   str(result_dir),
+        "--still", "--preprocess", "full",
+        "--enhancer", "gfpgan", "--size", "512",
+    ]
+    sad_env = dict(os.environ)
+    sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
+    try:
+        subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
+                       capture_output=True, timeout=600, env=sad_env)
+    except subprocess.CalledProcessError as e:
+        job["stage"] = "error"
+        job["error"] = f"SadTalker 실패: {e.stderr.decode(errors='replace')[:300]}"
+        return
+    except subprocess.TimeoutExpired:
+        job["stage"] = "error"; job["error"] = "SadTalker 타임아웃"; return
+
+    mp4_files = list(result_dir.rglob("*.mp4"))
+    if not mp4_files:
+        job["stage"] = "error"; job["error"] = "출력 영상 없음"; return
+
+    job["stage"] = "done"
+    job["mp4_path"] = str(mp4_files[0])
+
+
+@app.route("/avatar/record_generate", methods=["POST"])
+def avatar_record_generate():
+    """웹캠 녹화 기반 생성: 얼굴 이미지 + 오디오 → SadTalker 직접 실행."""
+    face_file  = request.files.get("face")
+    audio_file = request.files.get("audio")
+
+    if not face_file:
+        return jsonify({"error": "face 필요"}), 400
+    if not audio_file:
+        return jsonify({"error": "audio 필요"}), 400
+
+    job_id  = str(uuid.uuid4())
+    job_dir = AVATAR_TMP / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    face_ext  = Path(face_file.filename or "face.jpg").suffix or ".jpg"
+    face_path = job_dir / f"face{face_ext}"
+    face_file.save(str(face_path))
+
+    audio_ext  = Path(audio_file.filename or "audio.webm").suffix or ".webm"
+    audio_path = job_dir / f"audio{audio_ext}"
+    audio_file.save(str(audio_path))
+
+    _avatar_jobs[job_id] = {"stage": "queued", "error": "", "mp4_path": None}
+    t = _threading.Thread(target=_run_record_job,
+                          args=(job_id, face_path, audio_path, job_dir), daemon=True)
+    t.start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/avatar/job/<job_id>", methods=["GET"])
+def avatar_job_status(job_id: str):
+    job = _avatar_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify({
+        "stage":    job["stage"],
+        "error":    job.get("error", ""),
+        "done":     job["stage"] == "done",
+        "video_url": f"/avatar/job/{job_id}/video" if job["stage"] == "done" else None,
+    })
+
+
+@app.route("/avatar/job/<job_id>/video", methods=["GET"])
+def avatar_job_video(job_id: str):
+    job = _avatar_jobs.get(job_id)
+    if not job or job["stage"] != "done":
+        return jsonify({"error": "not ready"}), 404
+    return send_file(job["mp4_path"], mimetype="video/mp4",
+                     as_attachment=False, download_name="avatar.mp4")
 
 
 @app.route("/avatar/tts_generate", methods=["POST"])

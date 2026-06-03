@@ -174,45 +174,134 @@ def run_graphify(job: dict) -> None:
         job["running"] = False
 
 
+def _ollama_extract(title: str, content: str) -> dict | None:
+    """Ollama gemma4:e2b로 엔티티/관계 추출. 실패 시 None."""
+    import json
+    import urllib.request
+
+    OLLAMA_URL   = "http://localhost:11434/api/chat"
+    OLLAMA_MODEL = "gemma4:e2b"
+
+    prompt = f"""다음 문서에서 지식 그래프 구성 요소를 추출하세요.
+
+문서 제목: {title}
+문서 내용 (최대 2000자):
+{content[:2000]}
+
+반드시 아래 JSON 형식으로만 응답하세요 (다른 텍스트 없이):
+{{
+  "entities": [
+    {{"name": "엔티티명", "type": "concept|person|tool|paper|organization|technology"}}
+  ],
+  "relations": [
+    {{"from": "엔티티A", "to": "엔티티B", "relation": "relates_to|part_of|implements|applied_to"}}
+  ]
+}}"""
+
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0.1, "num_predict": 1024},
+    }).encode()
+
+    try:
+        req = urllib.request.Request(OLLAMA_URL, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+        text = data.get("message", {}).get("content", "")
+        # ```json ... ``` 제거
+        import re
+        if "```" in text:
+            m = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
+            if m:
+                text = m.group(1)
+        return json.loads(text.strip())
+    except Exception as ex:
+        print(f"[graphify_runner] Ollama 추출 실패: {ex}")
+        return None
+
+
 def _extract_semantic(files: list[str]) -> dict:
-    """변경된 파일에서 엔티티/관계 추출 (LLM 없이 키워드 기반 빠른 추출).
-    wiki 마크다운은 이미 구조화된 텍스트라 키워드로도 충분하다."""
+    """변경된 파일에서 엔티티/관계 추출.
+    Ollama gemma4:e2b 우선, 실패 시 키워드 기반 fallback."""
     import re
     nodes, edges = [], []
     seen_ids: set[str] = set()
+    seen_entity_ids: set[str] = set()
 
     for fpath in files:
         try:
             text = Path(fpath).read_text(encoding="utf-8")
             stem = Path(fpath).stem[:40].replace(" ", "_")
-
-            # 마크다운 헤더에서 개념 추출 (## 핵심 개념, ## 주요 내용 등)
-            concepts = re.findall(r'\*\*([^*]{2,40})\*\*', text)
-            backtick = re.findall(r'`([^`]{2,30})`', text)
-            all_concepts = list(dict.fromkeys(concepts + backtick))[:8]
+            title = Path(fpath).stem.replace("_", " ")
 
             # 문서 대표 노드
             doc_id = f"{stem}_doc"
             if doc_id not in seen_ids:
-                nodes.append({"id": doc_id, "label": Path(fpath).stem.replace("_", " "),
+                nodes.append({"id": doc_id, "label": title,
                               "file_type": "document", "source_file": fpath,
                               "source_location": None, "source_url": None,
                               "captured_at": None, "author": None, "contributor": None})
                 seen_ids.add(doc_id)
 
-            for concept in all_concepts:
-                cid = re.sub(r'[^a-zA-Z0-9가-힣]', '_', concept.lower())[:30]
-                cid = f"{stem}_{cid}"
-                if cid not in seen_ids:
-                    nodes.append({"id": cid, "label": concept,
-                                  "file_type": "document", "source_file": fpath,
-                                  "source_location": None, "source_url": None,
-                                  "captured_at": None, "author": None, "contributor": None})
-                    seen_ids.add(cid)
-                edges.append({"source": doc_id, "target": cid,
-                              "relation": "references", "confidence": "EXTRACTED",
-                              "confidence_score": 1.0, "source_file": fpath,
-                              "source_location": None, "weight": 1.0})
+            # Ollama LLM 추출 시도
+            extracted = _ollama_extract(title, text)
+
+            if extracted and extracted.get("entities"):
+                entity_id_map: dict[str, str] = {}
+                for ent in extracted["entities"][:15]:
+                    name = ent.get("name", "").strip()
+                    if not name or len(name) < 2:
+                        continue
+                    eid = re.sub(r'[^a-zA-Z0-9가-힣]', '_', name.lower())[:40]
+                    # 전역 중복 방지: 같은 엔티티명이면 동일 ID 재사용
+                    global_id = f"ent_{eid}"
+                    entity_id_map[name] = global_id
+                    if global_id not in seen_entity_ids:
+                        nodes.append({"id": global_id, "label": name,
+                                      "file_type": ent.get("type", "concept"),
+                                      "source_file": fpath,
+                                      "source_location": None, "source_url": None,
+                                      "captured_at": None, "author": None, "contributor": None})
+                        seen_entity_ids.add(global_id)
+                        seen_ids.add(global_id)
+                    # 문서 → 엔티티 엣지
+                    edges.append({"source": doc_id, "target": global_id,
+                                  "relation": "mentions", "confidence": "EXTRACTED",
+                                  "confidence_score": 1.0, "source_file": fpath,
+                                  "source_location": None, "weight": 1.0})
+
+                # 엔티티 간 관계 엣지
+                for rel in extracted.get("relations", [])[:20]:
+                    src_name = rel.get("from", "")
+                    tgt_name = rel.get("to", "")
+                    relation  = rel.get("relation", "relates_to")
+                    src_id = entity_id_map.get(src_name)
+                    tgt_id = entity_id_map.get(tgt_name)
+                    if src_id and tgt_id:
+                        edges.append({"source": src_id, "target": tgt_id,
+                                      "relation": relation, "confidence": "EXTRACTED",
+                                      "confidence_score": 0.9, "source_file": fpath,
+                                      "source_location": None, "weight": 1.2})
+            else:
+                # fallback: 마크다운 볼드/백틱 키워드
+                concepts = re.findall(r'\*\*([^*]{2,40})\*\*', text)
+                backtick = re.findall(r'`([^`]{2,30})`', text)
+                for concept in list(dict.fromkeys(concepts + backtick))[:8]:
+                    cid = f"{stem}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', concept.lower())[:30]}"
+                    if cid not in seen_ids:
+                        nodes.append({"id": cid, "label": concept,
+                                      "file_type": "concept", "source_file": fpath,
+                                      "source_location": None, "source_url": None,
+                                      "captured_at": None, "author": None, "contributor": None})
+                        seen_ids.add(cid)
+                    edges.append({"source": doc_id, "target": cid,
+                                  "relation": "references", "confidence": "EXTRACTED",
+                                  "confidence_score": 1.0, "source_file": fpath,
+                                  "source_location": None, "weight": 1.0})
+
         except Exception as ex:
             print(f"[graphify_runner] 추출 실패 {fpath}: {ex}")
 

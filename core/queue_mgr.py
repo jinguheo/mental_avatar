@@ -85,6 +85,47 @@ def scan_subject(subject_id: str) -> dict:
     return {"added": added, "skipped": skipped}
 
 
+def enqueue_file(file_path: str, subject_id: str = "") -> dict:
+    """파일 경로를 큐에 직접 등록. subject_id 없으면 'uploads' 기본 주체 사용."""
+    file_path = os.path.abspath(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in SUPPORTED_EXT:
+        return {"error": f"지원하지 않는 형식: {ext}"}
+
+    conn = get_conn()
+
+    # subject_id 없으면 'uploads' 주체 자동 생성/조회
+    if not subject_id:
+        row = conn.execute("SELECT id FROM subjects WHERE name='uploads'").fetchone()
+        if row:
+            subject_id = row["id"]
+        else:
+            subject_id = str(uuid.uuid4())
+            upload_folder = os.path.join(DOCS_DIR, "uploads")
+            conn.execute(
+                "INSERT INTO subjects (id, name, folder_path, description, priority) VALUES (?,?,?,?,?)",
+                (subject_id, "uploads", upload_folder, "웹 업로드 파일", 5)
+            )
+
+    # 중복 체크
+    existing = conn.execute(
+        "SELECT id FROM processing_queue WHERE file_path=?", (file_path,)
+    ).fetchone()
+    if existing:
+        conn.close()
+        return {"queued": False, "reason": "already_queued", "id": existing["id"]}
+
+    qid = str(uuid.uuid4())
+    fname = os.path.basename(file_path)
+    conn.execute(
+        "INSERT INTO processing_queue (id, subject_id, file_path, file_name) VALUES (?,?,?,?)",
+        (qid, subject_id, file_path, fname)
+    )
+    conn.commit()
+    conn.close()
+    return {"queued": True, "id": qid, "file_name": fname}
+
+
 # ── 큐 항목 ────────────────────────────────────────────
 
 def list_queue(subject_id: str = "", status: str = "") -> list[dict]:

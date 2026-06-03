@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { DEFAULT_SETTINGS, type Settings } from './types'
+import { claudeWebAutoConnect, claudeWebCaptureSession } from './services/claudeWeb'
 import AvatarStudio from './views/AvatarStudio'
 import Avatar3DStudio from './views/Avatar3DStudio'
 import KnowledgeGraph from './views/KnowledgeGraph'
@@ -20,6 +21,16 @@ function loadSettings(): Settings {
 export default function App() {
   const [tab, setTab] = useState<Tab>('kg')
   const [settings, setSettings] = useState<Settings>(loadSettings)
+
+  // MCP 서버에서 캐시된 세션키 자동 조회 (앱 시작 시, quick_only)
+  useEffect(() => {
+    if (!settings.mcpEndpoint) return
+    claudeWebAutoConnect(settings.mcpEndpoint).then(key => {
+      if (key && key !== settings.claudeSessionKey) {
+        setSettings(prev => ({ ...prev, claudeSessionKey: key }))
+      }
+    })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))

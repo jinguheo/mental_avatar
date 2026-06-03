@@ -1269,8 +1269,7 @@ function IngestTab() {
     } finally { setLoading(false) }
   }
 
-  const ingestFiles = async (files: File[]) => {
-    setFileResults([])
+  const ingestTextFiles = async (files: File[]) => {
     for (const file of files) {
       try {
         const content = await file.text()
@@ -1279,22 +1278,46 @@ function IngestTab() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ title: file.name, content, source_type: file.name.split('.').pop() ?? 'text' }),
         })
-        setFileResults(prev => [...prev, { name: file.name, ok: true, msg: '추가 완료' }])
+        setFileResults(prev => [...prev, { name: file.name, ok: true, msg: 'KG에 추가 완료' }])
       } catch {
-        setFileResults(prev => [...prev, { name: file.name, ok: false, msg: '실패 (바이너리 파일은 파일 탭에서 처리)' }])
+        setFileResults(prev => [...prev, { name: file.name, ok: false, msg: '추가 실패' }])
       }
     }
   }
 
+  const uploadBinaryFiles = async (files: File[]) => {
+    for (const file of files) {
+      try {
+        const form = new FormData()
+        form.append('file', file)
+        const res  = await fetch(`${API}/upload`, { method: 'POST', body: form })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        const queued = data.queued === false ? '이미 큐에 있음' : '큐에 등록됨 (파일 탭에서 처리)'
+        setFileResults(prev => [...prev, { name: file.name, ok: true, msg: queued }])
+      } catch (e) {
+        setFileResults(prev => [...prev, { name: file.name, ok: false, msg: String(e) }])
+      }
+    }
+  }
+
+  const ingestFiles = async (files: File[]) => {
+    setFileResults([])
+    const textFiles = files.filter(f => /\.(txt|md|csv)$/i.test(f.name))
+    const binFiles  = files.filter(f => /\.(pdf|docx?|xlsx?|pptx?)$/i.test(f.name))
+    const unsupported = files.filter(f => !textFiles.includes(f) && !binFiles.includes(f))
+    if (textFiles.length) await ingestTextFiles(textFiles)
+    if (binFiles.length)  await uploadBinaryFiles(binFiles)
+    for (const f of unsupported) {
+      setFileResults(prev => [...prev, { name: f.name, ok: false, msg: '지원하지 않는 형식' }])
+    }
+  }
+
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false)
-    const files = Array.from(e.dataTransfer.files)
-    const textFiles = files.filter(f => /\.(txt|md|csv)$/i.test(f.name))
-    const binFiles  = files.filter(f => /\.(pdf|docx|xlsx|pptx)$/i.test(f.name))
-    if (textFiles.length) ingestFiles(textFiles)
-    if (binFiles.length) setFileResults(prev => [...prev, ...binFiles.map(f => ({
-      name: f.name, ok: false, msg: 'PDF/DOCX는 서버 docs/ 폴더에 넣고 파일 탭에서 처리하세요'
-    }))])
+    ingestFiles(Array.from(e.dataTransfer.files))
   }
 
   return (
@@ -1340,25 +1363,38 @@ function IngestTab() {
       {/* 파일 드롭 */}
       <div className="w-72 flex flex-col gap-3 shrink-0">
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold text-gray-700">파일 드롭</h3>
-          <span className="text-[10px] text-gray-400">txt, md, csv 직접 추가</span>
+          <h3 className="text-xs font-semibold text-gray-700">파일 업로드</h3>
+          <span className="text-[10px] text-gray-400">txt/md → 즉시 KG · PDF/DOCX → 큐 등록</span>
         </div>
 
         <div
           onDragOver={e => { e.preventDefault(); setDragging(true) }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
+          onClick={() => fileInputRef.current?.click()}
           className={`flex-1 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center gap-3 transition cursor-pointer
-            ${dragging ? 'border-gray-400 bg-gray-50' : 'border-gray-200 bg-gray-50'}`}
+            ${dragging ? 'border-blue-400 bg-blue-50' : 'border-gray-200 bg-gray-50 hover:border-gray-400 hover:bg-gray-100'}`}
         >
           <div className="text-3xl">📂</div>
-          <p className="text-xs text-gray-400 text-center leading-relaxed">
-            txt / md / csv 파일을<br />여기에 드래그하세요
+          <p className="text-xs text-gray-500 text-center leading-relaxed font-medium">
+            파일을 드래그하거나 클릭
           </p>
-          <p className="text-[10px] text-gray-300 text-center">
-            PDF·DOCX 등은 서버 docs/ 폴더에<br />넣고 파일 탭에서 처리하세요
-          </p>
+          <div className="text-[10px] text-gray-400 text-center leading-relaxed">
+            <div className="flex gap-1 flex-wrap justify-center">
+              {['txt', 'md', 'pdf', 'docx', 'xlsx', 'pptx'].map(ext => (
+                <span key={ext} className="px-1.5 py-0.5 bg-white border border-gray-200 rounded text-gray-500">{ext}</span>
+              ))}
+            </div>
+          </div>
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept=".txt,.md,.csv,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+          className="hidden"
+          onChange={e => { if (e.target.files) ingestFiles(Array.from(e.target.files)); e.target.value = '' }}
+        />
 
         {fileResults.length > 0 && (
           <div className="space-y-1 max-h-48 overflow-y-auto">
