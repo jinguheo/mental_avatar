@@ -10,15 +10,19 @@ const STAGE_LABELS: Record<string, string> = {
   error:      '오류 발생',
 }
 
+interface HistoryItem { job_id: string; created_at: string; video_url: string; thumb_url: string }
+
 export default function AvatarStudio() {
   const [faceFile, setFaceFile]               = useState<File | null>(null)
   const [facePreview, setFacePreview]         = useState<string | null>(null)
+  const [faceRegistered, setFaceRegistered]   = useState(false)
   const [text, setText]                       = useState('')
   const [voiceRegistered, setVoiceRegistered] = useState(false)
   const [videoUrl, setVideoUrl]               = useState<string | null>(null)
   const [loading, setLoading]                 = useState(false)
   const [error, setError]                     = useState<string | null>(null)
   const [stage, setStage]                     = useState('')
+  const [history, setHistory]                 = useState<HistoryItem[]>([])
   const [jobId, setJobId]                     = useState<string | null>(null)
   const [webcamActive, setWebcamActive]       = useState(false)
   const [micRecording, setMicRecording]       = useState(false)
@@ -32,11 +36,22 @@ export default function AvatarStudio() {
   const micChunks     = useRef<Blob[]>([])
   const pollRef       = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  const loadHistory = useCallback(async () => {
+    try {
+      const d = await (await fetch(`${API}/avatar/history`)).json()
+      setHistory(d.history ?? [])
+    } catch { /* ignore */ }
+  }, [])
+
   useEffect(() => {
     fetch(`${API}/avatar/voice_status`)
       .then(r => r.json())
-      .then(d => setVoiceRegistered(d.registered ?? false))
+      .then(d => {
+        setVoiceRegistered(d.registered ?? false)
+        setFaceRegistered(d.face_registered ?? false)
+      })
       .catch(() => {})
+    loadHistory()
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
       webcamStream.current?.getTracks().forEach(t => t.stop())
@@ -54,7 +69,7 @@ export default function AvatarStudio() {
         const data = await res.json()
         setStage(STAGE_LABELS[data.stage] ?? data.stage)
         if (data.stage === 'done') {
-          stopPolling(); setVideoUrl(`${API}/avatar/job/${id}/video`); setLoading(false)
+          stopPolling(); setVideoUrl(`${API}/avatar/job/${id}/video`); setLoading(false); loadHistory()
         } else if (data.stage === 'error') {
           stopPolling(); setError(data.error || '알 수 없는 오류'); setStage(''); setLoading(false)
         }
@@ -161,14 +176,21 @@ export default function AvatarStudio() {
     } catch { setError('목소리 등록 실패') }
   }
 
-  const canGenerate = !!faceFile && !!text.trim() && voiceRegistered && !loading
+  const canGenerate = (!!faceFile || faceRegistered) && !!text.trim() && voiceRegistered && !loading
 
   const handleGenerate = async () => {
-    if (!canGenerate || !faceFile) return
+    if (!canGenerate) return
     stopPolling(); setLoading(true); setError(null); setVideoUrl(null); setStage('요청 전송 중…')
     try {
       const form = new FormData()
-      form.append('face', faceFile)
+      if (faceFile) {
+        form.append('face', faceFile)
+      } else {
+        // 등록된 얼굴 사진을 서버에서 Blob으로 가져와서 첨부
+        const faceRes = await fetch(`${API}/avatar/face`)
+        const faceBlob = await faceRes.blob()
+        form.append('face', faceBlob, 'face.jpg')
+      }
       form.append('text', text)
       const res  = await fetch(`${API}/avatar/generate_async`, { method: 'POST', body: form })
       const data = await res.json()
@@ -215,7 +237,9 @@ export default function AvatarStudio() {
               >
                 {facePreview
                   ? <img src={facePreview} className="w-full h-full object-cover" alt="face" />
-                  : <span className="text-gray-400 text-sm">클릭하여 이미지 선택</span>
+                  : faceRegistered
+                    ? <img src={`${API}/avatar/face?t=${Date.now()}`} className="w-full h-full object-cover" alt="등록된 얼굴" />
+                    : <span className="text-gray-400 text-sm">클릭하여 이미지 선택</span>
                 }
               </button>
               <button onClick={openWebcam}
@@ -252,6 +276,12 @@ export default function AvatarStudio() {
             </button>
           </div>
           {micStatus && <p className="text-xs mt-1 text-gray-500">{micStatus}</p>}
+          {voiceRegistered && (
+            <div className="mt-2">
+              <p className="text-[10px] text-gray-400 mb-1">등록된 목소리 샘플</p>
+              <audio controls src={`${API}/avatar/voice_sample`} className="w-full h-8" style={{ height: '32px' }} />
+            </div>
+          )}
           <input ref={voiceInputRef} type="file" accept="audio/*" className="hidden" onChange={onVoiceChange} />
         </div>
 
@@ -291,8 +321,8 @@ export default function AvatarStudio() {
         {error && <p className="text-xs text-red-500">{error}</p>}
       </div>
 
-      {/* 오른쪽: 결과 */}
-      <div className="flex-1 flex items-center justify-center bg-gray-50 rounded-2xl border border-gray-100">
+      {/* 가운데: 결과 영상 */}
+      <div className="flex-1 flex items-center justify-center bg-gray-50 rounded-2xl border border-gray-100 min-w-0">
         {videoUrl
           ? <video src={videoUrl} controls autoPlay loop className="max-h-full rounded-2xl shadow-lg" />
           : loading
@@ -311,6 +341,24 @@ export default function AvatarStudio() {
             )
         }
       </div>
+
+      {/* 오른쪽: 이전 생성 목록 */}
+      {history.length > 0 && (
+        <div className="w-48 shrink-0 flex flex-col gap-2 overflow-y-auto">
+          <p className="text-xs font-semibold text-gray-600 shrink-0">이전 생성 목록</p>
+          {history.map(h => (
+            <button key={h.job_id}
+              onClick={() => setVideoUrl(`${API}${h.video_url}`)}
+              className={`rounded-xl overflow-hidden border-2 transition ${
+                videoUrl === `${API}${h.video_url}` ? 'border-gray-900' : 'border-transparent hover:border-gray-300'
+              }`}>
+              <img src={`${API}${h.thumb_url}`} className="w-full aspect-square object-cover" alt="thumb"
+                onError={e => { (e.target as HTMLImageElement).src = '' }} />
+              <div className="text-[10px] text-gray-500 px-1 py-0.5 bg-white">{h.created_at}</div>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

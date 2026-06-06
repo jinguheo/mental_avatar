@@ -924,7 +924,23 @@ def avatar_register_voice():
         return jsonify({"error": "sample file required"}), 400
 
     AVATAR_DATA.mkdir(parents=True, exist_ok=True)
-    sample.save(str(VOICE_SAMPLE))
+    raw_path = AVATAR_DATA / "voice_sample_raw.tmp"
+    sample.save(str(raw_path))
+
+    # WebM/OGG 등 브라우저 포맷 → PCM WAV 자동 변환
+    ffmpeg_path = str(SADTALKER_DIR / "ffmpeg.exe")
+    try:
+        subprocess.run(
+            [ffmpeg_path, "-y", "-i", str(raw_path),
+             "-ar", "22050", "-ac", "1", "-c:a", "pcm_s16le", str(VOICE_SAMPLE)],
+            check=True, capture_output=True, timeout=30
+        )
+    except Exception:
+        # ffmpeg 실패 시 원본 그대로 저장
+        import shutil
+        shutil.copy(str(raw_path), str(VOICE_SAMPLE))
+    finally:
+        raw_path.unlink(missing_ok=True)
 
     import wave, contextlib
     duration = 0.0
@@ -939,7 +955,34 @@ def avatar_register_voice():
 
 @app.route("/avatar/voice_status", methods=["GET"])
 def avatar_voice_status():
-    return jsonify({"registered": VOICE_SAMPLE.exists()})
+    FACE_FILE = AVATAR_DATA / "face.jpg"
+    return jsonify({
+        "registered": VOICE_SAMPLE.exists(),
+        "face_registered": FACE_FILE.exists(),
+    })
+
+@app.route("/avatar/voice_sample", methods=["GET"])
+def avatar_voice_sample():
+    if not VOICE_SAMPLE.exists():
+        return jsonify({"error": "not registered"}), 404
+    return send_file(str(VOICE_SAMPLE), mimetype="audio/wav")
+
+@app.route("/avatar/face", methods=["GET"])
+def avatar_face():
+    FACE_FILE = AVATAR_DATA / "face.jpg"
+    if not FACE_FILE.exists():
+        return jsonify({"error": "not registered"}), 404
+    return send_file(str(FACE_FILE), mimetype="image/jpeg")
+
+@app.route("/avatar/register_face", methods=["POST"])
+def avatar_register_face():
+    f = request.files.get("face")
+    if not f:
+        return jsonify({"error": "face file required"}), 400
+    AVATAR_DATA.mkdir(parents=True, exist_ok=True)
+    dest = AVATAR_DATA / "face.jpg"
+    f.save(str(dest))
+    return jsonify({"status": "ok"})
 
 
 @app.route("/avatar/tts_only", methods=["POST"])
@@ -1181,6 +1224,60 @@ def avatar_job_video(job_id: str):
         return jsonify({"error": "not ready"}), 404
     return send_file(job["mp4_path"], mimetype="video/mp4",
                      as_attachment=False, download_name="avatar.mp4")
+
+
+@app.route("/avatar/history", methods=["GET"])
+def avatar_history():
+    """이전에 생성된 영상 목록 반환 (최신순)"""
+    results = []
+    if AVATAR_TMP.exists():
+        for job_dir in AVATAR_TMP.iterdir():
+            if not job_dir.is_dir():
+                continue
+            job_id = job_dir.name
+            # result 폴더 바로 아래 최종 mp4 (타임스탬프.mp4 형태)
+            mp4_files = sorted(
+                [f for f in job_dir.glob("result/*.mp4")],
+                key=lambda f: f.stat().st_mtime, reverse=True
+            )
+            if not mp4_files:
+                continue
+            mp4 = mp4_files[0]
+            face_files = list(job_dir.glob("face.*"))
+            results.append({
+                "job_id": job_id,
+                "created_at": mp4.stat().st_mtime,
+                "video_url": f"/avatar/history/{job_id}/video",
+                "thumb_url": f"/avatar/history/{job_id}/thumb",
+                "has_face": len(face_files) > 0,
+            })
+    results.sort(key=lambda x: x["created_at"], reverse=True)
+    for r in results:
+        import datetime
+        r["created_at"] = datetime.datetime.fromtimestamp(r["created_at"]).strftime("%Y-%m-%d %H:%M")
+    return jsonify({"history": results[:20]})
+
+
+@app.route("/avatar/history/<job_id>/video", methods=["GET"])
+def avatar_history_video(job_id: str):
+    job_dir = AVATAR_TMP / job_id
+    if not job_dir.exists():
+        return jsonify({"error": "not found"}), 404
+    mp4_files = sorted(job_dir.glob("result/*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not mp4_files:
+        return jsonify({"error": "no video"}), 404
+    return send_file(str(mp4_files[0]), mimetype="video/mp4", as_attachment=False)
+
+
+@app.route("/avatar/history/<job_id>/thumb", methods=["GET"])
+def avatar_history_thumb(job_id: str):
+    """얼굴 사진을 썸네일로 반환"""
+    job_dir = AVATAR_TMP / job_id
+    for ext in ["jpg", "jpeg", "png"]:
+        face = job_dir / f"face.{ext}"
+        if face.exists():
+            return send_file(str(face), mimetype=f"image/{ext}")
+    return jsonify({"error": "no thumb"}), 404
 
 
 @app.route("/avatar/tts_generate", methods=["POST"])
