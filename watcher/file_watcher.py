@@ -43,15 +43,31 @@ class DocHandler(FileSystemEventHandler):
             print(f"[watcher] 오류: {e}")
 
 
+def _process_queue():
+    try:
+        resp = requests.post(f"{API_BASE}/queue/process", json={"limit": 5}, timeout=300)
+        data = resp.json()
+        done = data.get("done", 0)
+        if done > 0:
+            print(f"[watcher] 큐 처리 완료: {done}개")
+    except Exception as e:
+        print(f"[watcher] 큐 처리 오류: {e}")
+
+
 def start():
     os.makedirs(DOCS_DIR, exist_ok=True)
     observer = Observer()
     observer.schedule(DocHandler(), DOCS_DIR, recursive=True)
     observer.start()
     print(f"[watcher] 감시 시작: {DOCS_DIR}")
+    tick = 0
     try:
         while True:
             time.sleep(2)
+            tick += 2
+            if tick >= 30:
+                tick = 0
+                _process_queue()
     except KeyboardInterrupt:
         observer.stop()
     observer.join()

@@ -124,6 +124,52 @@ def ingest():
     return jsonify({"success": True, "node_ids": ids, "count": len(ids)})
 
 
+def _graphify_community_search(q: str) -> list[dict]:
+    """graph.json에서 쿼리와 관련된 커뮤니티 노드를 검색."""
+    import json as _json
+    graph_path = os.path.join(os.path.dirname(__file__), "..", "graphify-out", "graph.json")
+    labels_path = os.path.join(os.path.dirname(__file__), "..", "graphify-out", ".graphify_labels.json")
+    if not os.path.exists(graph_path):
+        return []
+    try:
+        gdata  = _json.loads(open(graph_path, encoding="utf-8").read())
+        labels = _json.loads(open(labels_path, encoding="utf-8").read()) if os.path.exists(labels_path) else {}
+        q_low  = q.lower()
+        matched_communities: set[int] = set()
+        results = []
+        # 1단계: 쿼리와 레이블이 매칭되는 커뮤니티 찾기
+        for cid, label in labels.items():
+            if q_low in label.lower():
+                matched_communities.add(int(cid))
+        # 2단계: 노드 레이블에서 직접 매칭
+        for node in gdata.get("nodes", []):
+            label = node.get("label", "")
+            cid   = node.get("community")
+            if q_low in label.lower():
+                matched_communities.add(cid)
+        # 3단계: 매칭된 커뮤니티의 문서 노드 수집
+        seen = set()
+        for node in gdata.get("nodes", []):
+            if node.get("community") in matched_communities and node.get("file_type") == "document":
+                nid = node["id"]
+                if nid in seen:
+                    continue
+                seen.add(nid)
+                cid = node.get("community")
+                results.append({
+                    "id": nid,
+                    "title": node.get("label", nid),
+                    "source_type": "graphify",
+                    "community": labels.get(str(cid), f"Community {cid}"),
+                    "distance": 0.0,
+                    "document": f"[Graphify] 커뮤니티: {labels.get(str(cid), '')}",
+                    "_source": "graphify",
+                })
+        return results[:5]
+    except Exception:
+        return []
+
+
 @app.route("/search", methods=["GET"])
 def search():
     q = request.args.get("q", "")
@@ -137,14 +183,23 @@ def search():
 
     if mode == "semantic":
         results = embeddings.search(q, n_results=limit)
-        # node 정보 보완
         for r in results:
             node = graph.get_node(r["id"])
             if node:
                 r["title"] = node["title"]
                 r["source_type"] = node["source_type"]
+            r["_source"] = "kg"
     else:
         results = graph.search_nodes(q, limit=limit)
+        for r in results:
+            r["_source"] = "kg"
+
+    # Graphify 커뮤니티 결과 병합 (중복 제거)
+    kg_titles = {r.get("title", "").lower() for r in results}
+    gf_results = _graphify_community_search(q)
+    for gf in gf_results:
+        if gf["title"].lower() not in kg_titles:
+            results.append(gf)
 
     return jsonify({"results": results, "count": len(results)})
 
@@ -179,10 +234,25 @@ def get_graph_all():
     """전체 노드+엣지 반환 (시각화용)"""
     limit = int(request.args.get("limit", 100))
     from db.init_db import get_conn as _get_conn
-    nodes = graph.list_nodes(limit=limit)
+    conn2 = _get_conn()
+    doc_rows = conn2.execute(
+        "SELECT * FROM nodes WHERE source_type NOT IN ('concept') ORDER BY updated_at DESC LIMIT 300"
+    ).fetchall()
+    concept_rows = conn2.execute(
+        "SELECT * FROM nodes WHERE source_type='concept' ORDER BY importance DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn2.close()
+    seen = {}
+    for r in [*doc_rows, *concept_rows]:
+        seen[r["id"]] = dict(r)
+    nodes = list(seen.values())
+    node_ids = {n["id"] for n in nodes}
+    placeholders = ",".join("?" * len(node_ids))
     conn = _get_conn()
     edges = conn.execute(
-        "SELECT from_id, to_id, relation, weight FROM edges LIMIT 500"
+        f"SELECT from_id, to_id, relation, weight FROM edges "
+        f"WHERE from_id IN ({placeholders}) AND to_id IN ({placeholders}) LIMIT 2000",
+        list(node_ids) * 2
     ).fetchall()
     conn.close()
     return jsonify({
@@ -356,6 +426,17 @@ def files_open():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/activity/log", methods=["POST"])
+def activity_log():
+    """행동 로그 기록 (node_id 포함) — 검색결과 클릭, Wiki 열람 등"""
+    data = request.get_json(silent=True) or {}
+    node_id = data.get("node_id")   # 없으면 None
+    action  = data.get("action", "view")
+    context = data.get("context", "")
+    graph.log_activity(node_id, action, context)
+    return jsonify({"ok": True})
+
+
 @app.route("/wiki/list", methods=["GET"])
 def wiki_list():
     return jsonify({"pages": wiki.list_wiki_pages()})
@@ -429,8 +510,10 @@ import threading as _threading
 from core import graphify_runner as _grunner
 
 _auto_job: dict    = {"running": False, "total": 0, "done": 0, "failed": 0, "current": "", "cancel": False}
+_graphify_html = os.path.join(os.path.dirname(__file__), "..", "graphify-out", "graph.html")
 _graphify_job: dict = {"running": False, "stage": "", "nodes": 0, "edges": 0,
-                        "communities": 0, "exported": 0, "error": ""}
+                        "communities": 0, "exported": 0, "error": "",
+                        "html_ready": os.path.exists(_graphify_html)}
 
 
 def _run_summarize_then_graphify(job: dict, limit: int) -> None:

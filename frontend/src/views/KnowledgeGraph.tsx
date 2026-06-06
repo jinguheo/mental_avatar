@@ -127,31 +127,8 @@ function SearchTab({ settings }: { settings: Settings }) {
     <div className="flex gap-5 h-full min-h-0">
       {/* 왼쪽: 검색 */}
       <div className="flex-1 flex flex-col min-h-0">
-        {/* 통계 바 */}
-        {stats && (
-          <div className="flex gap-3 mb-4 flex-wrap">
-            {[
-              { label: '노드', value: stats.nodes },
-              { label: '엣지', value: stats.edges },
-              { label: '토픽', value: stats.topics },
-              { label: '벡터', value: stats.vector_count },
-            ].map(s => (
-              <div key={s.label} className="bg-gray-50 border border-surface-border rounded-xl px-3 py-1.5 text-center">
-                <div className="text-lg font-bold text-gray-900">{s.value}</div>
-                <div className="text-[10px] text-gray-500">{s.label}</div>
-              </div>
-            ))}
-            {Object.entries(stats.by_source).map(([src, cnt]) => (
-              <div key={src} className="border border-surface-border rounded-xl px-3 py-1.5 text-center" style={{ borderColor: SOURCE_COLOR[src] + '60' }}>
-                <div className="text-lg font-bold" style={{ color: SOURCE_COLOR[src] }}>{cnt}</div>
-                <div className="text-[10px] text-gray-500">{src}</div>
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* 검색 입력 */}
-        <div className="flex gap-2 mb-3">
+        <div className="flex gap-2 mb-4">
           <input
             className="flex-1 border border-surface-border rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-gray-400 bg-white"
             placeholder="지식 그래프 시맨틱 검색..."
@@ -168,21 +145,67 @@ function SearchTab({ settings }: { settings: Settings }) {
           </button>
         </div>
 
+        {/* 통계 요약 (검색 결과 없을 때만 표시) */}
+        {results.length === 0 && stats && (() => {
+          const DOC_TYPES = ['pdf','pptx','docx','note','txt','md','file']
+          const docCount = DOC_TYPES.reduce((s, t) => s + (stats.by_source[t] ?? 0), 0)
+          const conceptCount = stats.by_source['concept'] ?? 0
+          const topSources = Object.entries(stats.by_source)
+            .filter(([src]) => DOC_TYPES.includes(src) && stats.by_source[src] > 0)
+            .sort((a, b) => b[1] - a[1])
+          return (
+            <div className="mb-4 space-y-3">
+              {/* 핵심 수치 */}
+              <div className="flex gap-3">
+                {[
+                  { label: '문서', value: docCount, color: '#6366f1' },
+                  { label: '개념', value: conceptCount, color: '#f59e0b' },
+                  { label: '토픽', value: stats.topics, color: '#10b981' },
+                  { label: '연결', value: stats.edges, color: '#64748b' },
+                ].map(s => (
+                  <div key={s.label} className="flex-1 rounded-xl border border-surface-border px-3 py-2 text-center">
+                    <div className="text-xl font-bold" style={{ color: s.color }}>{s.value}</div>
+                    <div className="text-[10px] text-gray-500">{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              {/* 문서 종류 */}
+              {topSources.length > 0 && (
+                <div className="flex gap-2 flex-wrap">
+                  {topSources.map(([src, cnt]) => (
+                    <span key={src} className="text-[11px] px-2.5 py-1 rounded-full border font-medium"
+                      style={{ borderColor: SOURCE_COLOR[src] + '80', color: SOURCE_COLOR[src], background: SOURCE_COLOR[src] + '12' }}>
+                      {src} {cnt}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })()}
+
         {/* 검색 결과 */}
         <div className="flex-1 overflow-y-auto space-y-2 pr-1">
           {results.length === 0 && !loading && (
             <div className="text-center text-gray-400 text-sm mt-10">검색어를 입력하고 Enter를 누르세요</div>
           )}
           {results.map(r => (
-            <div key={r.id} className="border border-surface-border rounded-xl p-3 hover:bg-gray-50 transition-colors">
+            <div key={r.id}
+              className={`border rounded-xl p-3 hover:bg-gray-50 transition-colors cursor-pointer ${r._source === 'graphify' ? 'border-purple-200 bg-purple-50/30' : 'border-surface-border'}`}
+              onClick={() => apiFetch('/activity/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ node_id: r.id, action: 'view', context: r.title || '' }) }).catch(() => {})}>
               <div className="flex items-start justify-between gap-2 mb-1">
                 <span className="font-medium text-sm text-gray-900 truncate">{r.title || '(제목 없음)'}</span>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
-                    style={{ background: SOURCE_COLOR[r.source_type] + '20', color: SOURCE_COLOR[r.source_type] }}>
-                    {r.source_type}
-                  </span>
-                  <span className="text-[10px] text-gray-400">{(1 - r.distance).toFixed(2)}</span>
+                  {r._source === 'graphify'
+                    ? <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-purple-100 text-purple-700">🕸 {r.community}</span>
+                    : <>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                          style={{ background: SOURCE_COLOR[r.source_type] + '20', color: SOURCE_COLOR[r.source_type] }}>
+                          {r.source_type}
+                        </span>
+                        <span className="text-[10px] text-gray-400">{(1 - r.distance).toFixed(2)}</span>
+                      </>
+                  }
                 </div>
               </div>
               <p className="text-xs text-gray-500 line-clamp-2">{r.document}</p>
@@ -345,8 +368,9 @@ function GraphTab() {
   // 필터 적용
   const graph = useMemo(() => {
     if (filter === 'all') return rawGraph
-    const isDoc = (n: GraphNode) => n.type !== 'entity'
-    const isConcept = (n: GraphNode) => n.type === 'entity'
+    const DOC_TYPES = new Set(['pdf','pptx','docx','txt','md','note','file','data','chunk','voice'])
+    const isDoc = (n: GraphNode) => n.type === 'chunk' || DOC_TYPES.has(n.source_type ?? '')
+    const isConcept = (n: GraphNode) => !isDoc(n)
     const keep = filter === 'docs'
       ? rawGraph.nodes.filter(n => isDoc(n) || (selected && rawGraph.edges.some(
           e => (e.from_id === selected.id && e.to_id === n.id) || (e.to_id === selected.id && e.from_id === n.id)
@@ -1075,6 +1099,16 @@ function WikiTab() {
   const runGraphify = async () => {
     await fetch(`${API}/graphify/run`, { method: 'POST' })
     await loadStatus()
+    // 완료될 때까지 폴링 후 자동 오픈
+    const poll = setInterval(async () => {
+      const res = await fetch(`${API}/graphify/status`)
+      const data = await res.json()
+      if (!data.running && data.html_ready && data.nodes > 0) {
+        clearInterval(poll)
+        await loadStatus()
+        window.open('http://127.0.0.1:8766/graphify/graph.html')
+      }
+    }, 3000)
   }
 
   const cancelAuto = async () => {
@@ -1157,6 +1191,7 @@ function WikiTab() {
               <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
                 <div className="h-full bg-blue-400 rounded-full animate-pulse w-full" />
               </div>
+              <div className="text-[10px] text-gray-400">완료되면 자동으로 결과가 열립니다</div>
             </div>
           ) : (
             <div className="space-y-1.5">
@@ -1168,19 +1203,17 @@ function WikiTab() {
               {gJob?.error && (
                 <div className="text-[10px] text-red-500 truncate">{gJob.error}</div>
               )}
-              <div className="flex gap-1">
-                <button onClick={runGraphify} disabled={gJob?.running}
-                  className="flex-1 text-[10px] py-1.5 border border-surface-border rounded-lg hover:bg-gray-50 disabled:opacity-40 transition">
-                  {gJob?.html_ready ? '재빌드' : 'Graphify 실행'}
+              {gJob?.html_ready && (
+                <button
+                  onClick={() => window.open('http://127.0.0.1:8766/graphify/graph.html')}
+                  className="w-full text-[11px] py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-700 transition font-medium">
+                  🕸 결과 보기
                 </button>
-                {gJob?.html_ready && (
-                  <button
-                    onClick={() => window.open('http://127.0.0.1:8766/graphify/graph.html')}
-                    className="text-[10px] px-2 py-1.5 bg-gray-900 text-white rounded-lg hover:bg-gray-700 transition">
-                    열기
-                  </button>
-                )}
-              </div>
+              )}
+              <button onClick={runGraphify} disabled={gJob?.running}
+                className="w-full text-[10px] py-1.5 border border-surface-border rounded-lg hover:bg-gray-50 disabled:opacity-40 transition">
+                {gJob?.html_ready ? '재빌드' : 'Graphify 실행'}
+              </button>
             </div>
           )}
           <p className="text-[10px] text-gray-400">요약 완료 후 자동 실행됨</p>
@@ -1202,7 +1235,7 @@ function WikiTab() {
             </div>
           )}
           {pages.map(p => (
-            <button key={p.id} onClick={() => setSelected(p)}
+            <button key={p.id} onClick={() => { setSelected(p); apiFetch('/activity/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ node_id: p.node_id, action: 'wiki_view', context: p.title || '' }) }).catch(() => {}) }}
               className={`w-full text-left px-3 py-2 rounded-xl border transition-colors ${
                 selected?.id === p.id ? 'border-gray-400 bg-gray-50' : 'border-surface-border hover:bg-gray-50'
               }`}>
