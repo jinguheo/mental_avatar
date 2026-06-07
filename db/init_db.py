@@ -126,6 +126,17 @@ def init():
         synced_at   DATETIME DEFAULT (datetime('now','localtime')),
         UNIQUE(source, source_id)
     );
+
+    CREATE TABLE IF NOT EXISTS conversations (
+        id          TEXT PRIMARY KEY,
+        view        TEXT NOT NULL,
+        role        TEXT NOT NULL,
+        content     TEXT NOT NULL,
+        created_at  DATETIME DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations(created_at);
+    CREATE INDEX IF NOT EXISTS idx_conv_role    ON conversations(role);
     """)
 
     conn.commit()

@@ -607,7 +607,20 @@ def wiki_export():
 
 @app.route("/profile/me", methods=["GET"])
 def profile_get():
-    return jsonify({"profile": avatar_core.get_profile(), "labels": avatar_core.PROFILE_LABELS})
+    return jsonify({
+        "profile": avatar_core.get_profile(),
+        "labels": avatar_core.PROFILE_LABELS,
+        "options": {
+            "speech_style":  avatar_core.SPEECH_STYLE_OPTIONS,
+            "persona":       avatar_core.PERSONA_OPTIONS,
+            "language_tone": avatar_core.LANGUAGE_TONE_OPTIONS,
+            "video":         avatar_core.VIDEO_STYLE_OPTIONS,
+        },
+        "defaults": {
+            **avatar_core.STYLE_DEFAULTS,
+            **avatar_core.VIDEO_STYLE_DEFAULTS,
+        }
+    })
 
 
 @app.route("/profile/me", methods=["POST"])
@@ -640,6 +653,33 @@ def sync_list():
 def avatar_context():
     q = request.args.get("q", "")
     return jsonify(avatar_core.build_avatar_context(q))
+
+
+@app.route("/conversation/log", methods=["POST"])
+def conversation_log():
+    """채팅 turn 저장 — 말투 학습의 원재료"""
+    data = request.get_json(silent=True) or {}
+    view    = data.get("view", "unknown")
+    role    = data.get("role", "")
+    content = data.get("content", "")
+    if role not in ("user", "assistant") or not content:
+        return jsonify({"error": "view, role(user|assistant), content 필요"}), 400
+    avatar_core.log_conversation(view, role, content)
+    return jsonify({"success": True})
+
+
+@app.route("/conversation/style_analysis", methods=["GET"])
+def conversation_style_analysis():
+    """최근 대화에서 말투/성격/톤을 추정 (학습 루프 1단계: 제안)"""
+    limit = int(request.args.get("limit", 40))
+    return jsonify(avatar_core.analyze_speech_style(limit))
+
+
+@app.route("/conversation/style_apply", methods=["POST"])
+def conversation_style_apply():
+    """학습된 말투 제안을 프로파일에 반영 (학습 루프 2단계: 적용)"""
+    data = request.get_json(silent=True) or {}
+    return jsonify({"profile": avatar_core.apply_style_suggestion(data)})
 
 
 @app.route("/profile/behavior", methods=["GET"])
@@ -1062,17 +1102,27 @@ tts.tts_to_file(
         job["error"] = "TTS 타임아웃"
         return
 
-    # 2) SadTalker
+    # 2) SadTalker — 프로파일 영상 설정 반영
     job["stage"] = "sadtalker"
     result_dir = job_dir / "result"
+    profile = avatar_core.get_profile()
+    def pvideo(key):
+        return profile.get(key, {}).get("value") or avatar_core.VIDEO_STYLE_DEFAULTS.get(key, "")
     cmd = [
         PYTHON_EXE, str(SADTALKER_DIR / "inference.py"),
         "--driven_audio", str(speech_path),
         "--source_image", str(face_path),
         "--result_dir",   str(result_dir),
-        "--still", "--preprocess", "full",
-        "--enhancer", "gfpgan", "--size", "512",
+        "--preprocess", pvideo("video_preprocess"),
+        "--size", pvideo("video_size"),
+        "--expression_scale", pvideo("video_expression_scale"),
     ]
+    if pvideo("video_still") == "true":
+        cmd.append("--still")
+    if pvideo("video_enhancer") != "none":
+        cmd += ["--enhancer", pvideo("video_enhancer")]
+    if job.get("ref_pose"):
+        cmd += ["--ref_pose", job["ref_pose"]]
     sad_env = dict(os.environ)
     sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
     try:
@@ -1101,6 +1151,7 @@ tts.tts_to_file(
 def avatar_generate_async():
     """비동기 영상 생성: job_id 즉시 반환 후 백그라운드에서 TTS+SadTalker 실행."""
     face_file = request.files.get("face")
+    ref_video = request.files.get("ref_pose")   # 참조 포즈 영상 (선택)
     text      = request.form.get("text", "").strip()
 
     if not face_file:
@@ -1118,7 +1169,14 @@ def avatar_generate_async():
     face_path = job_dir / f"face{face_ext}"
     face_file.save(str(face_path))
 
-    _avatar_jobs[job_id] = {"stage": "queued", "error": "", "mp4_path": None}
+    ref_pose_path = None
+    if ref_video and ref_video.filename:
+        ref_ext = Path(ref_video.filename).suffix or ".mp4"
+        ref_pose_path = job_dir / f"ref_pose{ref_ext}"
+        ref_video.save(str(ref_pose_path))
+
+    _avatar_jobs[job_id] = {"stage": "queued", "error": "", "mp4_path": None,
+                             "ref_pose": str(ref_pose_path) if ref_pose_path else None}
     t = _threading.Thread(target=_run_avatar_job,
                           args=(job_id, face_path, text, job_dir), daemon=True)
     t.start()
@@ -1278,6 +1336,181 @@ def avatar_history_thumb(job_id: str):
         if face.exists():
             return send_file(str(face), mimetype=f"image/{ext}")
     return jsonify({"error": "no thumb"}), 404
+
+
+_faceswap_jobs: dict = {}
+_ytdl_jobs: dict = {}
+
+YTDL_HISTORY_FILE = AVATAR_TMP / "ytdl_history.json"
+
+def _load_ytdl_history() -> list:
+    try:
+        if YTDL_HISTORY_FILE.exists():
+            import json as _json
+            return _json.loads(YTDL_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+def _save_ytdl_history(entry: dict):
+    import json as _json
+    history = _load_ytdl_history()
+    history.insert(0, entry)
+    history = history[:50]
+    YTDL_HISTORY_FILE.write_text(_json.dumps(history, ensure_ascii=False), encoding="utf-8")
+
+
+@app.route("/avatar/ytdl/history", methods=["GET"])
+def avatar_ytdl_history():
+    history = [h for h in _load_ytdl_history()
+               if Path(h.get("video_path","")).exists()]
+    return jsonify({"history": history})
+
+
+@app.route("/avatar/ytdl", methods=["POST"])
+def avatar_ytdl():
+    """YouTube URL → 영상 다운로드 (백그라운드), job_id 반환"""
+    data    = request.get_json(silent=True) or {}
+    url     = data.get("url", "").strip()
+    start   = data.get("start", "")   # 시작 시간 예: "00:01:30"
+    end     = data.get("end", "")     # 종료 시간 예: "00:02:00"
+    max_sec = int(data.get("max_sec", 120))  # 최대 120초
+
+    if not url:
+        return jsonify({"error": "url 필요"}), 400
+
+    job_id  = str(uuid.uuid4())
+    job_dir = AVATAR_TMP / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    out_tmpl = str(job_dir / "video.%(ext)s")
+
+    _ytdl_jobs[job_id] = {"stage": "downloading", "error": "", "video_path": None, "title": ""}
+
+    def _run():
+        try:
+            import yt_dlp
+            ydl_opts = {
+                "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best",
+                "outtmpl": out_tmpl,
+                "merge_output_format": "mp4",
+                "quiet": True,
+                "ffmpeg_location": str(SADTALKER_DIR),
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get("title", "video")
+                duration = info.get("duration", 0)
+
+            mp4_files = list(job_dir.glob("*.mp4")) + list(job_dir.glob("*.webm"))
+            if not mp4_files:
+                raise FileNotFoundError("다운로드된 파일 없음")
+
+            raw_path = str(mp4_files[0])
+            final_path = str(job_dir / "clip.mp4")
+
+            # 구간 자르기 (start/end 지정 또는 max_sec 초과 시 앞부분만)
+            ffmpeg = str(SADTALKER_DIR / "ffmpeg.exe")
+            ss_args = ["-ss", start] if start else []
+            to_args = ["-to", end] if end else (["-t", str(max_sec)] if duration > max_sec else [])
+
+            if ss_args or to_args:
+                subprocess.run(
+                    [ffmpeg, "-y"] + ss_args + ["-i", raw_path] + to_args +
+                    ["-c", "copy", final_path],
+                    check=True, capture_output=True, timeout=120
+                )
+                if not Path(final_path).exists():
+                    final_path = raw_path
+            else:
+                final_path = raw_path
+
+            _ytdl_jobs[job_id].update({"stage": "done", "video_path": final_path, "title": title,
+                                        "url": url, "duration": duration})
+            _save_ytdl_history({"job_id": job_id, "title": title, "url": url,
+                                 "video_path": final_path, "duration": duration,
+                                 "video_url": f"/avatar/ytdl/{job_id}/video"})
+        except Exception as e:
+            _ytdl_jobs[job_id]["stage"] = "error"
+            _ytdl_jobs[job_id]["error"] = str(e)
+
+    _threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/avatar/ytdl/<job_id>", methods=["GET"])
+def avatar_ytdl_status(job_id: str):
+    job = _ytdl_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({**job, "video_url": f"/avatar/ytdl/{job_id}/video" if job["stage"] == "done" else None})
+
+
+@app.route("/avatar/ytdl/<job_id>/video", methods=["GET"])
+def avatar_ytdl_video(job_id: str):
+    job = _ytdl_jobs.get(job_id)
+    if not job or job["stage"] != "done":
+        return jsonify({"error": "not ready"}), 404
+    return send_file(job["video_path"], mimetype="video/mp4", as_attachment=False,
+                     download_name=f"{job.get('title','video')[:40]}.mp4")
+
+
+@app.route("/avatar/faceswap", methods=["POST"])
+def avatar_faceswap():
+    """얼굴 교체: source_face + (target_video 파일 또는 yt_job_id) → 내 얼굴로 교체된 영상"""
+    source_face  = request.files.get("source_face")
+    target_video = request.files.get("target_video")
+    yt_job_id    = request.form.get("yt_job_id", "")
+
+    if not source_face:
+        return jsonify({"error": "source_face 필요"}), 400
+    if not target_video and not yt_job_id:
+        return jsonify({"error": "target_video 또는 yt_job_id 필요"}), 400
+
+    job_id  = str(uuid.uuid4())
+    job_dir = AVATAR_TMP / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    face_path   = job_dir / f"source{Path(source_face.filename).suffix or '.jpg'}"
+    output_path = str(job_dir / "faceswap_result.mp4")
+    source_face.save(str(face_path))
+
+    # 대상 영상: 직접 업로드 또는 YouTube 다운로드 결과 사용
+    if yt_job_id and yt_job_id in _ytdl_jobs and _ytdl_jobs[yt_job_id]["stage"] == "done":
+        video_path = Path(_ytdl_jobs[yt_job_id]["video_path"])
+    else:
+        video_path = job_dir / f"target{Path(target_video.filename).suffix or '.mp4'}"
+        target_video.save(str(video_path))
+
+    _faceswap_jobs[job_id] = {"stage": "processing", "error": "", "mp4_path": None}
+
+    def _run():
+        try:
+            from core.faceswap import swap_faces_in_video
+            swap_faces_in_video(str(face_path), str(video_path), output_path)
+            _faceswap_jobs[job_id]["stage"] = "done"
+            _faceswap_jobs[job_id]["mp4_path"] = output_path
+        except Exception as e:
+            _faceswap_jobs[job_id]["stage"] = "error"
+            _faceswap_jobs[job_id]["error"] = str(e)
+
+    _threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/avatar/faceswap/<job_id>", methods=["GET"])
+def avatar_faceswap_status(job_id: str):
+    job = _faceswap_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({**job, "video_url": f"/avatar/faceswap/{job_id}/video" if job["stage"] == "done" else None})
+
+
+@app.route("/avatar/faceswap/<job_id>/video", methods=["GET"])
+def avatar_faceswap_video(job_id: str):
+    job = _faceswap_jobs.get(job_id)
+    if not job or job["stage"] != "done":
+        return jsonify({"error": "not ready"}), 404
+    return send_file(job["mp4_path"], mimetype="video/mp4", as_attachment=False)
 
 
 @app.route("/avatar/tts_generate", methods=["POST"])

@@ -24,6 +24,9 @@ export async function callMcpTool<T = unknown>(
     if (json.error) throw new Error(json.error.message || 'MCP error')
     const content = json.result?.content
     if (Array.isArray(content)) {
+      // MCP 서버가 type별로 text(JSON 문자열) 또는 json(객체)으로 응답
+      const jsonItem = content.find((c: { type: string }) => c.type === 'json') as { json?: unknown } | undefined
+      if (jsonItem?.json !== undefined) return jsonItem.json as T
       const text = content.find((c: { type: string }) => c.type === 'text')?.text
       if (text) return JSON.parse(text) as T
     }

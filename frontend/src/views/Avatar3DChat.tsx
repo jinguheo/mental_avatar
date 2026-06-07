@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
+import FaceTrackingPanel from './FaceTrackingPanel'
 import type { Settings } from '@/types'
 
 const API = 'http://127.0.0.1:8766'
@@ -13,6 +14,10 @@ const GREETING = '안녕하세요! 반갑습니다. 무엇이든 도와드리겠
 const SYSTEM   = `당신은 사용자를 맞이하는 AI 리셉션 아바타입니다.
 따뜻하고 전문적으로 한국어로 응대하세요.
 답변은 2~3문장으로 간결하게 하고, 항상 친절한 어조를 유지하세요.`
+
+const RECEPTION_NOTE = `## 지금 상황
+나는 지금 방문객을 맞이하는 리셉션 모드입니다. 따뜻하고 전문적으로 응대하고,
+답변은 2~3문장으로 간결하게 하세요.`
 
 interface ChatMsg { role: 'user' | 'assistant'; content: string }
 interface Props { settings: Settings }
@@ -43,6 +48,19 @@ export default function Avatar3DChat({ settings }: Props) {
   const [speaking, setSpeaking]       = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
+  // 음성 인식(STT) — VAD(음성 감지) 기반 자동 녹음: 한 번 누르면 말하기 시작/끝을 자동으로 감지
+  const [recording, setRecording] = useState(false)   // 듣기 모드 on/off (마이크 켜짐)
+  const [vadActive, setVadActive] = useState(false)   // 현재 음성이 감지되어 녹음 중인지
+  const [sttBusy, setSttBusy]     = useState(false)
+  const [sttResult, setSttResult] = useState<{ text: string; language?: string } | null>(null)
+  const [sttError, setSttError]   = useState('')
+  const sttStreamRef = useRef<MediaStream | null>(null)
+  const sttCtxRef    = useRef<AudioContext | null>(null)
+  const sttRecRef    = useRef<MediaRecorder | null>(null)
+  const sttChunksRef = useRef<Blob[]>([])
+  const sttSilenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sttListeningRef = useRef(false)
+
   // ── TTS ────────────────────────────────────────────────
   const playTTS = useCallback(async (text: string) => {
     setSpeaking(true)
@@ -69,6 +87,97 @@ export default function Avatar3DChat({ settings }: Props) {
       speechSynthesis.speak(u)
     }
   }, [])
+
+  // ── 음성 인식(STT) — VAD로 말하기 시작/끝을 자동 감지해 녹음·전송 ──
+  const THRESHOLD   = 20   // 음성 감지 임계값 (0-255)
+  const SILENCE_MS  = 1200 // 이 시간만큼 조용하면 "말하기 끝"으로 판단
+
+  const transcribeChunk = useCallback(async (chunks: Blob[]) => {
+    if (!chunks.length) return
+    const blob = new Blob(chunks, { type: 'audio/webm' })
+    if (!blob.size) return
+    setSttBusy(true)
+    try {
+      const form = new FormData()
+      form.append('audio', blob, 'stt.webm')
+      const res = await fetch(`${API}/stt/transcribe`, { method: 'POST', body: form })
+      const data = await res.json()
+      if (data.error) {
+        setSttError(data.error)
+      } else {
+        const text = (data.text || '').trim()
+        setSttResult({ text, language: data.language })
+        if (text) setInput(prev => (prev ? `${prev} ${text}` : text))
+      }
+    } catch {
+      setSttError('인식 요청 실패 — API 서버 연결을 확인해주세요')
+    } finally {
+      setSttBusy(false)
+    }
+  }, [])
+
+  const stopStt = useCallback(() => {
+    sttListeningRef.current = false
+    if (sttSilenceTimer.current) { clearTimeout(sttSilenceTimer.current); sttSilenceTimer.current = null }
+    sttRecRef.current?.stop()
+    sttRecRef.current = null
+    sttCtxRef.current?.close()
+    sttCtxRef.current = null
+    sttStreamRef.current?.getTracks().forEach(t => t.stop())
+    sttStreamRef.current = null
+    setRecording(false); setVadActive(false)
+  }, [])
+
+  const startStt = useCallback(async () => {
+    if (recording) { stopStt(); return }
+    setSttError(''); setSttResult(null)
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (e) {
+      setSttError('마이크 접근 실패: ' + (e instanceof Error ? e.message : String(e)))
+      return
+    }
+    sttStreamRef.current = stream
+    sttListeningRef.current = true
+    setRecording(true)
+
+    const ctx = new AudioContext()
+    sttCtxRef.current = ctx
+    const src = ctx.createMediaStreamSource(stream)
+    const analyser = ctx.createAnalyser(); analyser.fftSize = 512
+    src.connect(analyser)
+    const buf = new Uint8Array(analyser.frequencyBinCount)
+
+    let isRecording = false
+    const tick = () => {
+      if (!sttListeningRef.current) return
+      analyser.getByteFrequencyData(buf)
+      const avg = buf.reduce((a, b) => a + b, 0) / buf.length
+
+      if (avg > THRESHOLD) {
+        setVadActive(true)
+        if (sttSilenceTimer.current) { clearTimeout(sttSilenceTimer.current); sttSilenceTimer.current = null }
+        if (!isRecording) {
+          isRecording = true
+          sttChunksRef.current = []
+          const rec = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+          rec.ondataavailable = e => { if (e.data.size > 0) sttChunksRef.current.push(e.data) }
+          rec.onstop = () => {
+            isRecording = false; setVadActive(false)
+            transcribeChunk([...sttChunksRef.current])
+          }
+          rec.start(); sttRecRef.current = rec
+        }
+        sttSilenceTimer.current = setTimeout(() => {
+          sttRecRef.current?.stop(); sttRecRef.current = null
+          setVadActive(false)
+        }, SILENCE_MS)
+      }
+      requestAnimationFrame(tick)
+    }
+    tick()
+  }, [recording, stopStt, transcribeChunk])
 
   // ── 씬 초기화 ───────────────────────────────────────────
   useEffect(() => {
@@ -318,29 +427,51 @@ export default function Avatar3DChat({ settings }: Props) {
     return () => clearTimeout(timer)
   }, [playTTS])
 
+  // 시스템 프롬프트: 백엔드 /avatar/context(프로파일+관심사+RAG)에 리셉션 모드 안내를 덧붙임
+  const buildSystemPrompt = useCallback(async (userText: string): Promise<string> => {
+    try {
+      const res = await fetch(`${API}/avatar/context?q=${encodeURIComponent(userText)}`)
+      const data = await res.json()
+      if (data?.system) return `${data.system}\n\n${RECEPTION_NOTE}`
+    } catch { /* 컨텍스트 로드 실패 시 기본 프롬프트로 폴백 */ }
+    return SYSTEM
+  }, [])
+
+  // 대화 turn 로깅 — 말투/성격 학습 루프의 원재료 (실패해도 채팅 흐름에 영향 없음)
+  const logTurn = useCallback((role: 'user' | 'assistant', content: string) => {
+    if (!content.trim()) return
+    fetch(`${API}/conversation/log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ view: 'avatar3d_chat', role, content }),
+    }).catch(() => {})
+  }, [])
+
   // ── Claude 호출 ──
   const sendMessage = useCallback(async () => {
     const text = input.trim()
     if (!text || chatLoading) return
     const userMsg: ChatMsg = { role: 'user', content: text }
     setMessages(prev => [...prev, userMsg]); setInput(''); setChatLoading(true)
+    logTurn('user', text)
 
     let key = settings.claudeSessionKey
     if (!key && settings.mcpEndpoint) key = await claudeWebAutoConnect(settings.mcpEndpoint) || ''
 
     try {
       const history = [...messages, userMsg].slice(-8)
+      const system = await buildSystemPrompt(text)
       let reply = ''
-      await streamClaudeWeb(key, settings.mcpEndpoint, history, SYSTEM,
+      await streamClaudeWeb(key, settings.mcpEndpoint, history, system,
         d => { reply += d }, settings.anthropicApiKey)
       setMessages(prev => [...prev, { role: 'assistant', content: reply }])
-      if (reply) playTTS(reply)   // ← LLM 출력 → 자동 TTS
+      if (reply) { logTurn('assistant', reply); playTTS(reply) }   // ← LLM 출력 → 자동 TTS
     } catch (e) {
       const errMsg = `죄송합니다. 일시적인 오류가 발생했습니다.`
       setMessages(prev => [...prev, { role: 'assistant', content: errMsg }])
       playTTS(errMsg)
     } finally { setChatLoading(false) }
-  }, [input, chatLoading, messages, settings, playTTS])
+  }, [input, chatLoading, messages, settings, playTTS, buildSystemPrompt, logTurn])
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
@@ -351,6 +482,12 @@ export default function Avatar3DChat({ settings }: Props) {
       {/* 3D 뷰 */}
       <div className="flex-1 relative">
         <canvas ref={canvasRef} className="w-full h-full" />
+
+        {/* 얼굴 트래킹 패널 — 웹캠 + MediaPipe 추적 + 3D 메시 텍스처 매핑 + 윤곽선/녹화 (좌상단) */}
+        <FaceTrackingPanel
+          className="absolute top-4 left-4 z-20 w-[26rem] max-w-[42vw] rounded-xl border border-gray-700 shadow-2xl bg-black overflow-hidden" />
+
+
         {/* 상태 오버레이 */}
         <div className="absolute top-4 left-1/2 -translate-x-1/2">
           {speaking && (
@@ -407,11 +544,39 @@ export default function Avatar3DChat({ settings }: Props) {
           <div ref={chatEndRef} />
         </div>
 
-        <div className="p-3 border-t border-gray-800">
+        <div className="p-3 border-t border-gray-800 space-y-2">
+          {/* 음성 인식 결과 표시 창 */}
+          {(recording || sttBusy || sttResult || sttError) && (
+            <div className="bg-gray-800/80 border border-gray-700 rounded-xl px-3 py-2 text-xs space-y-1">
+              {recording && !sttBusy && (
+                <p className={vadActive ? 'text-green-400' : 'text-gray-400'}>
+                  {vadActive ? '🎙 듣는 중… (말씀하시면 자동으로 녹음·인식됩니다)' : '👂 대기 중… 말씀해보세요'}
+                </p>
+              )}
+              {sttBusy && <p className="text-gray-400">⏳ 인식 처리 중…</p>}
+              {sttResult && !sttBusy && (
+                <p className="text-gray-300">
+                  <span className="text-gray-500">인식 결과{sttResult.language ? ` (${sttResult.language})` : ''}: </span>
+                  <span className="text-gray-100 font-medium">{sttResult.text || '(인식된 텍스트 없음 — 다시 시도해보세요)'}</span>
+                </p>
+              )}
+              {sttError && <p className="text-red-400">{sttError}</p>}
+            </div>
+          )}
+
           <div className="flex gap-2">
+            <button onClick={startStt}
+              title={recording ? '눌러서 듣기 모드 끄기' : '눌러서 듣기 모드 켜기 — 말하면 자동으로 인식됩니다'}
+              className={`px-3 py-2 text-sm rounded-xl transition disabled:opacity-40 ${
+                recording
+                  ? (vadActive ? 'bg-green-600 hover:bg-green-500 text-white animate-pulse' : 'bg-red-600 hover:bg-red-500 text-white')
+                  : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700'
+              }`}>
+              {recording ? (vadActive ? '🎙' : '👂') : '🎤'}
+            </button>
             <input value={input} onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-              placeholder="무엇이든 물어보세요…"
+              placeholder="무엇이든 물어보세요… (또는 🎤 눌러서 말하기)"
               disabled={!isConnected}
               className="flex-1 bg-gray-800 text-sm text-gray-200 rounded-xl px-3 py-2 outline-none border border-gray-700 focus:border-blue-600 placeholder-gray-600 disabled:opacity-40" />
             <button onClick={sendMessage}

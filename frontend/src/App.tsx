@@ -2,12 +2,11 @@ import { useState, useEffect } from 'react'
 import { DEFAULT_SETTINGS, type Settings } from './types'
 import { claudeWebAutoConnect, claudeWebCaptureSession } from './services/claudeWeb'
 import AvatarStudio from './views/AvatarStudio'
-import Avatar3DStudio from './views/Avatar3DStudio'
 import Avatar3DChat from './views/Avatar3DChat'
 import KnowledgeGraph from './views/KnowledgeGraph'
 import SettingsView from './views/Settings'
 
-type Tab = 'mode-a' | 'mode-b' | 'mode-c' | 'kg' | 'settings'
+type Tab = 'mode-a' | 'mode-c' | 'kg' | 'settings'
 
 const STORAGE_KEY = 'mental-avatar-settings'
 
@@ -40,7 +39,6 @@ export default function App() {
   const tabs: { id: Tab; label: string }[] = [
     { id: 'kg',       label: '🧠 지식 그래프' },
     { id: 'mode-a',   label: '🎬 영상 아바타' },
-    { id: 'mode-b',   label: '◈ 3D 트래킹' },
     { id: 'mode-c',   label: '🤖 AI 아바타' },
     { id: 'settings', label: '⚙ 설정' },
   ]
@@ -69,7 +67,6 @@ export default function App() {
       {/* 콘텐츠 */}
       <main className="flex-1 overflow-hidden">
         {tab === 'mode-a'   && <AvatarStudio />}
-        {tab === 'mode-b'   && <Avatar3DStudio settings={settings} />}
         {tab === 'mode-c'   && <Avatar3DChat settings={settings} />}
         {tab === 'kg'       && <KnowledgeGraph settings={settings} />}
         {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
