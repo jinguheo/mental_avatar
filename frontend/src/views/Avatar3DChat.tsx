@@ -22,7 +22,71 @@ const RECEPTION_NOTE = `## 지금 상황
 interface ChatMsg { role: 'user' | 'assistant'; content: string }
 interface Props { settings: Settings }
 
+// ── 3D 아바타 외형 스타일 후보군 ──
+interface AvatarStyle {
+  id: string
+  label: string
+  skin: number
+  hair: number
+  shirt: number
+  hairStyle: 'long' | 'short' | 'bald'
+  glasses: boolean
+}
+const AVATAR_STYLES: AvatarStyle[] = [
+  { id: 'classic',  label: '클래식 단발',   skin: 0xf2c4a0, hair: 0x1a1008, shirt: 0x1e3a5f, hairStyle: 'long',  glasses: false },
+  { id: 'short',    label: '짧은머리',      skin: 0xead2b4, hair: 0x3b2a1a, shirt: 0x44474f, hairStyle: 'short', glasses: false },
+  { id: 'glasses',  label: '안경 쓴 스타일', skin: 0xf2c4a0, hair: 0x6b4423, shirt: 0x2f6f6a, hairStyle: 'long',  glasses: true  },
+  { id: 'blonde',   label: '밝은 톤',       skin: 0xf5d2b0, hair: 0xcaa86a, shirt: 0x6b2737, hairStyle: 'bald',  glasses: false },
+]
+const AVATAR_STYLE_KEY = 'mental-avatar-3d-style'
+
+// ── 목소리 후보군: '내 목소리'(XTTS 클로닝) + 서버 제공 템플릿(예쁜/어린이 등) + 브라우저 내장 TTS 목소리들 ──
+interface VoiceOption { id: string; label: string; kind: 'clone' | 'template' | 'system'; voiceURI?: string }
+const MY_VOICE: VoiceOption = { id: 'mine', label: '내 목소리', kind: 'clone' }
+// 백엔드 VOICE_TEMPLATES와 id를 맞춰야 함 (api/server.py)
+const TEMPLATE_VOICES: VoiceOption[] = [
+  { id: 'pretty', label: '예쁜 목소리', kind: 'template' },
+  { id: 'child',  label: '어린이 목소리', kind: 'template' },
+  { id: 'calm',   label: '차분한 목소리', kind: 'template' },
+  { id: 'bright', label: '발랄한 목소리', kind: 'template' },
+]
+const VOICE_OPTION_KEY = 'mental-avatar-3d-voice'
+
 export default function Avatar3DChat({ settings }: Props) {
+  const [avatarStyleId, setAvatarStyleId] = useState<string>(() => {
+    try { return localStorage.getItem(AVATAR_STYLE_KEY) || AVATAR_STYLES[0].id } catch { return AVATAR_STYLES[0].id }
+  })
+  const avatarStyle = AVATAR_STYLES.find(s => s.id === avatarStyleId) || AVATAR_STYLES[0]
+  const selectAvatarStyle = (id: string) => {
+    setAvatarStyleId(id)
+    try { localStorage.setItem(AVATAR_STYLE_KEY, id) } catch { /* ignore */ }
+  }
+
+  // 목소리 선택 — '내 목소리'(XTTS 클로닝) 또는 브라우저 내장 TTS의 다른 목소리들 중 선택
+  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([])
+  useEffect(() => {
+    const load = () => {
+      const voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('ko') || v.lang.startsWith('en'))
+      if (voices.length) setSystemVoices(voices.slice(0, 6))
+    }
+    load()
+    speechSynthesis.onvoiceschanged = load
+    return () => { speechSynthesis.onvoiceschanged = null }
+  }, [])
+  const voiceOptions: VoiceOption[] = [
+    MY_VOICE,
+    ...TEMPLATE_VOICES,
+    ...systemVoices.map(v => ({ id: `sys:${v.voiceURI}`, label: v.name, kind: 'system' as const, voiceURI: v.voiceURI })),
+  ]
+  const [voiceOptionId, setVoiceOptionId] = useState<string>(() => {
+    try { return localStorage.getItem(VOICE_OPTION_KEY) || MY_VOICE.id } catch { return MY_VOICE.id }
+  })
+  const selectedVoice = voiceOptions.find(v => v.id === voiceOptionId) || MY_VOICE
+  const selectVoiceOption = (id: string) => {
+    setVoiceOptionId(id)
+    try { localStorage.setItem(VOICE_OPTION_KEY, id) } catch { /* ignore */ }
+  }
+
   const canvasRef  = useRef<HTMLCanvasElement>(null)
   const clockRef   = useRef(new THREE.Clock())
   const rafRef     = useRef(0)
@@ -30,6 +94,10 @@ export default function Avatar3DChat({ settings }: Props) {
   // 아바타 파트
   const groupRef   = useRef<THREE.Group | null>(null)
   const jawRef     = useRef<THREE.Mesh | null>(null)
+  const lipUpRef   = useRef<THREE.Mesh | null>(null)
+  const lipDnRef   = useRef<THREE.Mesh | null>(null)
+  const browLRef   = useRef<THREE.Mesh | null>(null)
+  const browRRef   = useRef<THREE.Mesh | null>(null)
   const lidLRef    = useRef<THREE.Mesh | null>(null)
   const lidRRef    = useRef<THREE.Mesh | null>(null)
   const eyeGpLRef  = useRef<THREE.Group | null>(null)
@@ -40,6 +108,24 @@ export default function Avatar3DChat({ settings }: Props) {
   // 오디오
   const audioCtxRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
+
+  // 브라우저 자동재생 정책 — AudioContext는 사용자 제스처 없이는 'suspended' 상태로 시작해 소리가 안 남.
+  // 페이지 첫 클릭/키입력/터치에서 미리 생성·resume 해 둔다 (자동 인사 같은 무제스처 재생도 들리도록).
+  useEffect(() => {
+    const unlock = () => {
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
+      const ctx = audioCtxRef.current
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {})
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+    window.addEventListener('pointerdown', unlock)
+    window.addEventListener('keydown', unlock)
+    return () => {
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+  }, [])
 
   // 채팅
   const [messages, setMessages]       = useState<ChatMsg[]>([])
@@ -64,8 +150,23 @@ export default function Avatar3DChat({ settings }: Props) {
   // ── TTS ────────────────────────────────────────────────
   const playTTS = useCallback(async (text: string) => {
     setSpeaking(true)
+    const voice = selectedVoice
+
+    // 시스템 목소리 선택 시 — 브라우저 내장 TTS로 직접 재생 (XTTS 호출 생략)
+    if (voice.kind === 'system') {
+      const u = new SpeechSynthesisUtterance(text)
+      const matched = systemVoices.find(v => v.voiceURI === voice.voiceURI)
+      if (matched) u.voice = matched
+      u.lang = matched?.lang || 'ko-KR'
+      u.rate = 0.95
+      u.onend = () => setSpeaking(false)
+      speechSynthesis.speak(u)
+      return
+    }
+
     try {
       const form = new FormData(); form.append('text', text)
+      form.append('voice', voice.kind === 'template' ? voice.id : 'mine')
       const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
       if (!res.ok) throw new Error()
       const blob = await res.blob()
@@ -73,6 +174,7 @@ export default function Avatar3DChat({ settings }: Props) {
       const audio = new Audio(url)
       if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
       const ctx = audioCtxRef.current
+      if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /* ignore */ } }
       const analyser = ctx.createAnalyser(); analyser.fftSize = 64
       analyserRef.current = analyser
       const src = ctx.createMediaElementSource(audio)
@@ -86,7 +188,9 @@ export default function Avatar3DChat({ settings }: Props) {
       u.onend = () => setSpeaking(false)
       speechSynthesis.speak(u)
     }
-  }, [])
+  }, [selectedVoice, systemVoices])
+
+  const respond = useCallback((text: string) => { playTTS(text) }, [playTTS])
 
   // ── 음성 인식(STT) — VAD로 말하기 시작/끝을 자동 감지해 녹음·전송 ──
   const THRESHOLD   = 20   // 음성 감지 임계값 (0-255)
@@ -224,13 +328,13 @@ export default function Avatar3DChat({ settings }: Props) {
     top.position.set(0, 4, 0); scene.add(top)
 
     // ── 재질 ──
-    const skin   = new THREE.MeshStandardMaterial({ color: 0xf2c4a0, roughness: 0.7, metalness: 0 })
+    const skin   = new THREE.MeshStandardMaterial({ color: avatarStyle.skin, roughness: 0.7, metalness: 0 })
     const white  = new THREE.MeshStandardMaterial({ color: 0xf5f2ef, roughness: 0.2 })
     const iris   = new THREE.MeshStandardMaterial({ color: 0x3b2a18, roughness: 0.15 })
     const pupil  = new THREE.MeshStandardMaterial({ color: 0x080808, roughness: 0.05 })
     const lip    = new THREE.MeshStandardMaterial({ color: 0xc06858, roughness: 0.55 })
-    const hair   = new THREE.MeshStandardMaterial({ color: 0x1a1008, roughness: 0.85 })
-    const shirt  = new THREE.MeshStandardMaterial({ color: 0x1e3a5f, roughness: 0.8 })
+    const hair   = new THREE.MeshStandardMaterial({ color: avatarStyle.hair, roughness: 0.85 })
+    const shirt  = new THREE.MeshStandardMaterial({ color: avatarStyle.shirt, roughness: 0.8 })
     const collar = new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.6 })
 
     const group = new THREE.Group()
@@ -249,6 +353,28 @@ export default function Avatar3DChat({ settings }: Props) {
     )
     jaw.position.y = -0.2; jaw.castShadow = true
     jawRef.current = jaw; group.add(jaw)
+
+    // ── 귀 ──
+    const makeEar = (x: number) => {
+      const e = new THREE.Mesh(new THREE.SphereGeometry(0.11, 16, 16), skin)
+      e.scale.set(0.45, 0.75, 0.35); e.position.set(x, 0.04, 0)
+      return e
+    }
+    group.add(makeEar(-0.51)); group.add(makeEar(0.51))
+
+    // ── 머리카락 (스타일에 따라 길이/유무 변경) ──
+    if (avatarStyle.hairStyle !== 'bald') {
+      const topH = avatarStyle.hairStyle === 'short' ? 0.46 : 0.55
+      const hairTop = new THREE.Mesh(new THREE.SphereGeometry(0.52, 32, 32, 0, Math.PI*2, 0, Math.PI*topH), hair)
+      hairTop.position.y = 0.06; hairTop.scale.set(1.03, 1.22, 0.98); group.add(hairTop)
+
+      if (avatarStyle.hairStyle === 'long') {
+        // 옆머리 (긴 머리만)
+        const hairSideL = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 16), hair)
+        hairSideL.scale.set(0.6, 1.2, 0.5); hairSideL.position.set(-0.44, -0.1, -0.05); group.add(hairSideL)
+        const hairSideR = hairSideL.clone(); hairSideR.position.x = 0.44; group.add(hairSideR)
+      }
+    }
 
     // ── 눈 함수 ──
     const makeEye = (xOff: number) => {
@@ -291,7 +417,8 @@ export default function Avatar3DChat({ settings }: Props) {
       m.rotation.z = xOff > 0 ? 0.12 : -0.12
       return m
     }
-    group.add(makeBrow(-0.17)); group.add(makeBrow(0.17))
+    const browL = makeBrow(-0.17); browLRef.current = browL; group.add(browL)
+    const browR = makeBrow(0.17);  browRRef.current = browR; group.add(browR)
 
     // ── 코 ──
     const noseGroup = new THREE.Group()
@@ -306,24 +433,27 @@ export default function Avatar3DChat({ settings }: Props) {
     // ── 입술 ──
     const lipUp = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.02, 8, 32, Math.PI), lip)
     lipUp.position.set(0, -0.19, 0.44); lipUp.rotation.z = Math.PI; group.add(lipUp)
+    lipUpRef.current = lipUp
     const lipDn = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.018, 8, 32, Math.PI), lip)
     lipDn.position.set(0, -0.23, 0.44); group.add(lipDn)
+    lipDnRef.current = lipDn
 
-    // ── 귀 ──
-    const makeEar = (x: number) => {
-      const e = new THREE.Mesh(new THREE.SphereGeometry(0.11, 16, 16), skin)
-      e.scale.set(0.45, 0.75, 0.35); e.position.set(x, 0.04, 0)
-      return e
+    // ── 안경 (스타일에 따라 추가) ──
+    if (avatarStyle.glasses) {
+      const frameMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.4, metalness: 0.3 })
+      const lensMat  = new THREE.MeshStandardMaterial({ color: 0x88aacc, roughness: 0.1, transparent: true, opacity: 0.25 })
+      const makeGlassEye = (xOff: number) => {
+        const g = new THREE.Group(); g.position.set(xOff, 0.1, 0.52)
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.012, 8, 32), frameMat)
+        g.add(ring)
+        const lens = new THREE.Mesh(new THREE.CircleGeometry(0.095, 32), lensMat)
+        lens.position.z = 0.005; g.add(lens)
+        return g
+      }
+      group.add(makeGlassEye(-0.175)); group.add(makeGlassEye(0.175))
+      const bridge = new THREE.Mesh(new THREE.CapsuleGeometry(0.006, 0.13, 4, 8), frameMat)
+      bridge.rotation.z = Math.PI/2; bridge.position.set(0, 0.1, 0.525); group.add(bridge)
     }
-    group.add(makeEar(-0.51)); group.add(makeEar(0.51))
-
-    // ── 머리카락 ──
-    const hairTop = new THREE.Mesh(new THREE.SphereGeometry(0.52, 32, 32, 0, Math.PI*2, 0, Math.PI*0.55), hair)
-    hairTop.position.y = 0.06; hairTop.scale.set(1.03, 1.22, 0.98); group.add(hairTop)
-    // 옆머리
-    const hairSideL = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 16), hair)
-    hairSideL.scale.set(0.6, 1.2, 0.5); hairSideL.position.set(-0.44, -0.1, -0.05); group.add(hairSideL)
-    const hairSideR = hairSideL.clone(); hairSideR.position.x = 0.44; group.add(hairSideR)
 
     // ── 목 ──
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.17, 0.38, 32), skin)
@@ -388,7 +518,7 @@ export default function Avatar3DChat({ settings }: Props) {
         if (blinkT >= Math.PI) { blinking = false; lidLRef.current!.scale.y = 0.08; lidRRef.current!.scale.y = 0.08 }
       }
 
-      // 립싱크
+      // 립싱크 + 말할 때 표정/움직임
       if (analyserRef.current && jawRef.current) {
         const buf = new Uint8Array(analyserRef.current.frequencyBinCount)
         analyserRef.current.getByteFrequencyData(buf)
@@ -396,9 +526,34 @@ export default function Avatar3DChat({ settings }: Props) {
         const open = (avg / 255) * 0.18
         jawRef.current.position.y += (-0.2 - open - jawRef.current.position.y) * 0.35
         jawRef.current.rotation.x = -open * 1.2
-      } else if (jawRef.current) {
-        jawRef.current.position.y += (-0.2 - jawRef.current.position.y) * 0.12
-        jawRef.current.rotation.x += (0 - jawRef.current.rotation.x) * 0.12
+
+        // 입술이 턱을 따라 벌어지는 입모양
+        if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - open * 0.35 - lipUpRef.current.position.y) * 0.4
+        if (lipDnRef.current) {
+          lipDnRef.current.position.y += (-0.23 - open - lipDnRef.current.position.y) * 0.4
+          const s = 1 + open * 1.6
+          lipDnRef.current.scale.set(s, 1, 1)
+        }
+
+        // 말하는 동안 살짝 끄덕이는 머리 움직임 + 눈썹 들썩임
+        if (groupRef.current) {
+          groupRef.current.rotation.x += Math.sin(t * 5) * open * 0.5
+        }
+        const browLift = Math.sin(t * 3.3) * open * 0.4
+        if (browLRef.current) browLRef.current.position.y += (0.24 + browLift - browLRef.current.position.y) * 0.3
+        if (browRRef.current) browRRef.current.position.y += (0.24 + browLift - browRRef.current.position.y) * 0.3
+      } else {
+        if (jawRef.current) {
+          jawRef.current.position.y += (-0.2 - jawRef.current.position.y) * 0.12
+          jawRef.current.rotation.x += (0 - jawRef.current.rotation.x) * 0.12
+        }
+        if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - lipUpRef.current.position.y) * 0.2
+        if (lipDnRef.current) {
+          lipDnRef.current.position.y += (-0.23 - lipDnRef.current.position.y) * 0.2
+          lipDnRef.current.scale.x += (1 - lipDnRef.current.scale.x) * 0.2
+        }
+        if (browLRef.current) browLRef.current.position.y += (0.24 - browLRef.current.position.y) * 0.15
+        if (browRRef.current) browRRef.current.position.y += (0.24 - browRRef.current.position.y) * 0.15
       }
 
       renderer.render(scene, camera)
@@ -416,16 +571,16 @@ export default function Avatar3DChat({ settings }: Props) {
       window.removeEventListener('resize', onResize)
       renderer.dispose()
     }
-  }, [])
+  }, [avatarStyleId])
 
   // ── 자동 인사 (페이지 로드 시) ──
   useEffect(() => {
     const timer = setTimeout(() => {
       setMessages([{ role: 'assistant', content: GREETING }])
-      playTTS(GREETING)
+      respond(GREETING)
     }, 1200)
     return () => clearTimeout(timer)
-  }, [playTTS])
+  }, [respond])
 
   // 시스템 프롬프트: 백엔드 /avatar/context(프로파일+관심사+RAG)에 리셉션 모드 안내를 덧붙임
   const buildSystemPrompt = useCallback(async (userText: string): Promise<string> => {
@@ -465,13 +620,13 @@ export default function Avatar3DChat({ settings }: Props) {
       await streamClaudeWeb(key, settings.mcpEndpoint, history, system,
         d => { reply += d }, settings.anthropicApiKey)
       setMessages(prev => [...prev, { role: 'assistant', content: reply }])
-      if (reply) { logTurn('assistant', reply); playTTS(reply) }   // ← LLM 출력 → 자동 TTS
+      if (reply) { logTurn('assistant', reply); respond(reply) }   // ← LLM 출력 → 영상(또는 TTS) 응답
     } catch (e) {
       const errMsg = `죄송합니다. 일시적인 오류가 발생했습니다.`
       setMessages(prev => [...prev, { role: 'assistant', content: errMsg }])
-      playTTS(errMsg)
+      respond(errMsg)
     } finally { setChatLoading(false) }
-  }, [input, chatLoading, messages, settings, playTTS, buildSystemPrompt, logTurn])
+  }, [input, chatLoading, messages, settings, respond, buildSystemPrompt, logTurn])
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
@@ -487,9 +642,48 @@ export default function Avatar3DChat({ settings }: Props) {
         <FaceTrackingPanel
           className="absolute top-4 left-4 z-20 w-[26rem] max-w-[42vw] rounded-xl border border-gray-700 shadow-2xl bg-black overflow-hidden" />
 
+        {/* 3D 아바타 외형 스타일 선택 (우상단) */}
+        <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-1.5 bg-black/40 backdrop-blur rounded-xl p-2">
+          <span className="text-[10px] text-gray-400 px-1">아바타 스타일</span>
+          <div className="flex flex-wrap justify-end gap-1.5 max-w-[12rem]">
+            {AVATAR_STYLES.map(s => (
+              <button
+                key={s.id}
+                onClick={() => selectAvatarStyle(s.id)}
+                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                  avatarStyleId === s.id
+                    ? 'bg-purple-600 border-purple-400 text-white'
+                    : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700/70'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="absolute top-32 right-4 z-20 flex flex-col items-end gap-1.5 bg-black/40 backdrop-blur rounded-xl p-2">
+          <span className="text-[10px] text-gray-400 px-1">목소리</span>
+          <div className="flex flex-wrap justify-end gap-1.5 max-w-[12rem]">
+            {voiceOptions.map(v => (
+              <button
+                key={v.id}
+                onClick={() => selectVoiceOption(v.id)}
+                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                  voiceOptionId === v.id
+                    ? 'bg-purple-600 border-purple-400 text-white'
+                    : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700/70'
+                }`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
 
         {/* 상태 오버레이 */}
-        <div className="absolute top-4 left-1/2 -translate-x-1/2">
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2">
           {speaking && (
             <div className="flex items-center gap-2 bg-black/50 backdrop-blur px-4 py-2 rounded-full">
               <div className="flex gap-1 items-end">

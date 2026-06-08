@@ -750,6 +750,16 @@ export default function AvatarStudio() {
                     setFacePreview(url)
                     setFaceFile(new File([blob], 'face.jpg', { type: 'image/jpeg' }))
                   }}>👤 사용</button>
+                <button className="flex-1 text-[9px] text-red-400 hover:text-red-600 font-medium transition"
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    if (!confirm('이 영상을 삭제할까요?')) return
+                    try {
+                      await fetch(`${API}/avatar/history/${h.job_id}`, { method: 'DELETE' })
+                      if (videoUrl === `${API}${h.video_url}`) setVideoUrl(null)
+                      loadHistory()
+                    } catch { /* ignore */ }
+                  }}>🗑 삭제</button>
               </div>
               <div className="text-[9px] text-gray-400 px-1 pb-0.5 bg-white">{h.created_at}</div>
             </div>

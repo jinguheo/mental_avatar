@@ -953,8 +953,18 @@ VOICE_SAMPLE    = AVATAR_DATA / "voice_sample.wav"
 PYTHON_EXE      = r"C:\Users\oem\miniconda3\envs\avatar\python.exe"   # SadTalker (numpy 1.26 패치판)
 XTTS_PYTHON_EXE = r"C:\Users\oem\miniconda3\envs\xtts\python.exe"     # Coqui XTTS v2
 
+# '내 목소리'가 아닌 템플릿 옵션 — XTTS v2 내장 스피커 중 선별 (speaker_wav 대신 speaker= 사용)
+VOICE_TEMPLATES = {
+    "pretty": "Daisy Studious",   # 예쁜 목소리 (또랑또랑한 여성)
+    "child":  "Gracie Wise",      # 어린이 목소리 (밝고 가벼운 톤)
+    "calm":   "Alison Dietlinde", # 차분한 목소리
+    "bright": "Sofia Hellen",     # 발랄한 목소리
+}
+
 # 비동기 생성 잡 저장소  {job_id: {stage, error, mp4_path}}
 _avatar_jobs: dict = {}
+# TTS+SadTalker는 같은 GPU를 쓰므로 동시에 두 개 이상 돌면 CUDA 메모리 충돌로 실패함 — 직렬화
+_avatar_gpu_lock = _threading.Lock()
 
 
 @app.route("/avatar/register_voice", methods=["POST"])
@@ -1029,9 +1039,12 @@ def avatar_register_face():
 def avatar_tts_only():
     """얼굴 없이 XTTS 음성 WAV만 생성 — 3D 아바타 립싱크용"""
     text = request.form.get("text", "").strip()
+    voice = request.form.get("voice", "mine").strip()
     if not text:
         return jsonify({"error": "text required"}), 400
-    if not VOICE_SAMPLE.exists():
+
+    template_speaker = VOICE_TEMPLATES.get(voice)
+    if template_speaker is None and not VOICE_SAMPLE.exists():
         return jsonify({"error": "voice sample not registered"}), 400
 
     import uuid as _uuid
@@ -1039,6 +1052,8 @@ def avatar_tts_only():
     job_dir.mkdir(parents=True, exist_ok=True)
     speech_path = job_dir / "speech.wav"
 
+    speaker_arg = f"speaker={repr(template_speaker)}" if template_speaker \
+        else f"speaker_wav={repr(str(VOICE_SAMPLE))}"
     tts_script = f"""
 import sys, os
 os.environ["COQUI_TOS_AGREED"] = "1"
@@ -1048,7 +1063,7 @@ from TTS.api import TTS
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
 tts.tts_to_file(
     text={repr(text)},
-    speaker_wav={repr(str(VOICE_SAMPLE))},
+    {speaker_arg},
     language="ko",
     file_path={repr(str(speech_path))}
 )
@@ -1068,7 +1083,14 @@ tts.tts_to_file(
 
 
 def _run_avatar_job(job_id: str, face_path: Path, text: str, job_dir: Path) -> None:
-    """백그라운드 스레드: TTS → SadTalker 순서로 실행."""
+    """백그라운드 스레드: TTS → SadTalker 순서로 실행.
+    GPU(XTTS+SadTalker)는 동시 실행 시 CUDA 메모리 충돌로 실패하므로 락으로 직렬화."""
+    job = _avatar_jobs[job_id]
+    with _avatar_gpu_lock:
+        _run_avatar_job_locked(job_id, face_path, text, job_dir)
+
+
+def _run_avatar_job_locked(job_id: str, face_path: Path, text: str, job_dir: Path) -> None:
     job = _avatar_jobs[job_id]
     speech_path = job_dir / "speech.wav"
 
@@ -1125,26 +1147,43 @@ tts.tts_to_file(
         cmd += ["--ref_pose", job["ref_pose"]]
     sad_env = dict(os.environ)
     sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
+    def _final_mp4():
+        # SadTalker가 비정상 종료해도 최종 영상(temp_ 접두사가 없는 mp4)이 이미 만들어져 있을 수 있음
+        candidates = [f for f in result_dir.rglob("*.mp4") if not f.name.startswith("temp_")]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda f: f.stat().st_mtime)
+
     try:
         subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
                        capture_output=True, timeout=600, env=sad_env)
     except subprocess.CalledProcessError as e:
+        mp4 = _final_mp4()
+        if mp4:
+            job["stage"] = "done"
+            job["mp4_path"] = str(mp4)
+            return
         job["stage"] = "error"
         job["error"] = f"SadTalker 실패: {e.stderr.decode(errors='replace')[:300]}"
         return
     except subprocess.TimeoutExpired:
+        mp4 = _final_mp4()
+        if mp4:
+            job["stage"] = "done"
+            job["mp4_path"] = str(mp4)
+            return
         job["stage"] = "error"
         job["error"] = "SadTalker 타임아웃 (600s)"
         return
 
-    mp4_files = list(result_dir.rglob("*.mp4"))
-    if not mp4_files:
+    mp4 = _final_mp4()
+    if not mp4:
         job["stage"] = "error"
         job["error"] = "출력 영상 없음"
         return
 
     job["stage"] = "done"
-    job["mp4_path"] = str(mp4_files[0])
+    job["mp4_path"] = str(mp4)
 
 
 @app.route("/avatar/generate_async", methods=["POST"])
@@ -1184,7 +1223,14 @@ def avatar_generate_async():
 
 
 def _run_record_job(job_id: str, face_path: Path, audio_path: Path, job_dir: Path) -> None:
-    """녹화 기반 잡: 오디오를 WAV로 변환 후 SadTalker 직접 실행 (XTTS 생략)."""
+    """녹화 기반 잡: 오디오를 WAV로 변환 후 SadTalker 직접 실행 (XTTS 생략).
+    SadTalker는 GPU를 쓰므로 _run_avatar_job과 동시 실행되지 않도록 같은 락으로 직렬화."""
+    job = _avatar_jobs[job_id]
+    with _avatar_gpu_lock:
+        _run_record_job_locked(job_id, face_path, audio_path, job_dir)
+
+
+def _run_record_job_locked(job_id: str, face_path: Path, audio_path: Path, job_dir: Path) -> None:
     job = _avatar_jobs[job_id]
     speech_path = job_dir / "speech.wav"
 
@@ -1214,22 +1260,36 @@ def _run_record_job(job_id: str, face_path: Path, audio_path: Path, job_dir: Pat
     ]
     sad_env = dict(os.environ)
     sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
+
+    def _final_mp4():
+        # SadTalker가 비정상 종료해도 최종 영상(temp_ 접두사가 없는 mp4)이 이미 만들어져 있을 수 있음
+        candidates = [f for f in result_dir.rglob("*.mp4") if not f.name.startswith("temp_")]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda f: f.stat().st_mtime)
+
     try:
         subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
                        capture_output=True, timeout=600, env=sad_env)
     except subprocess.CalledProcessError as e:
+        mp4 = _final_mp4()
+        if mp4:
+            job["stage"] = "done"; job["mp4_path"] = str(mp4); return
         job["stage"] = "error"
         job["error"] = f"SadTalker 실패: {e.stderr.decode(errors='replace')[:300]}"
         return
     except subprocess.TimeoutExpired:
+        mp4 = _final_mp4()
+        if mp4:
+            job["stage"] = "done"; job["mp4_path"] = str(mp4); return
         job["stage"] = "error"; job["error"] = "SadTalker 타임아웃"; return
 
-    mp4_files = list(result_dir.rglob("*.mp4"))
-    if not mp4_files:
+    mp4 = _final_mp4()
+    if not mp4:
         job["stage"] = "error"; job["error"] = "출력 영상 없음"; return
 
     job["stage"] = "done"
-    job["mp4_path"] = str(mp4_files[0])
+    job["mp4_path"] = str(mp4)
 
 
 @app.route("/avatar/record_generate", methods=["POST"])
@@ -1293,9 +1353,11 @@ def avatar_history():
             if not job_dir.is_dir():
                 continue
             job_id = job_dir.name
-            # result 폴더 바로 아래 최종 mp4 (타임스탬프.mp4 형태)
+            # result 폴더 아래 최종 mp4 — 평면(타임스탬프.mp4) 또는 중첩(타임스탬프/face##speech.mp4) 둘 다 지원
+            # face##speech_full.mp4 / temp_*.mp4는 중간 산출물이므로 제외
             mp4_files = sorted(
-                [f for f in job_dir.glob("result/*.mp4")],
+                [f for f in job_dir.glob("result/**/*.mp4")
+                 if not f.name.startswith("temp_") and not f.name.endswith("_full.mp4")],
                 key=lambda f: f.stat().st_mtime, reverse=True
             )
             if not mp4_files:
@@ -1321,7 +1383,11 @@ def avatar_history_video(job_id: str):
     job_dir = AVATAR_TMP / job_id
     if not job_dir.exists():
         return jsonify({"error": "not found"}), 404
-    mp4_files = sorted(job_dir.glob("result/*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+    mp4_files = sorted(
+        [f for f in job_dir.glob("result/**/*.mp4")
+         if not f.name.startswith("temp_") and not f.name.endswith("_full.mp4")],
+        key=lambda f: f.stat().st_mtime, reverse=True
+    )
     if not mp4_files:
         return jsonify({"error": "no video"}), 404
     return send_file(str(mp4_files[0]), mimetype="video/mp4", as_attachment=False)
@@ -1336,6 +1402,20 @@ def avatar_history_thumb(job_id: str):
         if face.exists():
             return send_file(str(face), mimetype=f"image/{ext}")
     return jsonify({"error": "no thumb"}), 404
+
+
+@app.route("/avatar/history/<job_id>", methods=["DELETE"])
+def avatar_history_delete(job_id: str):
+    """이전 생성 영상 삭제 — job 디렉터리 통째로 제거"""
+    job_dir = AVATAR_TMP / job_id
+    if not job_dir.exists() or not job_dir.is_dir():
+        return jsonify({"error": "not found"}), 404
+    import shutil
+    try:
+        shutil.rmtree(str(job_dir))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "ok"})
 
 
 _faceswap_jobs: dict = {}

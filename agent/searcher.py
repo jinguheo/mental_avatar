@@ -54,27 +54,71 @@ def generate_queries() -> list[str]:
         return [g["topic"] for g in gaps[:3]]
 
 
+def _mcp_json(resp: dict):
+    """MCP tools/call 응답에서 결과 JSON 페이로드 추출"""
+    try:
+        return resp["result"]["content"][0]["json"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _ingest_summary(query: str, summary: dict) -> str:
+    """웹 요약을 KG 노드로 추가 (graph + 벡터)"""
+    title   = summary.get("title") or query
+    content = summary.get("summary", "")
+    url     = summary.get("url", "")
+    node_id = graph.add_node(
+        type="chunk", title=title, content=content,
+        source_type="web_search", file_path=url
+    )
+    embeddings.add_document(node_id, title, content, {
+        "source_type": "web_search",
+        "file_path": url,
+        "query": query,
+    })
+    return node_id
+
+
 def enrich(auto_add: bool = False) -> dict:
-    """검색어로 웹 검색 → 요약 → KG 후보 생성"""
+    """검색어로 뉴스 검색 → 페이지 요약 → KG 보강
+    auto_add=True면 요약을 바로 KG에 추가, False면 검토용 후보만 반환"""
     queries = generate_queries()
     candidates = []
 
     for q in queries:
-        # news.ai 또는 web 검색 활용 (dashboard MCP에 web.search가 없으면 news.ai)
-        result = _mcp_call("news.ai", {"query": q}) if False else {}
-        # 실제로는 검색 URL을 web.summarize로 요약하는 흐름
-        # 여기서는 후보만 제시 (사용자 확인 후 추가)
-        candidates.append({
+        news = _mcp_json(_mcp_call("news.ai", {"query": q, "maxResults": 3})) or []
+        if not news:
+            candidates.append({"query": q, "status": "검색 결과 없음"})
+            continue
+
+        top = news[0]
+        url = top.get("url", "")
+        if not url:
+            candidates.append({"query": q, "status": "URL 없음", "title": top.get("title", "")})
+            continue
+
+        summary = _mcp_json(_mcp_call("web.summarize", {"url": url, "summarySentences": 4})) or {}
+        if not summary.get("summary"):
+            candidates.append({"query": q, "status": "요약 실패", "url": url, "title": top.get("title", "")})
+            continue
+        summary.setdefault("url", url)
+
+        candidate = {
             "query": q,
-            "status": "검색어 생성됨",
-            "note": "URL 확보 후 web.summarize로 요약 → /ingest"
-        })
+            "url": url,
+            "title": summary.get("title") or top.get("title", ""),
+            "summary": summary.get("summary"),
+            "status": "검토 대기",
+        }
+        if auto_add:
+            candidate["node_id"] = _ingest_summary(q, summary)
+            candidate["status"] = "KG에 추가됨"
+        candidates.append(candidate)
 
     return {
         "queries": queries,
         "candidates": candidates,
         "auto_add": auto_add,
-        "message": "검색어 생성 완료. 실제 보강은 web.summarize 연동 후."
     }
 
 
