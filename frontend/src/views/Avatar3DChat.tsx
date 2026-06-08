@@ -109,6 +109,17 @@ export default function Avatar3DChat({ settings }: Props) {
   const audioCtxRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
 
+  // 웹캠 얼굴 추적 — FaceTrackingPanel이 매 프레임 전달하는 표정(블렌드셰이프) 점수.
+  // 값이 들어오면(웹캠 ON) 3D 아바타 표정을 사용자 얼굴에 맞춰 구동한다.
+  const faceBlendRef = useRef<Record<string, number> | null>(null)
+  const handleFaceBlendshapes = useCallback((scores: Record<string, number> | null) => {
+    faceBlendRef.current = scores
+  }, [])
+  const headPoseRef = useRef<{ pitch: number; yaw: number; roll: number } | null>(null)
+  const handleHeadPose = useCallback((pose: { pitch: number; yaw: number; roll: number } | null) => {
+    headPoseRef.current = pose
+  }, [])
+
   // 브라우저 자동재생 정책 — AudioContext는 사용자 제스처 없이는 'suspended' 상태로 시작해 소리가 안 남.
   // 페이지 첫 클릭/키입력/터치에서 미리 생성·resume 해 둔다 (자동 인사 같은 무제스처 재생도 들리도록).
   useEffect(() => {
@@ -383,13 +394,15 @@ export default function Avatar3DChat({ settings }: Props) {
 
       const eyeball = new THREE.Mesh(new THREE.SphereGeometry(0.09, 32, 32), white)
       g.add(eyeball)
-      const irisM  = new THREE.Mesh(new THREE.CircleGeometry(0.056, 32), iris)
-      irisM.position.z = 0.087; g.add(irisM)
-      const pupilM = new THREE.Mesh(new THREE.CircleGeometry(0.028, 32), pupil)
-      pupilM.position.z = 0.088; g.add(pupilM)
+      // 홍채·동공·하이라이트 평면 원판은 구체 앞면(z=0.09)보다 살짝 앞에 둬야
+      // 구체 볼록부가 원판 가운데를 뚫고 나오는 흰 얼룩이 안 생긴다.
+      const irisM  = new THREE.Mesh(new THREE.CircleGeometry(0.05, 32), iris)
+      irisM.position.z = 0.091; g.add(irisM)
+      const pupilM = new THREE.Mesh(new THREE.CircleGeometry(0.025, 32), pupil)
+      pupilM.position.z = 0.0915; g.add(pupilM)
       const hiMat  = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.8 })
-      const hi     = new THREE.Mesh(new THREE.CircleGeometry(0.009, 8), hiMat)
-      hi.position.set(0.018, 0.018, 0.089); g.add(hi)
+      const hi     = new THREE.Mesh(new THREE.CircleGeometry(0.008, 8), hiMat)
+      hi.position.set(0.016, 0.016, 0.092); g.add(hi)
       return g
     }
     const eyeL = makeEye(-0.175); const eyeR = makeEye(0.175)
@@ -404,6 +417,7 @@ export default function Avatar3DChat({ settings }: Props) {
       )
       lid.position.set(xOff, 0.1, 0.39)
       lid.rotation.x = Math.PI; lid.scale.y = 0.08
+      lid.visible = false   // 깜빡임은 눈알 스쿼시로 처리 — 중심에서 부풀던 버그 눈꺼풀은 숨김
       return lid
     }
     lidLRef.current = makeLid(-0.175); lidRRef.current = makeLid(0.175)
@@ -430,13 +444,26 @@ export default function Avatar3DChat({ settings }: Props) {
     noseTip.position.y = -0.01; noseGroup.add(noseTip)
     group.add(noseGroup)
 
-    // ── 입술 ──
-    const lipUp = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.02, 8, 32, Math.PI), lip)
-    lipUp.position.set(0, -0.19, 0.44); lipUp.rotation.z = Math.PI; group.add(lipUp)
-    lipUpRef.current = lipUp
-    const lipDn = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.018, 8, 32, Math.PI), lip)
-    lipDn.position.set(0, -0.23, 0.44); group.add(lipDn)
-    lipDnRef.current = lipDn
+    // ── 입 (입 안 + 윗/아랫입술) ──
+    // 입 안: 입이 벌어졌을 때 보이는 어두운 안쪽 (없으면 벌어진 틈으로 배경이 비쳐 링처럼 보임)
+    const mouthInner = new THREE.Mesh(
+      new THREE.SphereGeometry(0.072, 24, 16),
+      new THREE.MeshStandardMaterial({ color: 0x3a1418, roughness: 0.95 })
+    )
+    mouthInner.position.set(0, -0.21, 0.42)
+    mouthInner.scale.set(1, 0.55, 0.35)
+    group.add(mouthInner)
+
+    // 윗/아랫입술: 가로로 누운 둥근 막대(캡슐) — 속이 찬 입술, 평상시엔 맞닿아 다물어진 입
+    const makeLip = (y: number, len: number, r: number) => {
+      const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 6, 16), lip)
+      m.rotation.z = Math.PI / 2
+      m.position.set(0, y, 0.45)
+      group.add(m)
+      return m
+    }
+    const lipUp = makeLip(-0.19, 0.13, 0.02);  lipUpRef.current = lipUp
+    const lipDn = makeLip(-0.23, 0.12, 0.022); lipDnRef.current = lipDn
 
     // ── 안경 (스타일에 따라 추가) ──
     if (avatarStyle.glasses) {
@@ -499,61 +526,111 @@ export default function Avatar3DChat({ settings }: Props) {
       // 아이들 호흡 (미세 상하)
       group.position.y = Math.sin(t * 0.6) * 0.012
 
-      // 미세 좌우 고개 움직임
-      group.rotation.y = Math.sin(t * 0.25) * 0.05
-      group.rotation.x = Math.sin(t * 0.18) * 0.015
+      // 웹캠 얼굴 추적 중이면 사용자 표정(블렌드셰이프)을 따라감 — 단, 아바타가 답변(TTS) 중일 때는
+      // 오디오 기반 립싱크가 입 모양을 맡도록 얼굴 추적은 잠시 양보한다 (둘이 충돌하면 입이 어색해짐)
+      const face = !analyserRef.current ? faceBlendRef.current : null
+      const pose = !analyserRef.current ? headPoseRef.current : null
+      const fb = (name: string) => face?.[name] ?? 0
 
-      // 눈 카메라 주시 (살짝 앞을 봄)
-      const lookTarget = new THREE.Vector3(0, 0.1, 10)
-      eyeGpLRef.current?.lookAt(lookTarget)
-      eyeGpRRef.current?.lookAt(lookTarget)
-
-      // 블링크
-      blinkNext -= 0.016
-      if (!blinking && blinkNext <= 0) { blinking = true; blinkT = 0; blinkNext = 3 + Math.random() * 4 }
-      if (blinking) {
-        blinkT += 0.06
-        const s = blinkT < Math.PI ? Math.sin(blinkT) : 0
-        if (lidLRef.current) { lidLRef.current.scale.y = 0.08 + s * 0.92; lidRRef.current!.scale.y = lidLRef.current.scale.y }
-        if (blinkT >= Math.PI) { blinking = false; lidLRef.current!.scale.y = 0.08; lidRRef.current!.scale.y = 0.08 }
+      // 고개 방향 — 추적 중이면 사용자 머리 회전(pitch/yaw/roll)을 그대로 따라가고,
+      // 추적 안 할 때는 기존 미세한 아이들 흔들림을 사용
+      if (pose) {
+        // MediaPipe 좌표계는 카메라 기준이라 좌우(yaw)·상하(pitch)가 아바타와 반대로 느껴져 부호 반전
+        group.rotation.y += (-pose.yaw   * 0.8 - group.rotation.y) * 0.25
+        group.rotation.x += (-pose.pitch * 0.8 - group.rotation.x) * 0.25
+        group.rotation.z += ( pose.roll  * 0.6 - group.rotation.z) * 0.25
+      } else {
+        group.rotation.y = Math.sin(t * 0.25) * 0.05
+        group.rotation.x = Math.sin(t * 0.18) * 0.015
+        group.rotation.z += (0 - group.rotation.z) * 0.1
       }
 
-      // 립싱크 + 말할 때 표정/움직임
-      if (analyserRef.current && jawRef.current) {
-        const buf = new Uint8Array(analyserRef.current.frequencyBinCount)
-        analyserRef.current.getByteFrequencyData(buf)
-        const avg = buf.slice(0, 8).reduce((a, b) => a + b, 0) / 8
-        const open = (avg / 255) * 0.18
-        jawRef.current.position.y += (-0.2 - open - jawRef.current.position.y) * 0.35
-        jawRef.current.rotation.x = -open * 1.2
+      // 눈은 정면(카메라) 고정 — lookAt을 쓰면 일반 Object3D 특성상 +Z가 타깃 반대로 향해
+      // 눈이 옆/뒤로 돌아가며 사팔·희번득처럼 보였음. 머리 회전(group)을 따라 자연스럽게 움직임.
 
-        // 입술이 턱을 따라 벌어지는 입모양
+      if (face) {
+        // MediaPipe 블렌드셰이프는 닫힌 입/뜬 눈에서도 0이 아니라 잡음(0.05~0.15)이 끼고,
+        // 최대로 벌려도 1.0까지 잘 안 가므로 — 데드존(lo 이하는 0)으로 잡음을 자르고
+        // 게인으로 실사용 범위를 0~1 풀스윙으로 정규화한다.
+        const norm = (v: number, lo: number, gain: number) => Math.min(1, Math.max(0, v - lo) * gain)
+
+        // 눈 깜빡임 — 좌우를 평균 내 동시에. 눈알 그룹을 세로로 찌그러뜨려(스쿼시) 감음.
+        // scale.y=1 뜬 상태, ~0.1 감은 상태. 중심 기준이라 눈 위치가 안 어긋남.
+        const blink = norm((fb('eyeBlinkLeft') + fb('eyeBlinkRight')) / 2, 0.15, 2.2)
+        const eyeSq = 1 - blink * 0.9
+        if (eyeGpLRef.current) eyeGpLRef.current.scale.y += (eyeSq - eyeGpLRef.current.scale.y) * 0.5
+        if (eyeGpRRef.current) eyeGpRRef.current.scale.y += (eyeSq - eyeGpRRef.current.scale.y) * 0.5
+
+        // 입 — jawOpen을 정규화 후 TTS 립싱크와 동일한 매핑으로 턱·입술을 벌림
+        const open = norm(fb('jawOpen'), 0.10, 2.5) * 0.18
+        if (jawRef.current) {
+          jawRef.current.position.y += (-0.2 - open - jawRef.current.position.y) * 0.4
+          jawRef.current.rotation.x += (-open * 1.2 - jawRef.current.rotation.x) * 0.4
+        }
         if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - open * 0.35 - lipUpRef.current.position.y) * 0.4
         if (lipDnRef.current) {
           lipDnRef.current.position.y += (-0.23 - open - lipDnRef.current.position.y) * 0.4
           const s = 1 + open * 1.6
-          lipDnRef.current.scale.set(s, 1, 1)
+          lipDnRef.current.scale.x += (s - lipDnRef.current.scale.x) * 0.4
         }
 
-        // 말하는 동안 살짝 끄덕이는 머리 움직임 + 눈썹 들썩임
-        if (groupRef.current) {
-          groupRef.current.rotation.x += Math.sin(t * 5) * open * 0.5
-        }
-        const browLift = Math.sin(t * 3.3) * open * 0.4
-        if (browLRef.current) browLRef.current.position.y += (0.24 + browLift - browLRef.current.position.y) * 0.3
-        if (browRRef.current) browRRef.current.position.y += (0.24 + browLift - browRRef.current.position.y) * 0.3
-      } else {
-        if (jawRef.current) {
-          jawRef.current.position.y += (-0.2 - jawRef.current.position.y) * 0.12
-          jawRef.current.rotation.x += (0 - jawRef.current.rotation.x) * 0.12
-        }
-        if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - lipUpRef.current.position.y) * 0.2
-        if (lipDnRef.current) {
-          lipDnRef.current.position.y += (-0.23 - lipDnRef.current.position.y) * 0.2
-          lipDnRef.current.scale.x += (1 - lipDnRef.current.scale.x) * 0.2
-        }
+        // 눈썹은 추적 시 그대로 두되 평상시 위치로 복귀 (좌우 비대칭 매핑이 어색해 보여 제거)
         if (browLRef.current) browLRef.current.position.y += (0.24 - browLRef.current.position.y) * 0.15
         if (browRRef.current) browRRef.current.position.y += (0.24 - browRRef.current.position.y) * 0.15
+      } else {
+        // ── 웹캠 미사용 시 — 기존 자동 블링크 + TTS 오디오 기반 립싱크 ──
+        blinkNext -= 0.016
+        if (!blinking && blinkNext <= 0) { blinking = true; blinkT = 0; blinkNext = 3 + Math.random() * 4 }
+        if (blinking) {
+          blinkT += 0.06
+          const s = blinkT < Math.PI ? Math.sin(blinkT) : 0   // 0→1→0
+          const sc = 1 - s * 0.9                               // 1(뜸)→0.1(감음)→1
+          if (eyeGpLRef.current) eyeGpLRef.current.scale.y = sc
+          if (eyeGpRRef.current) eyeGpRRef.current.scale.y = sc
+          if (blinkT >= Math.PI) {
+            blinking = false
+            if (eyeGpLRef.current) eyeGpLRef.current.scale.y = 1
+            if (eyeGpRRef.current) eyeGpRRef.current.scale.y = 1
+          }
+        }
+
+        if (analyserRef.current && jawRef.current) {
+          const buf = new Uint8Array(analyserRef.current.frequencyBinCount)
+          analyserRef.current.getByteFrequencyData(buf)
+          const avg = buf.slice(0, 8).reduce((a, b) => a + b, 0) / 8
+          // 조용한 구간(노이즈 바닥)은 입을 다물고, 말할 때만 살짝 벌어지게 — 폭을 절반 이하로 축소
+          const open = Math.max(0, avg / 255 - 0.18) * 0.1
+          jawRef.current.position.y += (-0.2 - open - jawRef.current.position.y) * 0.35
+          jawRef.current.rotation.x = -open * 1.2
+
+          // 입술이 턱을 따라 벌어지는 입모양
+          if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - open * 0.35 - lipUpRef.current.position.y) * 0.4
+          if (lipDnRef.current) {
+            lipDnRef.current.position.y += (-0.23 - open - lipDnRef.current.position.y) * 0.4
+            const s = 1 + open * 1.6
+            lipDnRef.current.scale.set(s, 1, 1)
+          }
+
+          // 말하는 동안 살짝 끄덕이는 머리 움직임 + 눈썹 들썩임
+          if (groupRef.current) {
+            groupRef.current.rotation.x += Math.sin(t * 5) * open * 0.5
+          }
+          const browLift = Math.sin(t * 3.3) * open * 0.4
+          if (browLRef.current) browLRef.current.position.y += (0.24 + browLift - browLRef.current.position.y) * 0.3
+          if (browRRef.current) browRRef.current.position.y += (0.24 + browLift - browRRef.current.position.y) * 0.3
+        } else {
+          if (jawRef.current) {
+            jawRef.current.position.y += (-0.2 - jawRef.current.position.y) * 0.12
+            jawRef.current.rotation.x += (0 - jawRef.current.rotation.x) * 0.12
+          }
+          if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - lipUpRef.current.position.y) * 0.2
+          if (lipDnRef.current) {
+            lipDnRef.current.position.y += (-0.23 - lipDnRef.current.position.y) * 0.2
+            lipDnRef.current.scale.x += (1 - lipDnRef.current.scale.x) * 0.2
+          }
+          if (browLRef.current) browLRef.current.position.y += (0.24 - browLRef.current.position.y) * 0.15
+          if (browRRef.current) browRRef.current.position.y += (0.24 - browRRef.current.position.y) * 0.15
+        }
       }
 
       renderer.render(scene, camera)
@@ -640,7 +717,9 @@ export default function Avatar3DChat({ settings }: Props) {
 
         {/* 얼굴 트래킹 패널 — 웹캠 + MediaPipe 추적 + 3D 메시 텍스처 매핑 + 윤곽선/녹화 (좌상단) */}
         <FaceTrackingPanel
-          className="absolute top-4 left-4 z-20 w-[26rem] max-w-[42vw] rounded-xl border border-gray-700 shadow-2xl bg-black overflow-hidden" />
+          className="absolute top-4 left-4 z-20 w-[26rem] max-w-[42vw] rounded-xl border border-gray-700 shadow-2xl bg-black overflow-hidden"
+          onBlendshapes={handleFaceBlendshapes}
+          onHeadPose={handleHeadPose} />
 
         {/* 3D 아바타 외형 스타일 선택 (우상단) */}
         <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-1.5 bg-black/40 backdrop-blur rounded-xl p-2">

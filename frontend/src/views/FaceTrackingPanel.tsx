@@ -37,9 +37,13 @@ interface Props {
   className?: string
   /** 컨트롤 바 / 윤곽·메시 토글 등 부가 UI를 보여줄지 (작은 미리보기에서는 숨길 수 있음) */
   compact?: boolean
+  /** 매 프레임 추적된 얼굴 표정(블렌드셰이프) 점수를 전달(추적 중단 시 null) — 다른 3D 아바타의 표정 구동에 사용 */
+  onBlendshapes?: (scores: Record<string, number> | null) => void
+  /** 매 프레임 추적된 머리 회전(라디안, 추적 중단 시 null) — 다른 3D 아바타의 고개 방향 구동에 사용 */
+  onHeadPose?: (pose: { pitch: number; yaw: number; roll: number } | null) => void
 }
 
-export default function FaceTrackingPanel({ className = '', compact = false }: Props) {
+export default function FaceTrackingPanel({ className = '', compact = false, onBlendshapes, onHeadPose }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoRef  = useRef<HTMLVideoElement>(null)
 
@@ -54,6 +58,10 @@ export default function FaceTrackingPanel({ className = '', compact = false }: P
   const landmarkerRef = useRef<unknown>(null)
   const streamRef     = useRef<MediaStream | null>(null)
   const lastTsRef     = useRef(0)
+  const onBlendshapesRef = useRef(onBlendshapes)
+  useEffect(() => { onBlendshapesRef.current = onBlendshapes }, [onBlendshapes])
+  const onHeadPoseRef = useRef(onHeadPose)
+  useEffect(() => { onHeadPoseRef.current = onHeadPose }, [onHeadPose])
 
   const [status, setStatus]           = useState<'idle' | 'loading' | 'tracking' | 'error'>('idle')
   const [statusMsg, setStatusMsg]     = useState('')
@@ -140,7 +148,7 @@ export default function FaceTrackingPanel({ className = '', compact = false }: P
       const vision = await FilesetResolver.forVisionTasks(MP_WASM)
       const lm = await FaceLandmarker.createFromOptions(vision, {
         baseOptions: { modelAssetPath: MP_MODEL, delegate: 'CPU' },
-        runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: false,
+        runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true,
         minFaceDetectionConfidence: 0.3,
         minFacePresenceConfidence: 0.3,
         minTrackingConfidence: 0.3,
@@ -225,6 +233,16 @@ export default function FaceTrackingPanel({ className = '', compact = false }: P
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const r = (lm as any).detectForVideo(video, now)
           if (r.faceLandmarks?.length > 0) updateFaceMesh(r.faceLandmarks[0])
+          if (onBlendshapesRef.current && r.faceBlendshapes?.length > 0) {
+            const scores: Record<string, number> = {}
+            for (const c of r.faceBlendshapes[0].categories) scores[c.categoryName] = c.score
+            onBlendshapesRef.current(scores)
+          }
+          if (onHeadPoseRef.current && r.facialTransformationMatrixes?.length > 0) {
+            const m = new THREE.Matrix4().fromArray(r.facialTransformationMatrixes[0].data)
+            const euler = new THREE.Euler().setFromRotationMatrix(m, 'YXZ')
+            onHeadPoseRef.current({ pitch: euler.x, yaw: euler.y, roll: euler.z })
+          }
         } catch { /* 일시적 오류 무시 */ }
       }
     }
@@ -301,6 +319,8 @@ export default function FaceTrackingPanel({ className = '', compact = false }: P
     videoTexRef.current?.dispose()
     videoTexRef.current = null
     setStatus('idle'); setStatusMsg('')
+    onBlendshapesRef.current?.(null)
+    onHeadPoseRef.current?.(null)
   }, [])
 
   // ── 녹화 → 립싱크 영상 생성 ──
