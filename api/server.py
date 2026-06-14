@@ -898,12 +898,21 @@ def health():
 
 # ── STT (faster-whisper) ──────────────────────────────────
 _whisper_model = None
+# WhisperModel(CTranslate2)은 동시 transcribe 호출에 안전하지 않다 — Flask threaded=True에서
+# VAD가 STT 요청을 연달아 보내면 같은 모델을 동시 호출해 네이티브 크래시가 난다. 락으로 직렬화.
+_whisper_lock = _threading.Lock()
 
 def _get_whisper():
     global _whisper_model
     if _whisper_model is None:
         from faster_whisper import WhisperModel
-        _whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+        # GPU(CTranslate2)는 onnxruntime과 무관 — 임베딩을 CPU로 격리한 뒤로 안전. CPU(5.7s) 대비 ~0.5s.
+        # CUDA 로드 실패 시 CPU로 폴백.
+        try:
+            _whisper_model = WhisperModel("small", device="cuda", compute_type="float16")
+        except Exception as e:
+            print(f"[whisper] CUDA 로드 실패, CPU 폴백: {e}")
+            _whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
     return _whisper_model
 
 STT_TMP = Path(__file__).parent.parent / "tmp" / "stt"
@@ -936,9 +945,11 @@ def stt_transcribe():
 
     try:
         model = _get_whisper()
-        segments, info = model.transcribe(str(tmp_wav), language="ko", beam_size=5)
-        text = " ".join(seg.text.strip() for seg in segments).strip()
-        return jsonify({"text": text, "language": info.language})
+        with _whisper_lock:   # 동시 호출 직렬화 (네이티브 크래시 방지)
+            segments, info = model.transcribe(str(tmp_wav), language="ko", beam_size=5)
+            text = " ".join(seg.text.strip() for seg in segments).strip()
+            language = info.language
+        return jsonify({"text": text, "language": language})
     except Exception as e:
         return jsonify({"error": f"STT 실패: {e}"}), 500
     finally:

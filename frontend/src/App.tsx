@@ -2,13 +2,14 @@ import { useState, useEffect } from 'react'
 import { DEFAULT_SETTINGS, type Settings } from './types'
 import { claudeWebAutoConnect, claudeWebCaptureSession } from './services/claudeWeb'
 import AvatarStudio from './views/AvatarStudio'
-import Avatar3DChat from './views/Avatar3DChat'
+import Avatar3DChat, { type ChatMsg } from './views/Avatar3DChat'
 import KnowledgeGraph from './views/KnowledgeGraph'
 import SettingsView from './views/Settings'
 
 type Tab = 'mode-a' | 'mode-c' | 'kg' | 'settings'
 
 const STORAGE_KEY = 'mental-avatar-settings'
+const CHAT_STORAGE_KEY = 'mental-avatar-chat'
 
 function loadSettings(): Settings {
   try {
@@ -18,9 +19,18 @@ function loadSettings(): Settings {
   return { ...DEFAULT_SETTINGS }
 }
 
+function loadChat(): ChatMsg[] {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch { /* ignore */ }
+  return []
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>('kg')
   const [settings, setSettings] = useState<Settings>(loadSettings)
+  const [avatarMessages, setAvatarMessages] = useState<ChatMsg[]>(loadChat)
 
   // MCP 서버에서 캐시된 세션키 자동 조회 (앱 시작 시, quick_only)
   useEffect(() => {
@@ -35,6 +45,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
   }, [settings])
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(avatarMessages))
+  }, [avatarMessages])
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'kg',       label: '🧠 지식 그래프' },
@@ -67,7 +81,7 @@ export default function App() {
       {/* 콘텐츠 */}
       <main className="flex-1 overflow-hidden">
         {tab === 'mode-a'   && <AvatarStudio />}
-        {tab === 'mode-c'   && <Avatar3DChat settings={settings} />}
+        {tab === 'mode-c'   && <Avatar3DChat settings={settings} messages={avatarMessages} setMessages={setAvatarMessages} />}
         {tab === 'kg'       && <KnowledgeGraph settings={settings} />}
         {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
       </main>

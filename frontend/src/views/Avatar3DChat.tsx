@@ -2,7 +2,7 @@
  * Avatar3DChat — 리셉션 3D 아바타
  * 사용자를 맞이하고 LLM 출력을 TTS로 전달하는 역할
  */
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, type Dispatch, type SetStateAction } from 'react'
 import * as THREE from 'three'
 import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
 import FaceTrackingPanel from './FaceTrackingPanel'
@@ -19,8 +19,12 @@ const RECEPTION_NOTE = `## 지금 상황
 나는 지금 방문객을 맞이하는 리셉션 모드입니다. 따뜻하고 전문적으로 응대하고,
 답변은 2~3문장으로 간결하게 하세요.`
 
-interface ChatMsg { role: 'user' | 'assistant'; content: string }
-interface Props { settings: Settings }
+export interface ChatMsg { role: 'user' | 'assistant'; content: string }
+interface Props {
+  settings: Settings
+  messages: ChatMsg[]
+  setMessages: Dispatch<SetStateAction<ChatMsg[]>>
+}
 
 // ── 3D 아바타 외형 스타일 후보군 ──
 interface AvatarStyle {
@@ -52,7 +56,7 @@ const TEMPLATE_VOICES: VoiceOption[] = [
 ]
 const VOICE_OPTION_KEY = 'mental-avatar-3d-voice'
 
-export default function Avatar3DChat({ settings }: Props) {
+export default function Avatar3DChat({ settings, messages, setMessages }: Props) {
   const [avatarStyleId, setAvatarStyleId] = useState<string>(() => {
     try { return localStorage.getItem(AVATAR_STYLE_KEY) || AVATAR_STYLES[0].id } catch { return AVATAR_STYLES[0].id }
   })
@@ -139,11 +143,13 @@ export default function Avatar3DChat({ settings }: Props) {
   }, [])
 
   // 채팅
-  const [messages, setMessages]       = useState<ChatMsg[]>([])
   const [input, setInput]             = useState('')
   const [chatLoading, setChatLoading] = useState(false)
   const [speaking, setSpeaking]       = useState(false)
+  const speakingRef = useRef(false)   // 아바타가 말하는 중 (피드백 루프 방지용)
+  const sttBusyRef  = useRef(false)   // STT 처리 중 (요청 중복 방지용)
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const sendMessageRef = useRef<(overrideText?: string) => void>(() => {})
 
   // 음성 인식(STT) — VAD(음성 감지) 기반 자동 녹음: 한 번 누르면 말하기 시작/끝을 자동으로 감지
   const [recording, setRecording] = useState(false)   // 듣기 모드 on/off (마이크 켜짐)
@@ -160,8 +166,18 @@ export default function Avatar3DChat({ settings }: Props) {
 
   // ── TTS ────────────────────────────────────────────────
   const playTTS = useCallback(async (text: string) => {
-    setSpeaking(true)
+    setSpeaking(true); speakingRef.current = true
     const voice = selectedVoice
+    // done은 한 번만 실행 + failsafe 타이머 해제. TTS가 어떤 경로로 실패하든 speaking 플래그가
+    // 영구히 박혀 마이크가 막히는 일을 막는다.
+    let finished = false
+    const failsafe = setTimeout(() => done(), 2000 + text.length * 200)
+    const done = () => {
+      if (finished) return
+      finished = true
+      clearTimeout(failsafe)
+      setSpeaking(false); speakingRef.current = false
+    }
 
     // 시스템 목소리 선택 시 — 브라우저 내장 TTS로 직접 재생 (XTTS 호출 생략)
     if (voice.kind === 'system') {
@@ -170,7 +186,9 @@ export default function Avatar3DChat({ settings }: Props) {
       if (matched) u.voice = matched
       u.lang = matched?.lang || 'ko-KR'
       u.rate = 0.95
-      u.onend = () => setSpeaking(false)
+      u.onend = done
+      u.onerror = done
+      try { speechSynthesis.cancel() } catch { /* ignore */ }
       speechSynthesis.speak(u)
       return
     }
@@ -190,13 +208,18 @@ export default function Avatar3DChat({ settings }: Props) {
       analyserRef.current = analyser
       const src = ctx.createMediaElementSource(audio)
       src.connect(analyser); analyser.connect(ctx.destination)
-      audio.onended = () => { setSpeaking(false); analyserRef.current = null; URL.revokeObjectURL(url) }
-      audio.play()
+      const cleanup = () => { done(); analyserRef.current = null; URL.revokeObjectURL(url) }
+      audio.onended = cleanup
+      audio.onerror = cleanup
+      // play()가 자동재생 정책에 막혀 reject되면 onended가 안 불려 speaking 상태가 영구히 박힘 → 반드시 풀어준다
+      audio.play().catch(() => cleanup())
     } catch {
       // fallback: 브라우저 내장 TTS
       const u = new SpeechSynthesisUtterance(text)
       u.lang = 'ko-KR'; u.rate = 0.95
-      u.onend = () => setSpeaking(false)
+      u.onend = done
+      u.onerror = done
+      try { speechSynthesis.cancel() } catch { /* ignore */ }
       speechSynthesis.speak(u)
     }
   }, [selectedVoice, systemVoices])
@@ -211,23 +234,24 @@ export default function Avatar3DChat({ settings }: Props) {
     if (!chunks.length) return
     const blob = new Blob(chunks, { type: 'audio/webm' })
     if (!blob.size) return
-    setSttBusy(true)
+    setSttBusy(true); sttBusyRef.current = true
     try {
       const form = new FormData()
       form.append('audio', blob, 'stt.webm')
-      const res = await fetch(`${API}/stt/transcribe`, { method: 'POST', body: form })
+      // 타임아웃(20초) — 서버가 느리거나 멈춰도 "처리 중"에 영구히 갇히지 않게
+      const res = await fetch(`${API}/stt/transcribe`, { method: 'POST', body: form, signal: AbortSignal.timeout(20000) })
       const data = await res.json()
       if (data.error) {
         setSttError(data.error)
       } else {
         const text = (data.text || '').trim()
         setSttResult({ text, language: data.language })
-        if (text) setInput(prev => (prev ? `${prev} ${text}` : text))
+        if (text) sendMessageRef.current(text)   // 인식 끝나면 자동으로 대화 전송
       }
     } catch {
       setSttError('인식 요청 실패 — API 서버 연결을 확인해주세요')
     } finally {
-      setSttBusy(false)
+      setSttBusy(false); sttBusyRef.current = false
     }
   }, [])
 
@@ -246,6 +270,7 @@ export default function Avatar3DChat({ settings }: Props) {
   const startStt = useCallback(async () => {
     if (recording) { stopStt(); return }
     setSttError(''); setSttResult(null)
+    sttBusyRef.current = false   // 혹시 박혀있을 수 있는 처리중 플래그 초기화 (안전장치)
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -267,6 +292,11 @@ export default function Avatar3DChat({ settings }: Props) {
     let isRecording = false
     const tick = () => {
       if (!sttListeningRef.current) return
+      // 아바타가 말하는 중이거나 직전 인식이 아직 처리 중이면 새 녹음을 시작하지 않는다
+      // (아바타 목소리를 다시 녹음→인식→전송하는 피드백 루프 + 요청 폭주 방지)
+      if (speakingRef.current || sttBusyRef.current) {
+        if (!isRecording) { requestAnimationFrame(tick); return }
+      }
       analyser.getByteFrequencyData(buf)
       const avg = buf.reduce((a, b) => a + b, 0) / buf.length
 
@@ -293,6 +323,13 @@ export default function Avatar3DChat({ settings }: Props) {
     }
     tick()
   }, [recording, stopStt, transcribeChunk])
+
+  // 페이지 진입 시 자동으로 듣기 모드 시작 — 클릭 없이 바로 대화 가능
+  useEffect(() => {
+    startStt()
+    return () => stopStt()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── 씬 초기화 ───────────────────────────────────────────
   useEffect(() => {
@@ -650,14 +687,16 @@ export default function Avatar3DChat({ settings }: Props) {
     }
   }, [avatarStyleId])
 
-  // ── 자동 인사 (페이지 로드 시) ──
+  // ── 자동 인사 (최초 진입 시에만 — 대화 기록은 탭 전환 후에도 유지됨) ──
   useEffect(() => {
+    if (messages.length > 0) return
     const timer = setTimeout(() => {
       setMessages([{ role: 'assistant', content: GREETING }])
       respond(GREETING)
     }, 1200)
     return () => clearTimeout(timer)
-  }, [respond])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // 시스템 프롬프트: 백엔드 /avatar/context(프로파일+관심사+RAG)에 리셉션 모드 안내를 덧붙임
   const buildSystemPrompt = useCallback(async (userText: string): Promise<string> => {
@@ -680,8 +719,8 @@ export default function Avatar3DChat({ settings }: Props) {
   }, [])
 
   // ── Claude 호출 ──
-  const sendMessage = useCallback(async () => {
-    const text = input.trim()
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim()
     if (!text || chatLoading) return
     const userMsg: ChatMsg = { role: 'user', content: text }
     setMessages(prev => [...prev, userMsg]); setInput(''); setChatLoading(true)
@@ -704,6 +743,8 @@ export default function Avatar3DChat({ settings }: Props) {
       respond(errMsg)
     } finally { setChatLoading(false) }
   }, [input, chatLoading, messages, settings, respond, buildSystemPrompt, logTurn])
+
+  useEffect(() => { sendMessageRef.current = sendMessage }, [sendMessage])
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
@@ -852,7 +893,7 @@ export default function Avatar3DChat({ settings }: Props) {
               placeholder="무엇이든 물어보세요… (또는 🎤 눌러서 말하기)"
               disabled={!isConnected}
               className="flex-1 bg-gray-800 text-sm text-gray-200 rounded-xl px-3 py-2 outline-none border border-gray-700 focus:border-blue-600 placeholder-gray-600 disabled:opacity-40" />
-            <button onClick={sendMessage}
+            <button onClick={() => sendMessage()}
               disabled={!input.trim() || chatLoading || !isConnected}
               className="px-3 py-2 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-800 disabled:text-gray-600 text-sm rounded-xl transition">
               ↑

@@ -155,9 +155,37 @@ def avatar_summary() -> dict:
     }
 
 
+OLLAMA_URL   = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "gemma4:e2b"
+
+
 def _llm_call(prompt: str) -> str:
-    """MCP 우선 → API 키 → 플레이스홀더"""
-    # 1순위: dashboard MCP
+    """로컬 Ollama 우선 → dashboard MCP → ANTHROPIC_API_KEY → 플레이스홀더.
+
+    extractor와 동일하게 로컬 Ollama를 1순위로 둬, 외부 자격증명 없이도
+    1인칭 자기 요약·말투 학습 분석이 실제로 동작하게 한다."""
+    # 1순위: Ollama (로컬, 항상 시도)
+    try:
+        import urllib.request
+        payload = json.dumps({
+            "model": OLLAMA_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.2},
+        }).encode()
+        req = urllib.request.Request(
+            OLLAMA_URL, data=payload,
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            body = json.loads(resp.read())
+        text = body["message"]["content"].strip()
+        if text:
+            return text
+    except Exception as e:
+        print(f"[pattern] Ollama 실패, MCP 재시도: {e}")
+
+    # 2순위: dashboard MCP
     try:
         from . import claude_mcp
         if claude_mcp.is_available():
@@ -165,7 +193,7 @@ def _llm_call(prompt: str) -> str:
     except Exception as e:
         print(f"[pattern] MCP 실패: {e}")
 
-    # 2순위: ANTHROPIC_API_KEY
+    # 3순위: ANTHROPIC_API_KEY
     if env.get("ANTHROPIC_API_KEY"):
         try:
             import anthropic
@@ -179,11 +207,4 @@ def _llm_call(prompt: str) -> str:
         except Exception as e:
             return f"(요약 생성 실패: {e})"
 
-    return "(dashboard MCP 또는 ANTHROPIC_API_KEY 설정 시 1인칭 자기 요약이 생성됩니다)"
-
-    return {
-        "summary": summary_text,
-        "core_interests": interests,
-        "trends": trends[:10],
-        "gaps": gaps[:5]
-    }
+    return "(로컬 Ollama·dashboard MCP·ANTHROPIC_API_KEY 중 하나가 있어야 1인칭 자기 요약이 생성됩니다)"

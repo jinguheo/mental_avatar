@@ -1,10 +1,21 @@
 """임베딩 생성 + Chroma 벡터 저장"""
 import os
 import chromadb
+from chromadb.utils import embedding_functions
 
 CHROMA_PATH = os.path.join(os.path.dirname(__file__), "..", "db", "vectors")
 _chroma_client = None
 _collection = None
+
+# ChromaDB 기본 임베딩(ONNXMiniLM)은 onnxruntime을 쓰는데, 이 환경엔 faceswap용 onnxruntime-gpu가
+# 깔려 있어 기본값이면 CUDA/TensorRT 프로바이더를 탐색하다 깨진 cudnn/nvinfer DLL을 만나 프로세스가
+# 통째로 죽는다(try/except로 못 잡는 네이티브 크래시). CPU 프로바이더만 쓰도록 강제해 회피한다.
+# name()을 'default'로 맞춰 기존 컬렉션(기본 임베딩으로 생성됨)과의 임베딩 함수 충돌도 회피한다.
+class _CPUEmbedFn(embedding_functions.ONNXMiniLM_L6_V2):
+    def name(self) -> str:
+        return "default"
+
+_embed_fn = _CPUEmbedFn(preferred_providers=["CPUExecutionProvider"])
 
 
 def _get_collection():
@@ -13,7 +24,8 @@ def _get_collection():
         _chroma_client = chromadb.PersistentClient(path=os.path.abspath(CHROMA_PATH))
         _collection = _chroma_client.get_or_create_collection(
             name="mental_avatar",
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=_embed_fn,
         )
     return _collection
 
