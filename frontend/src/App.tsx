@@ -3,10 +3,11 @@ import { DEFAULT_SETTINGS, type Settings } from './types'
 import { claudeWebAutoConnect, claudeWebCaptureSession } from './services/claudeWeb'
 import AvatarStudio from './views/AvatarStudio'
 import Avatar3DChat, { type ChatMsg } from './views/Avatar3DChat'
+import RealisticAvatar from './views/RealisticAvatar'
 import KnowledgeGraph from './views/KnowledgeGraph'
 import SettingsView from './views/Settings'
 
-type Tab = 'mode-a' | 'mode-c' | 'kg' | 'settings'
+type Tab = 'mode-a' | 'mode-c' | 'mode-r' | 'kg' | 'settings'
 
 const STORAGE_KEY = 'mental-avatar-settings'
 const CHAT_STORAGE_KEY = 'mental-avatar-chat'
@@ -54,6 +55,7 @@ export default function App() {
     { id: 'kg',       label: '🧠 지식 그래프' },
     { id: 'mode-a',   label: '🎬 영상 아바타' },
     { id: 'mode-c',   label: '🤖 AI 아바타' },
+    { id: 'mode-r',   label: '✨ 실사 아바타' },
     { id: 'settings', label: '⚙ 설정' },
   ]
 
@@ -82,6 +84,7 @@ export default function App() {
       <main className="flex-1 overflow-hidden">
         {tab === 'mode-a'   && <AvatarStudio />}
         {tab === 'mode-c'   && <Avatar3DChat settings={settings} messages={avatarMessages} setMessages={setAvatarMessages} />}
+        {tab === 'mode-r'   && <RealisticAvatar />}
         {tab === 'kg'       && <KnowledgeGraph settings={settings} />}
         {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
       </main>
