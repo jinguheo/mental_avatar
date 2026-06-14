@@ -687,14 +687,25 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     }
   }, [avatarStyleId])
 
-  // ── 자동 인사 (최초 진입 시에만 — 대화 기록은 탭 전환 후에도 유지됨) ──
+  // ── 자동 인사 / 이전 대화 불러오기 (최초 진입 시에만 — 이후엔 탭 전환·새로고침해도 유지됨) ──
   useEffect(() => {
     if (messages.length > 0) return
-    const timer = setTimeout(() => {
+    let cancelled = false
+    const timer = setTimeout(async () => {
+      // 서버에 기록된 이전 대화가 있으면 이어서 보여주고, 없으면 인사로 시작
+      try {
+        const res = await fetch(`${API}/conversation/history?view=avatar3d_chat&limit=50`)
+        const data = await res.json()
+        if (!cancelled && Array.isArray(data?.messages) && data.messages.length > 0) {
+          setMessages(data.messages)
+          return
+        }
+      } catch { /* 조회 실패 시 인사로 폴백 */ }
+      if (cancelled) return
       setMessages([{ role: 'assistant', content: GREETING }])
       respond(GREETING)
     }, 1200)
-    return () => clearTimeout(timer)
+    return () => { cancelled = true; clearTimeout(timer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

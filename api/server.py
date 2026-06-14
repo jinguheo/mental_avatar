@@ -668,6 +668,16 @@ def conversation_log():
     return jsonify({"success": True})
 
 
+@app.route("/conversation/history", methods=["GET"])
+def conversation_history():
+    """특정 화면(view)의 최근 대화 — 새로고침/재방문 시 이어보기용"""
+    view = request.args.get("view", "")
+    limit = int(request.args.get("limit", 50))
+    rows = avatar_core.recent_conversations(limit=limit, view=view)
+    rows.reverse()  # 오래된 것부터
+    return jsonify({"messages": [{"role": r["role"], "content": r["content"]} for r in rows]})
+
+
 @app.route("/conversation/style_analysis", methods=["GET"])
 def conversation_style_analysis():
     """최근 대화에서 말투/성격/톤을 추정 (학습 루프 1단계: 제안)"""

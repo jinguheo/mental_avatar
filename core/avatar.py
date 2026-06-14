@@ -156,17 +156,18 @@ def log_conversation(view: str, role: str, content: str) -> None:
     conn.close()
 
 
-def recent_conversations(limit: int = 50, role: str = "") -> list:
+def recent_conversations(limit: int = 50, role: str = "", view: str = "") -> list:
     conn = get_conn()
+    where, params = [], []
     if role:
-        rows = conn.execute(
-            "SELECT * FROM conversations WHERE role=? ORDER BY created_at DESC LIMIT ?",
-            (role, limit)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM conversations ORDER BY created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+        where.append("role=?"); params.append(role)
+    if view:
+        where.append("view=?"); params.append(view)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"SELECT * FROM conversations {clause} ORDER BY created_at DESC LIMIT ?",
+        (*params, limit)
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
