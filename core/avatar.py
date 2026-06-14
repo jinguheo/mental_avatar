@@ -156,13 +156,15 @@ def log_conversation(view: str, role: str, content: str) -> None:
     conn.close()
 
 
-def recent_conversations(limit: int = 50, role: str = "", view: str = "") -> list:
+def recent_conversations(limit: int = 50, role: str = "", view: str = "", since: str = "") -> list:
     conn = get_conn()
     where, params = [], []
     if role:
         where.append("role=?"); params.append(role)
     if view:
         where.append("view=?"); params.append(view)
+    if since:
+        where.append("created_at>?"); params.append(since)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
         f"SELECT * FROM conversations {clause} ORDER BY created_at DESC LIMIT ?",

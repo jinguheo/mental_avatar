@@ -673,7 +673,8 @@ def conversation_history():
     """특정 화면(view)의 최근 대화 — 새로고침/재방문 시 이어보기용"""
     view = request.args.get("view", "")
     limit = int(request.args.get("limit", 50))
-    rows = avatar_core.recent_conversations(limit=limit, view=view)
+    since = request.args.get("since", "")
+    rows = avatar_core.recent_conversations(limit=limit, view=view, since=since)
     rows.reverse()  # 오래된 것부터
     return jsonify({"messages": [{"role": r["role"], "content": r["content"]} for r in rows]})
 

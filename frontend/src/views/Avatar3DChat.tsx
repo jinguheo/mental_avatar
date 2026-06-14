@@ -9,6 +9,14 @@ import FaceTrackingPanel from './FaceTrackingPanel'
 import type { Settings } from '@/types'
 
 const API = 'http://127.0.0.1:8766'
+const CHAT_SINCE_KEY = 'mental-avatar-chat-since'
+
+// SQLite의 created_at(datetime('now','localtime'))과 동일한 'YYYY-MM-DD HH:MM:SS' 형식(로컬시간)
+function localTimestamp(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
 
 const GREETING = '안녕하세요! 반갑습니다. 무엇이든 도와드리겠습니다.'
 const SYSTEM   = `당신은 사용자를 맞이하는 AI 리셉션 아바타입니다.
@@ -693,8 +701,10 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     let cancelled = false
     const timer = setTimeout(async () => {
       // 서버에 기록된 이전 대화가 있으면 이어서 보여주고, 없으면 인사로 시작
+      // ("새로 시작" 이후엔 since 이전 기록은 제외)
       try {
-        const res = await fetch(`${API}/conversation/history?view=avatar3d_chat&limit=50`)
+        const since = localStorage.getItem(CHAT_SINCE_KEY) || ''
+        const res = await fetch(`${API}/conversation/history?view=avatar3d_chat&limit=50&since=${encodeURIComponent(since)}`)
         const data = await res.json()
         if (!cancelled && Array.isArray(data?.messages) && data.messages.length > 0) {
           setMessages(data.messages)
@@ -708,6 +718,13 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     return () => { cancelled = true; clearTimeout(timer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // ── 새로 시작: 이전 대화를 더 이상 불러오지 않도록 기준 시각 기록 후 인사로 초기화 ──
+  const resetChat = useCallback(() => {
+    localStorage.setItem(CHAT_SINCE_KEY, localTimestamp())
+    setMessages([{ role: 'assistant', content: GREETING }])
+    respond(GREETING)
+  }, [respond, setMessages])
 
   // 시스템 프롬프트: 백엔드 /avatar/context(프로파일+관심사+RAG)에 리셉션 모드 안내를 덧붙임
   const buildSystemPrompt = useCallback(async (userText: string): Promise<string> => {
@@ -832,9 +849,18 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
       {/* 채팅 패널 */}
       <div className="w-80 flex flex-col border-l border-gray-800 bg-gray-900/95">
         <div className="px-4 py-3 border-b border-gray-800 bg-gray-900">
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
-            <h2 className="text-sm font-semibold text-gray-200">AI 리셉션 아바타</h2>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
+              <h2 className="text-sm font-semibold text-gray-200">AI 리셉션 아바타</h2>
+            </div>
+            <button
+              onClick={resetChat}
+              className="text-xs text-gray-400 hover:text-gray-200 border border-gray-700 rounded px-2 py-0.5 hover:bg-gray-800"
+              title="이전 대화를 지우고 새로 시작합니다"
+            >
+              새로 시작
+            </button>
           </div>
           <p className="text-xs text-gray-500 mt-0.5">
             {isConnected ? '응답 시 자동으로 음성 재생' : '설정에서 API Key를 입력해주세요'}
