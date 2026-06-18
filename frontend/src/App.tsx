@@ -32,6 +32,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('kg')
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [avatarMessages, setAvatarMessages] = useState<ChatMsg[]>(loadChat)
+  const [realisticMessages, setRealisticMessages] = useState<ChatMsg[]>([])
 
   // MCP 서버에서 캐시된 세션키 자동 조회 (앱 시작 시, quick_only)
   useEffect(() => {
@@ -84,7 +85,7 @@ export default function App() {
       <main className="flex-1 overflow-hidden">
         {tab === 'mode-a'   && <AvatarStudio />}
         {tab === 'mode-c'   && <Avatar3DChat settings={settings} messages={avatarMessages} setMessages={setAvatarMessages} />}
-        {tab === 'mode-r'   && <RealisticAvatar />}
+        {tab === 'mode-r'   && <RealisticAvatar settings={settings} messages={realisticMessages} setMessages={setRealisticMessages} />}
         {tab === 'kg'       && <KnowledgeGraph settings={settings} />}
         {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
       </main>
