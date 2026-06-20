@@ -11,6 +11,46 @@ import type { ChatMsg } from './Avatar3DChat'
 
 const API = 'http://127.0.0.1:8766'
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
+const IDB_NAME = 'mental-avatar-glb'
+const IDB_STORE = 'glb-files'
+
+interface GlbEntry { name: string; size: number; data: ArrayBuffer; loadedAt: number }
+
+function openIDB(): Promise<IDBDatabase> {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(IDB_NAME, 1)
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE, { keyPath: 'name' })
+    req.onsuccess = () => res(req.result)
+    req.onerror = () => rej(req.error)
+  })
+}
+async function idbSave(entry: GlbEntry) {
+  const db = await openIDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).put(entry)
+    tx.oncomplete = () => res()
+    tx.onerror = () => rej(tx.error)
+  })
+}
+async function idbList(): Promise<GlbEntry[]> {
+  const db = await openIDB()
+  return new Promise((res, rej) => {
+    const tx = db.transaction(IDB_STORE, 'readonly')
+    const req = tx.objectStore(IDB_STORE).getAll()
+    req.onsuccess = () => res((req.result as GlbEntry[]).sort((a, b) => b.loadedAt - a.loadedAt))
+    req.onerror = () => rej(req.error)
+  })
+}
+async function idbDelete(name: string) {
+  const db = await openIDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).delete(name)
+    tx.oncomplete = () => res()
+    tx.onerror = () => rej(tx.error)
+  })
+}
 
 const GREETING = '안녕하세요! 반갑습니다. 무엇이든 도와드리겠습니다.'
 const SYSTEM = `당신은 사용자를 맞이하는 AI 아바타입니다.
@@ -46,6 +86,14 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const [dragging, setDragging] = useState(false)
   const [fileName, setFileName] = useState(() => localStorage.getItem(AVATAR_FILE_KEY) || '')
   const [serverOnline, setServerOnline] = useState(true)
+  const [glbList, setGlbList] = useState<GlbEntry[]>([])
+  const [showList, setShowList] = useState(false)
+
+  const refreshList = useCallback(() => {
+    idbList().then(setGlbList).catch(() => {})
+  }, [])
+
+  useEffect(() => { refreshList() }, [refreshList])
 
   const checkServer = useCallback(async () => {
     try {
@@ -289,13 +337,45 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     }, undefined, (err) => { setError(String(err)); setLoading(false) })
   }, [])
 
+  // 마운트 시 마지막 GLB 자동 로드
+  useEffect(() => {
+    const lastName = localStorage.getItem(AVATAR_FILE_KEY)
+    if (!lastName) return
+    idbList().then(list => {
+      const entry = list.find(e => e.name === lastName) || list[0]
+      if (entry) {
+        const blob = new Blob([entry.data], { type: 'model/gltf-binary' })
+        const url = URL.createObjectURL(blob)
+        objectUrlRef.current = url
+        setFileName(entry.name)
+        loadGLB(url)
+      }
+    }).catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const handleFile = useCallback((file: File) => {
     if (!file.name.endsWith('.glb')) { setError('GLB 파일만 지원합니다'); return }
+    file.arrayBuffer().then(data => {
+      idbSave({ name: file.name, size: file.size, data, loadedAt: Date.now() })
+        .then(refreshList).catch(() => {})
+    })
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
     const url = URL.createObjectURL(file); objectUrlRef.current = url
     localStorage.setItem(AVATAR_FILE_KEY, file.name); setFileName(file.name)
+    setShowList(false)
     loadGLB(url)
-  }, [loadGLB])
+  }, [loadGLB, refreshList])
+
+  const loadFromIDB = useCallback((entry: GlbEntry) => {
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+    const blob = new Blob([entry.data], { type: 'model/gltf-binary' })
+    const url = URL.createObjectURL(blob); objectUrlRef.current = url
+    localStorage.setItem(AVATAR_FILE_KEY, entry.name); setFileName(entry.name)
+    setShowList(false)
+    idbSave({ ...entry, loadedAt: Date.now() }).then(refreshList).catch(() => {})
+    loadGLB(url)
+  }, [loadGLB, refreshList])
 
   useEffect(() => () => {
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
@@ -371,12 +451,42 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
       >
         <div ref={containerRef} className="w-full h-full" />
 
-        {/* 파일 선택 버튼 (좌상단) */}
-        <div className="absolute top-3 left-3 z-20">
-          <label className="flex items-center gap-2 bg-black/50 backdrop-blur text-xs text-gray-300 hover:text-white rounded-lg px-3 py-1.5 cursor-pointer border border-gray-700 hover:border-gray-500 transition-colors">
-            📁 {fileName || 'GLB 파일 선택'}
-            <input type="file" accept=".glb" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
-          </label>
+        {/* 파일 선택 + 목록 (좌상단) */}
+        <div className="absolute top-3 left-3 z-20 flex flex-col gap-1">
+          <div className="flex gap-1">
+            <label className="flex items-center gap-2 bg-black/50 backdrop-blur text-xs text-gray-300 hover:text-white rounded-lg px-3 py-1.5 cursor-pointer border border-gray-700 hover:border-gray-500 transition-colors">
+              📁 {fileName || 'GLB 파일 선택'}
+              <input type="file" accept=".glb" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
+            </label>
+            {glbList.length > 0 && (
+              <button
+                onClick={() => setShowList(v => !v)}
+                className="bg-black/50 backdrop-blur text-xs text-gray-300 hover:text-white rounded-lg px-2 py-1.5 border border-gray-700 hover:border-gray-500 transition-colors"
+                title="저장된 아바타 목록"
+              >
+                {showList ? '▲' : '▼'} {glbList.length}
+              </button>
+            )}
+          </div>
+          {showList && (
+            <div className="bg-black/80 backdrop-blur border border-gray-700 rounded-xl overflow-hidden min-w-[220px] max-h-64 overflow-y-auto">
+              {glbList.map(entry => (
+                <div key={entry.name} className="flex items-center gap-1 px-2 py-1.5 hover:bg-gray-800/80 group">
+                  <button
+                    onClick={() => loadFromIDB(entry)}
+                    className="flex-1 text-left text-xs text-gray-300 hover:text-white truncate"
+                  >
+                    {entry.name === fileName ? '▶ ' : ''}{entry.name}
+                    <span className="ml-1 text-[10px] text-gray-500">{(entry.size / 1024 / 1024).toFixed(1)}MB</span>
+                  </button>
+                  <button
+                    onClick={() => idbDelete(entry.name).then(refreshList)}
+                    className="text-[10px] text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity px-1"
+                  >✕</button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* 목소리 선택 (우상단) */}
