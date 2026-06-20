@@ -250,7 +250,9 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     scene.background = new THREE.Color(0x0d1b2a)
     scene.add(new THREE.AmbientLight(0xffffff, 1.2))
     const dir = new THREE.DirectionalLight(0xffffff, 2); dir.position.set(1, 3, 2); scene.add(dir)
-    scene.add(Object.assign(new THREE.DirectionalLight(0x8899cc, 0.6), { position: new THREE.Vector3(-2, 1, -1) }))
+    const fillLight = new THREE.DirectionalLight(0x8899cc, 0.6)
+    fillLight.position.set(-2, 1, -1)
+    scene.add(fillLight)
 
     const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100)
     camera.position.set(0, 1.6, 2.5)
