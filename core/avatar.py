@@ -1,7 +1,83 @@
 """아바타 프로파일 관리 + 채팅 컨텍스트 빌더"""
 import json
+import re
+import urllib.request
+import urllib.error
 from db.init_db import get_conn
 from . import graph, embeddings, pattern
+
+MCP_URL = "http://127.0.0.1:8765/mcp"
+_mcp_req_id = 0
+
+def _mcp_call(tool: str, args: dict) -> dict | None:
+    global _mcp_req_id
+    _mcp_req_id += 1
+    payload = json.dumps({
+        "jsonrpc": "2.0", "id": _mcp_req_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args}
+    }).encode()
+    try:
+        req = urllib.request.Request(MCP_URL, data=payload,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+        if "error" in body:
+            return None
+        content = body.get("result", {}).get("content", [])
+        for c in content:
+            if c.get("type") == "text":
+                return {"text": c["text"]}
+            if c.get("type") == "json":
+                return c.get("json")
+        return None
+    except Exception:
+        return None
+
+def _fetch_realtime_context(query: str) -> str:
+    """쿼리 의도를 감지해 MCP 실시간 데이터를 조회하고 컨텍스트 문자열 반환"""
+    parts = []
+    q = query.lower()
+
+    # 날씨
+    if re.search(r"날씨|기온|온도|비|눈|weather|forecast|예보", q):
+        KR_CITY = {"서울":"Seoul","부산":"Busan","대구":"Daegu","인천":"Incheon",
+                   "광주":"Gwangju","대전":"Daejeon","수원":"Suwon","화성":"Hwaseong",
+                   "성남":"Seongnam","용인":"Yongin","제주":"Jeju"}
+        city_match = re.search(r"(서울|부산|대구|인천|광주|대전|수원|화성|성남|용인|제주|Seoul|Busan|Daegu)", query, re.IGNORECASE)
+        city_kr = city_match.group(1) if city_match else "서울"
+        city = KR_CITY.get(city_kr, city_kr)
+        if "예보" in q or "forecast" in q:
+            data = _mcp_call("weather.forecast", {"city": city})
+        else:
+            data = _mcp_call("weather.current", {"city": city})
+        if data:
+            text = data.get("text") or json.dumps(data, ensure_ascii=False)
+            parts.append(f"### 날씨 정보 ({city_kr})\n{text[:600]}")
+
+    # 주식
+    if re.search(r"주식|코스피|코스닥|삼성|stock|nasdaq|s&p|etf|nvda|aapl|종목|시세", q):
+        symbols = []
+        if re.search(r"삼성|005930", q): symbols.append("005930.KS")
+        if re.search(r"코스피|kospi|\^ks11", q): symbols.append("^KS11")
+        if re.search(r"코스닥|kosdaq|\^ksq", q): symbols.append("^KQ11")
+        if re.search(r"nvda|엔비디아", q): symbols.append("NVDA")
+        if re.search(r"aapl|애플", q): symbols.append("AAPL")
+        if not symbols:
+            symbols = ["^KS11", "^KQ11"]
+        data = _mcp_call("stocks.watchlist", {"symbols": symbols})
+        if data:
+            text = data.get("text") or json.dumps(data, ensure_ascii=False)
+            parts.append(f"### 주식 시세\n{text[:600]}")
+
+    # 뉴스
+    if re.search(r"뉴스|news|최신|트렌드|ai 동향|llm|gpt|claude", q):
+        data = _mcp_call("news.ai", {"maxResults": 5, "query": query[:80]})
+        if data:
+            text = data.get("text") or json.dumps(data, ensure_ascii=False)
+            parts.append(f"### 최신 AI 뉴스\n{text[:600]}")
+
+    return "\n\n".join(parts)
 
 
 # ── 프로파일 ───────────────────────────────────────────
@@ -322,6 +398,18 @@ def build_avatar_context(query: str = "") -> dict:
     # 관련 컨텍스트가 있으면 추가
     if relevant:
         system += "\n\n## 질문과 관련된 내 지식\n" + "\n".join(relevant)
+
+    # 실시간 MCP 데이터 (날씨/주식/뉴스)
+    if query:
+        realtime = _fetch_realtime_context(query)
+        if realtime:
+            system += (
+                "\n\n## 실시간 정보 [방금 API에서 조회됨 — 반드시 이 데이터로 답변]\n"
+                "⚠️ 중요: 아래는 지금 막 외부 API에서 가져온 실제 데이터입니다. "
+                "실시간 정보를 '모른다', '범위 밖', '검색해보세요' 같은 말로 거부하지 마세요. "
+                "아래 데이터를 직접 해석해서 자연스럽게 답변하세요.\n"
+                + realtime
+            )
 
     return {
         "system": system,
