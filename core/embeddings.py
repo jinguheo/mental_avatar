@@ -67,6 +67,15 @@ def search(query: str, n_results: int = 10) -> list[dict]:
         return []
 
 
+def delete_document(node_id: str):
+    """벡터 DB에서 노드 삭제 (문서/프로젝트 삭제 시 동기화)"""
+    col = _get_collection()
+    try:
+        col.delete(ids=[node_id])
+    except Exception:
+        pass
+
+
 def get_stats() -> dict:
     col = _get_collection()
     return {"vector_count": col.count()}

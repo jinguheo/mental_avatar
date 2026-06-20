@@ -9,12 +9,91 @@ import uuid, subprocess
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
 app = Flask(__name__)
 CORS(app)
+
+
+def _open_in_explorer(folder: str | None = None):
+    """백그라운드 프로세스(이 서버)가 띄우는 탐색기 창은 Windows 포커스-스틸 방지 정책 때문에
+    ASFW_ANY 만으로는 전면에 안 나타날 수 있다 — 새/기존 탐색기 창(CabinetWClass)을 직접 찾아
+    ALT 키 트릭 + SetForegroundWindow로 강제로 앞으로 가져온다.
+    folder가 없으면 기본 위치(빠른 실행)로 그냥 탐색기를 띄운다."""
+    import ctypes
+    import time
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    try:
+        user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
+    except Exception:
+        pass
+
+    if folder:
+        os.startfile(folder)
+        target = Path(folder).name.lower()
+    else:
+        subprocess.Popen("explorer")
+        target = None
+
+    try:
+        found = {"hwnd": 0}
+
+        def _enum(hwnd, _lparam):
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, buf, 64)
+            if buf.value != "CabinetWClass":
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            title_buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title_buf, length + 1)
+            if target is None or target in title_buf.value.lower():
+                found["hwnd"] = hwnd
+                return False
+            return True
+
+        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)(_enum)
+        for _ in range(20):  # 최대 ~2초 폴링 (창 생성이 비동기라 즉시 안 잡힐 수 있음)
+            found["hwnd"] = 0
+            user32.EnumWindows(enum_proc, 0)
+            if found["hwnd"]:
+                hwnd = found["hwnd"]
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE (최소화 상태였으면 복원)
+                user32.keybd_event(0x12, 0, 0, 0)  # ALT down — SetForegroundWindow 잠금 우회 트릭
+                user32.SetForegroundWindow(hwnd)
+                user32.keybd_event(0x12, 0, 2, 0)  # ALT up
+                break
+            time.sleep(0.1)
+    except Exception:
+        pass
+
+
+def _pick_path(kind: str) -> str | None:
+    """네이티브 OS 다이얼로그로 폴더(kind='folder') 또는 파일(kind='file')을 선택. 취소 시 None.
+    파일 선택은 askopenfilename, 폴더 선택은 askdirectory — Windows엔 둘을 합친 단일 다이얼로그가 없어 분리."""
+    import ctypes
+    import tkinter as tk
+    from tkinter import filedialog
+
+    try:
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)
+    except Exception:
+        pass
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        if kind == "folder":
+            path = filedialog.askdirectory(parent=root, title="폴더 선택")
+        else:
+            path = filedialog.askopenfilename(parent=root, title="파일 선택")
+    finally:
+        root.destroy()
+    return path or None
 
 
 def _process_chunks(chunks: list[dict], file_path: str = "") -> list[str]:
@@ -871,6 +950,108 @@ def subjects_discover():
     return jsonify(queue_mgr.auto_discover_subjects())
 
 
+@app.route("/project/scan", methods=["POST"])
+def project_scan_route():
+    """폴더 경로를 지정해 코드+md 파일 구조/overview/summary/git변경사항을 생성 (수동 트리거)."""
+    data = request.get_json(silent=True) or {}
+    folder = data.get("folder_path", "").strip()
+    name = data.get("name", "").strip()
+    if not folder:
+        return jsonify({"error": "folder_path 필요"}), 400
+    try:
+        result = project_scan.generate_project_summary(folder, name)
+        return jsonify(result)
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/project/list", methods=["GET"])
+def project_list_route():
+    return jsonify({"projects": project_scan.list_projects()})
+
+
+@app.route("/project/<pid>", methods=["GET"])
+def project_get_route(pid):
+    proj = project_scan.get_project(pid)
+    if not proj:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(proj)
+
+
+@app.route("/project/<pid>", methods=["DELETE"])
+def project_delete_route(pid):
+    project_scan.delete_project(pid)
+    return jsonify({"success": True})
+
+
+@app.route("/project/<pid>/refresh", methods=["POST"])
+def project_refresh_route(pid):
+    proj = project_scan.get_project(pid)
+    if not proj:
+        return jsonify({"error": "not found"}), 404
+    try:
+        result = project_scan.generate_project_summary(proj["folder_path"], proj["name"])
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/project/<pid>/open_folder", methods=["POST"])
+def project_open_folder_route(pid):
+    """등록된 프로젝트의 folder_path를 OS 탐색기로 열기 (Windows)"""
+    proj = project_scan.get_project(pid)
+    if not proj:
+        return jsonify({"error": "not found"}), 404
+    folder = proj["folder_path"]
+    if not os.path.isdir(folder):
+        return jsonify({"error": "폴더 없음"}), 404
+    try:
+        _open_in_explorer(folder)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/project/open_folder_path", methods=["POST"])
+def project_open_folder_path_route():
+    """입력란에 타이핑한 폴더 경로를 탐색기로 열기. 경로가 비어 있으면 기본 탐색기 창을 그냥 띄운다."""
+    data = request.get_json(silent=True) or {}
+    folder = data.get("folder_path", "").strip()
+    if folder and not os.path.isdir(folder):
+        return jsonify({"error": "폴더 없음"}), 404
+    try:
+        _open_in_explorer(folder or None)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/project/pick_folder", methods=["POST"])
+def project_pick_folder_route():
+    """네이티브 다이얼로그로 폴더 선택 → 경로 반환 (프론트에서 즉시 스캔해 폴더 정보를 보여준다)."""
+    try:
+        path = _pick_path("folder")
+        return jsonify({"path": path})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/project/pick_file", methods=["POST"])
+def project_pick_file_route():
+    """네이티브 다이얼로그로 파일 선택 → 그 파일이 속한 폴더 경로를 반환한다
+    (폴더 안 임의의 파일 하나만 골라도 그 폴더 전체 정보를 바로 볼 수 있도록)."""
+    try:
+        path = _pick_path("file")
+        if not path:
+            return jsonify({"path": None})
+        folder = str(Path(path).parent)
+        return jsonify({"path": path, "folder_path": folder})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/queue", methods=["GET"])
 def queue_list():
     sid = request.args.get("subject_id", "")
@@ -905,6 +1086,76 @@ def queue_reset_errors():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "port": 8766})
+
+
+# ── 백업 / 복원 ──────────────────────────────────────────────
+import sqlite3 as _sqlite3
+import base64 as _base64
+
+@app.route("/backup", methods=["GET"])
+def backup():
+    """KG DB + 프로필 데이터를 JSON으로 내보내기"""
+    from db.init_db import DB_PATH
+    result: dict = {}
+
+    # SQLite DB를 base64로 인코딩해서 첨부
+    try:
+        db_path = Path(DB_PATH)
+        if db_path.exists():
+            result["db_base64"] = _base64.b64encode(db_path.read_bytes()).decode()
+            result["db_filename"] = db_path.name
+    except Exception as e:
+        result["db_error"] = str(e)
+
+    # 프로필/아바타 메타 데이터
+    try:
+        conn = _sqlite3.connect(DB_PATH)
+        conn.row_factory = _sqlite3.Row
+        cur = conn.cursor()
+
+        tables: dict = {}
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        for (tname,) in cur.fetchall():
+            cur.execute(f"SELECT * FROM {tname}")
+            tables[tname] = [dict(r) for r in cur.fetchall()]
+        result["tables"] = tables
+        conn.close()
+    except Exception as e:
+        result["tables_error"] = str(e)
+
+    # 첨부 파일 메타 (data/ 폴더의 face.jpg, voice_sample.wav 등)
+    data_dir = Path(__file__).parent.parent / "data"
+    files_meta = []
+    if data_dir.exists():
+        for f in data_dir.iterdir():
+            if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.wav', '.mp3'):
+                files_meta.append({"name": f.name, "size": f.stat().st_size})
+    result["data_files"] = files_meta
+
+    return jsonify(result)
+
+
+@app.route("/restore", methods=["POST"])
+def restore():
+    """백업 JSON에서 KG DB 복원"""
+    from db.init_db import DB_PATH
+    payload = request.get_json(silent=True) or {}
+
+    restored = []
+
+    # DB 복원 (base64)
+    db_b64 = payload.get("db_base64")
+    if db_b64:
+        try:
+            db_bytes = _base64.b64decode(db_b64)
+            db_path = Path(DB_PATH)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db_path.write_bytes(db_bytes)
+            restored.append("db")
+        except Exception as e:
+            return jsonify({"success": False, "error": f"DB 복원 실패: {e}"}), 500
+
+    return jsonify({"success": True, "restored": restored})
 
 
 # ── STT (faster-whisper) ──────────────────────────────────
@@ -1069,6 +1320,26 @@ def avatar_tts_only():
     if template_speaker is None and not VOICE_SAMPLE.exists():
         return jsonify({"error": "voice sample not registered"}), 400
 
+    # ① 상주 XTTS 워커(8767)로 우선 시도 — 모델이 이미 떠 있어 2~3초
+    try:
+        import json, urllib.request
+        payload = json.dumps({
+            "text": text,
+            "speaker": template_speaker,
+            "speaker_wav": None if template_speaker else str(VOICE_SAMPLE),
+            "language": "ko",
+        }).encode()
+        wreq = urllib.request.Request(
+            "http://127.0.0.1:8768/tts", data=payload,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(wreq, timeout=180) as wr:
+            if wr.status == 200:
+                wav_bytes = wr.read()
+                return app.response_class(wav_bytes, mimetype="audio/wav")
+    except Exception as _e:
+        print(f"[tts_only] 워커 미응답, subprocess 폴백: {_e}", flush=True)
+
+    # ② 폴백: 워커가 꺼져 있으면 기존 subprocess 방식(매번 모델 로드, 느림)
     import uuid as _uuid
     job_dir = AVATAR_TMP / _uuid.uuid4().hex
     job_dir.mkdir(parents=True, exist_ok=True)

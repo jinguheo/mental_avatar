@@ -1,7 +1,7 @@
-"""Wiki → Graphify 자동 파이프라인.
+"""Wiki/프로젝트 요약 → Graphify 자동 파이프라인.
 
 문서 처리(queue/auto_summarize) 완료 후 백그라운드에서 실행:
-  1. wiki_pages → graphify-wiki/*.md 내보내기
+  1. wiki_pages → graphify-wiki/*.md 내보내기 + project-summaries/*.md 도 함께 내보내기
   2. graphify 감지 → 추출 → 클러스터 → HTML/JSON 생성
 """
 import json
@@ -10,6 +10,7 @@ from pathlib import Path
 
 WIKI_DIR    = Path(__file__).parent.parent / "graphify-wiki"
 OUT_DIR     = Path(__file__).parent.parent / "graphify-out"
+PROJ_DIR    = Path(__file__).parent.parent / "project-summaries"
 COMMUNITY_LABELS: dict[int, str] = {}   # 이전 레이블 재사용
 
 
@@ -41,6 +42,21 @@ def export_wiki_pages() -> int:
         )
         written += 1
 
+    return written
+
+
+def export_project_summaries() -> int:
+    """project-summaries/*.md(프로젝트 폴더 스캔 요약) → graphify-wiki/proj__*.md 로 복사.
+    graphify 코퍼스에 프로젝트 요약도 함께 포함시키기 위함. 반환값: 복사된 파일 수."""
+    if not PROJ_DIR.exists():
+        return 0
+    WIKI_DIR.mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    for src in PROJ_DIR.glob("*.md"):
+        dest = WIKI_DIR / f"proj__{src.name}"
+        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        written += 1
     return written
 
 
@@ -76,12 +92,12 @@ def run_graphify(job: dict) -> None:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         cwd = Path(__file__).parent.parent
 
-        # Step 1: Wiki 내보내기
-        job["stage"] = "wiki 내보내기"
-        n_exported = export_wiki_pages()
+        # Step 1: Wiki + 프로젝트 요약 내보내기
+        job["stage"] = "wiki + 프로젝트 내보내기"
+        n_exported = export_wiki_pages() + export_project_summaries()
         job["exported"] = n_exported
         if n_exported == 0:
-            job["error"] = "내보낼 wiki 페이지가 없습니다."
+            job["error"] = "내보낼 wiki/프로젝트 페이지가 없습니다."
             job["running"] = False
             return
 

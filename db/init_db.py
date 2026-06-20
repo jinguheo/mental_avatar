@@ -8,9 +8,12 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "knowledge.db")
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout: 쓰기 락이 잡혀 있으면 즉시 실패하지 않고 최대 5초 대기 (sqlite3 레벨)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA journal_mode=WAL")        # 동시 읽기 + 단일 쓰기 허용
+    conn.execute("PRAGMA busy_timeout=5000")       # 락 경합 시 5초까지 대기 후 재시도 (database is locked 방지)
+    conn.execute("PRAGMA synchronous=NORMAL")      # WAL 권장값 — fsync 빈도↓ → 락 점유 시간 단축
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -137,7 +140,34 @@ def init():
 
     CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations(created_at);
     CREATE INDEX IF NOT EXISTS idx_conv_role    ON conversations(role);
+
+    CREATE TABLE IF NOT EXISTS project_summaries (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        folder_path TEXT NOT NULL UNIQUE,
+        file_tree_json TEXT,
+        stats_json  TEXT,
+        overview    TEXT,
+        summary     TEXT,
+        changes     TEXT,
+        diagram     TEXT,
+        export_path TEXT,
+        status      TEXT DEFAULT 'pending',
+        error       TEXT,
+        created_at  DATETIME DEFAULT (datetime('now','localtime')),
+        updated_at  DATETIME DEFAULT (datetime('now','localtime'))
+    );
     """)
+
+    try:
+        c.execute("ALTER TABLE project_summaries ADD COLUMN export_path TEXT")
+    except sqlite3.OperationalError:
+        pass  # 이미 컬럼 존재 (기존 DB)
+
+    try:
+        c.execute("ALTER TABLE project_summaries ADD COLUMN diagram TEXT")
+    except sqlite3.OperationalError:
+        pass  # 이미 컬럼 존재 (기존 DB)
 
     conn.commit()
     conn.close()

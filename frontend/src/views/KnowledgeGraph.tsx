@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import mermaid from 'mermaid'
 import { streamClaudeWeb } from '@/services/claudeWeb'
 import type { Settings } from '@/types'
 
@@ -46,6 +47,7 @@ const SOURCE_COLOR: Record<string, string> = {
   // entity 노드 (개념 연결)
   concept: '#a855f7', technology: '#06b6d4', organization: '#f97316',
   tool: '#84cc16', entity: '#a855f7',
+  project: '#0ea5e9',
 }
 
 const AVATAR_PROMPT = (interests: string, trends: string, gaps: string) =>
@@ -65,7 +67,7 @@ ${gaps}
 3~5문장. 한국어. 통찰력 있게.`
 
 // ── 탭 1: 검색 + 아바타 요약 ──────────────────────────
-function SearchTab({ settings }: { settings: Settings }) {
+function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProject: (pid: string) => void }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const [loading, setLoading] = useState(false)
@@ -192,7 +194,10 @@ function SearchTab({ settings }: { settings: Settings }) {
           {results.map(r => (
             <div key={r.id}
               className={`border rounded-xl p-3 hover:bg-gray-50 transition-colors cursor-pointer ${r._source === 'graphify' ? 'border-purple-200 bg-purple-50/30' : 'border-surface-border'}`}
-              onClick={() => apiFetch('/activity/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ node_id: r.id, action: 'view', context: r.title || '' }) }).catch(() => {})}>
+              onClick={() => {
+                apiFetch('/activity/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ node_id: r.id, action: 'view', context: r.title || '' }) }).catch(() => {})
+                if (r.source_type === 'project' && r.id.startsWith('project_')) onOpenProject(r.id.slice('project_'.length))
+              }}>
               <div className="flex items-start justify-between gap-2 mb-1">
                 <span className="font-medium text-sm text-gray-900 truncate">{r.title || '(제목 없음)'}</span>
                 <div className="flex items-center gap-1.5 shrink-0">
@@ -1448,12 +1453,275 @@ function IngestTab() {
   )
 }
 
+// ── 탭 6: Project (코드 레포 폴더 단위 요약) ──────────
+interface ProjectSummary {
+  id: string; name: string; folder_path: string; status: string; error?: string
+  updated_at: string; stats: { total_files: number; code_files: number; md_files: number; total_size: number }
+  overview?: string
+}
+interface ProjectDetail extends ProjectSummary {
+  summary: string; changes: string; diagram?: string; export_path?: string
+}
+
+let mermaidInited = false
+function MermaidDiagram({ code }: { code: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!mermaidInited) {
+      mermaid.initialize({ startOnLoad: false, theme: 'neutral' })
+      mermaidInited = true
+    }
+    let cancelled = false
+    const id = `mermaid-${Math.random().toString(36).slice(2)}`
+    mermaid.render(id, code.trim())
+      .then(({ svg }) => { if (!cancelled && ref.current) { ref.current.innerHTML = svg; setError('') } })
+      .catch(() => { if (!cancelled) setError('다이어그램 렌더링 실패') })
+    return () => { cancelled = true }
+  }, [code])
+
+  if (error) return <pre className="text-[11px] text-gray-400 whitespace-pre-wrap">{code}</pre>
+  return <div ref={ref} className="overflow-x-auto" />
+}
+
+function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string | null; onProjectOpened?: () => void }) {
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [detail, setDetail] = useState<ProjectDetail | null>(null)
+  const [folderPath, setFolderPath] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [error, setError] = useState('')
+  const [gRunning, setGRunning] = useState(false)
+  const [gMsg, setGMsg] = useState('')
+
+  const loadProjects = useCallback(async () => {
+    const d = await apiFetch('/project/list').catch(() => ({ projects: [] }))
+    setProjects(d.projects ?? [])
+  }, [])
+
+  useEffect(() => { loadProjects() }, [loadProjects])
+
+  const loadDetail = async (id: string) => {
+    const d = await apiFetch(`/project/${id}`).catch(() => null)
+    setDetail(d)
+  }
+
+  useEffect(() => {
+    if (openProjectId) {
+      loadDetail(openProjectId)
+      onProjectOpened?.()
+    }
+  }, [openProjectId])
+
+  const scanFolder = async (pathOverride?: string) => {
+    const target = (pathOverride ?? folderPath).trim()
+    if (!target) return
+    setScanning(true); setError('')
+    try {
+      const d = await apiFetch('/project/scan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder_path: target })
+      })
+      if (d.error) { setError(d.error); return }
+      setFolderPath('')
+      await loadProjects()
+      await loadDetail(d.id)
+    } catch {
+      setError('스캔 실패 — 폴더 경로/서버 상태 확인')
+    } finally { setScanning(false) }
+  }
+
+  const refresh = async (id: string) => {
+    setScanning(true)
+    try {
+      await fetch(`${API}/project/${id}/refresh`, { method: 'POST' })
+      await loadProjects(); await loadDetail(id)
+    } finally { setScanning(false) }
+  }
+
+  const removeProject = async (id: string) => {
+    await fetch(`${API}/project/${id}`, { method: 'DELETE' })
+    if (detail?.id === id) setDetail(null)
+    await loadProjects()
+  }
+
+  const openFolder = async (id: string) => {
+    setError('')
+    const d = await fetch(`${API}/project/${id}/open_folder`, { method: 'POST' })
+      .then(r => r.json()).catch(() => ({ error: '요청 실패 — 서버 상태 확인' }))
+    if (d.error) setError(d.error)
+  }
+
+  const openFolderPath = async () => {
+    setError('')
+    const d = await fetch(`${API}/project/open_folder_path`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_path: folderPath.trim() })
+    }).then(r => r.json()).catch(() => ({ error: '요청 실패 — 서버 상태 확인' }))
+    if (d.error) setError(d.error)
+  }
+
+  const pickFolder = async () => {
+    setError('')
+    const d = await fetch(`${API}/project/pick_folder`, { method: 'POST' })
+      .then(r => r.json()).catch(() => ({ error: '요청 실패 — 서버 상태 확인' }))
+    if (d.error) { setError(d.error); return }
+    if (d.path) await scanFolder(d.path)
+  }
+
+  const pickFile = async () => {
+    setError('')
+    const d = await fetch(`${API}/project/pick_file`, { method: 'POST' })
+      .then(r => r.json()).catch(() => ({ error: '요청 실패 — 서버 상태 확인' }))
+    if (d.error) { setError(d.error); return }
+    if (d.folder_path) await scanFolder(d.folder_path)
+  }
+
+  const runGraphify = async () => {
+    setGRunning(true); setGMsg('')
+    await fetch(`${API}/graphify/run`, { method: 'POST' }).catch(() => {})
+    const poll = setInterval(async () => {
+      const data = await fetch(`${API}/graphify/status`).then(r => r.json()).catch(() => ({}))
+      if (!data.running) {
+        clearInterval(poll)
+        setGRunning(false)
+        if (data.error) setGMsg(data.error)
+        else if (data.html_ready) {
+          setGMsg(`완료 — 노드 ${data.nodes} · 엣지 ${data.edges} · 커뮤니티 ${data.communities}`)
+          window.open('http://127.0.0.1:8766/graphify/graph.html')
+        }
+      }
+    }, 3000)
+  }
+
+  return (
+    <div className="flex h-full min-h-0 gap-4">
+      {/* 좌측: 폴더 등록 + 목록 */}
+      <div className="w-72 shrink-0 flex flex-col gap-3 min-h-0">
+        <div className="flex flex-col gap-1.5 shrink-0">
+          <input value={folderPath} onChange={e => setFolderPath(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && scanFolder()}
+            placeholder="D:\MyWork\project-name"
+            className="border border-surface-border rounded-xl px-3 py-1.5 text-xs focus:outline-none focus:border-gray-400 bg-white" />
+          <div className="flex gap-1.5">
+            <button onClick={() => scanFolder()} disabled={scanning}
+              className="flex-1 text-xs px-3 py-1.5 bg-gray-900 text-white rounded-xl hover:bg-gray-700 disabled:opacity-50">
+              {scanning ? '스캔 중...' : '폴더 스캔'}
+            </button>
+            <button onClick={openFolderPath}
+              className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">탐색기 열기</button>
+          </div>
+          <div className="flex gap-1.5">
+            <button onClick={pickFolder}
+              className="flex-1 text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">📁 폴더 선택</button>
+            <button onClick={pickFile}
+              className="flex-1 text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">📄 파일 선택</button>
+          </div>
+          {error && <div className="text-[11px] text-red-500">{error}</div>}
+        </div>
+
+        <div className="flex-1 overflow-y-auto space-y-1.5 min-h-0">
+          {projects.map(p => (
+            <div key={p.id} onClick={() => loadDetail(p.id)}
+              className={`relative p-2.5 rounded-xl border cursor-pointer text-xs ${
+                detail?.id === p.id ? 'border-gray-400 bg-gray-50' : 'border-surface-border hover:bg-gray-50'
+              }`}>
+              <button onClick={e => { e.stopPropagation(); removeProject(p.id) }}
+                className="absolute top-1.5 right-1.5 w-4 h-4 flex items-center justify-center rounded-full text-gray-400 hover:bg-red-50 hover:text-red-500 text-[11px] leading-none">×</button>
+              <div className="font-medium text-gray-900 truncate pr-4">{p.name}</div>
+              <div className="text-gray-400 truncate text-[10px]">{p.folder_path}</div>
+              <div className="flex items-center gap-2 mt-1 text-[10px] text-gray-500">
+                <span>{p.status === 'error' ? '⚠ 오류' : `파일 ${p.stats?.total_files ?? 0}`}</span>
+                <span>·</span>
+                <span>{p.updated_at}</span>
+              </div>
+            </div>
+          ))}
+          {projects.length === 0 && (
+            <div className="text-xs text-gray-400 text-center py-6">등록된 프로젝트가 없습니다</div>
+          )}
+        </div>
+      </div>
+
+      {/* 우측: 상세 */}
+      <div className="flex-1 overflow-y-auto border border-surface-border rounded-xl p-4 min-h-0">
+        {!detail ? (
+          <div className="flex items-center justify-center h-full text-xs text-gray-400">
+            좌측에서 폴더를 스캔하거나 프로젝트를 선택하세요
+          </div>
+        ) : detail.status === 'error' ? (
+          <div className="text-xs text-red-500">스캔 오류: {detail.error}</div>
+        ) : (
+          <div className="space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-gray-900">{detail.name}</h3>
+                <div className="text-[11px] text-gray-400">{detail.folder_path}</div>
+                {detail.export_path && (
+                  <div className="text-[10px] text-gray-400 mt-0.5">📄 {detail.export_path}</div>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => openFolder(detail.id)}
+                  className="text-[11px] px-2.5 py-1 border border-surface-border rounded-lg hover:bg-gray-50">탐색기에서 열기</button>
+                <button onClick={() => refresh(detail.id)} disabled={scanning}
+                  className="text-[11px] px-2.5 py-1 border border-surface-border rounded-lg hover:bg-gray-50">새로고침</button>
+                <button onClick={runGraphify} disabled={gRunning}
+                  className="text-[11px] px-2.5 py-1 border border-surface-border rounded-lg hover:bg-gray-50 disabled:opacity-50">
+                  {gRunning ? 'Graphify 처리 중...' : '🕸 Graphify로 처리'}
+                </button>
+                <button onClick={() => removeProject(detail.id)}
+                  className="text-[11px] px-2.5 py-1 border border-surface-border rounded-lg hover:bg-red-50 text-red-500">삭제</button>
+              </div>
+            </div>
+
+            {gMsg && <div className="text-[11px] text-gray-500">{gMsg}</div>}
+
+            <div className="flex gap-4 text-[11px] text-gray-500">
+              <span>전체 {detail.stats?.total_files ?? 0}개</span>
+              <span>코드 {detail.stats?.code_files ?? 0}개</span>
+              <span>md {detail.stats?.md_files ?? 0}개</span>
+            </div>
+
+            <section>
+              <h4 className="text-xs font-semibold text-gray-700 mb-1.5">개요</h4>
+              <p className="text-xs text-gray-600 whitespace-pre-wrap">{detail.overview || '(없음)'}</p>
+            </section>
+
+            <section>
+              <h4 className="text-xs font-semibold text-gray-700 mb-1.5">요약</h4>
+              <p className="text-xs text-gray-600 whitespace-pre-wrap">{detail.summary || '(없음)'}</p>
+            </section>
+
+            {detail.diagram && (
+              <section>
+                <h4 className="text-xs font-semibold text-gray-700 mb-1.5">플로우 다이어그램</h4>
+                <div className="bg-gray-50 rounded-lg p-2.5">
+                  <MermaidDiagram code={detail.diagram} />
+                </div>
+              </section>
+            )}
+
+            <section>
+              <h4 className="text-xs font-semibold text-gray-700 mb-1.5">변경사항</h4>
+              <pre className="text-[11px] text-gray-600 whitespace-pre-wrap bg-gray-50 rounded-lg p-2.5">{detail.changes || '(없음)'}</pre>
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── 메인 뷰 ──────────────────────────────────────────
-type Tab = 'search' | 'ingest' | 'graph' | 'files' | 'preference' | 'wiki'
+type Tab = 'search' | 'ingest' | 'graph' | 'files' | 'preference' | 'wiki' | 'project'
 
 export default function KnowledgeGraph({ settings }: { settings: Settings }) {
   const [tab, setTab] = useState<Tab>('search')
   const [available, setAvailable] = useState<boolean | null>(null)
+  const [openProjectId, setOpenProjectId] = useState<string | null>(null)
+
+  const openProject = (pid: string) => { setOpenProjectId(pid); setTab('project') }
 
   useEffect(() => {
     fetch(`${API}/health`).then(r => r.ok ? setAvailable(true) : setAvailable(false)).catch(() => setAvailable(false))
@@ -1472,7 +1740,7 @@ export default function KnowledgeGraph({ settings }: { settings: Settings }) {
           )}
         </div>
         <div className="flex gap-1 bg-gray-100 rounded-xl p-1">
-          {([['search', '검색 · 요약'], ['ingest', '내용 추가'], ['graph', '그래프'], ['files', '파일'], ['preference', 'Preference'], ['wiki', 'Wiki']] as [Tab, string][]).map(([id, label]) => (
+          {([['search', '검색 · 요약'], ['ingest', '내용 추가'], ['graph', '그래프'], ['files', '파일'], ['preference', 'Preference'], ['wiki', 'Wiki'], ['project', '프로젝트']] as [Tab, string][]).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)}
               className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
                 tab === id ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
@@ -1495,12 +1763,13 @@ export default function KnowledgeGraph({ settings }: { settings: Settings }) {
           </div>
         ) : (
           <>
-            {tab === 'search'     && <SearchTab settings={settings} />}
+            {tab === 'search'     && <SearchTab settings={settings} onOpenProject={openProject} />}
             {tab === 'ingest'     && <IngestTab />}
             {tab === 'graph'      && <GraphTab />}
             {tab === 'files'      && <FilesTab />}
             {tab === 'preference' && <PreferenceTab settings={settings} />}
             {tab === 'wiki'       && <WikiTab />}
+            {tab === 'project'    && <ProjectTab openProjectId={openProjectId} onProjectOpened={() => setOpenProjectId(null)} />}
           </>
         )}
       </div>
