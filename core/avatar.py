@@ -218,18 +218,37 @@ def list_synced(source: str = "", limit: int = 50) -> list:
 
 # ── 대화 로깅 + 말투 학습 ──────────────────────────────
 
+# view별 마지막 대화 노드 id — 같은 대화 스레드를 "follows" 엣지로 이어붙이기 위함
+_last_conv_node: dict[str, str] = {}
+
+
 def log_conversation(view: str, role: str, content: str) -> None:
-    """채팅 turn 저장 (행동/말투 학습의 원재료)"""
+    """채팅 turn 저장 (행동/말투 학습의 원재료) + 지식 그래프 노드/엣지/임베딩으로도 연결.
+    이렇게 하면 /search, /avatar/context의 시멘틱 검색에서 과거 대화도 결과로 나온다."""
     if not content or not content.strip():
         return
     import uuid
+    content = content.strip()
+    conv_id = str(uuid.uuid4())
     conn = get_conn()
     conn.execute(
         "INSERT INTO conversations (id, view, role, content) VALUES (?,?,?,?)",
-        (str(uuid.uuid4()), view, role, content.strip())
+        (conv_id, view, role, content)
     )
     conn.commit()
     conn.close()
+
+    title = f"[{view}] {role}: " + (content[:40] + "…" if len(content) > 40 else content)
+    node_id = graph.add_node(
+        type="conversation", title=title, content=content,
+        source_type="conversation", file_path=f"conversation://{view}/{conv_id}",
+    )
+    embeddings.add_document(node_id, title, content, {"source_type": "conversation", "view": view, "role": role})
+
+    prev_id = _last_conv_node.get(view)
+    if prev_id:
+        graph.add_edge(prev_id, node_id, "follows", 1.0)
+    _last_conv_node[view] = node_id
 
 
 def recent_conversations(limit: int = 50, role: str = "", view: str = "", since: str = "") -> list:
