@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState, useCallback, type Dispatch, type SetStateAction } from 'react'
 import * as THREE from 'three'
 import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
+import { streamChatOllama } from '@/services/ollama'
 import FaceTrackingPanel from './FaceTrackingPanel'
 import type { Settings } from '@/types'
 
@@ -754,15 +755,19 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     setMessages(prev => [...prev, userMsg]); setInput(''); setChatLoading(true)
     logTurn('user', text)
 
-    let key = settings.claudeSessionKey
-    if (!key && settings.mcpEndpoint) key = await claudeWebAutoConnect(settings.mcpEndpoint) || ''
-
     try {
       const history = [...messages, userMsg].slice(-8)
       const system = await buildSystemPrompt(text)
       let reply = ''
-      await streamClaudeWeb(key, settings.mcpEndpoint, history, system,
-        d => { reply += d }, settings.anthropicApiKey)
+      if (settings.aiProvider === 'ollama') {
+        await streamChatOllama(settings.ollamaEndpoint, settings.ollamaModel, history, system,
+          d => { reply += d })
+      } else {
+        let key = settings.claudeSessionKey
+        if (!key && settings.mcpEndpoint) key = await claudeWebAutoConnect(settings.mcpEndpoint) || ''
+        await streamClaudeWeb(key, settings.mcpEndpoint, history, system,
+          d => { reply += d }, settings.anthropicApiKey)
+      }
       setMessages(prev => [...prev, { role: 'assistant', content: reply }])
       if (reply) { logTurn('assistant', reply); respond(reply) }   // ← LLM 출력 → 영상(또는 TTS) 응답
     } catch (e) {
@@ -776,7 +781,7 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  const isConnected = !!(settings.claudeSessionKey || settings.anthropicApiKey)
+  const isConnected = settings.aiProvider === 'ollama' || !!(settings.claudeSessionKey || settings.anthropicApiKey)
 
   return (
     <div className="flex h-full overflow-hidden bg-gray-950">

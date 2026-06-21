@@ -6,6 +6,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
+import { streamChatOllama } from '@/services/ollama'
 import type { Settings } from '@/types'
 import type { ChatMsg } from './Avatar3DChat'
 
@@ -52,6 +53,38 @@ async function idbDelete(name: string) {
   })
 }
 
+interface MorphRef { mesh: THREE.Mesh; index: number }
+type Emotion = 'neutral' | 'happy' | 'sorry' | 'surprised'
+
+// 입싱크(viseme 근사) + 표정용 모프타겟 그룹 — Avaturn/ARKit/Oculus 명명 모두 대응
+const MORPH_GROUPS: Record<string, RegExp[]> = {
+  aa: [/viseme_aa/i, /^mouthopen$/i, /jawopen/i],
+  oo: [/viseme_u/i, /viseme_o/i, /mouthpucker/i, /mouthfunnel/i],
+  ee: [/viseme_e/i, /viseme_i/i, /mouthstretch/i],
+  consonant: [/viseme_pp/i, /viseme_ff/i, /viseme_ss/i, /viseme_dd/i, /viseme_kk/i, /viseme_ch/i, /viseme_th/i, /viseme_rr/i, /viseme_nn/i],
+  smile: [/mouthsmile/i],
+  frown: [/mouthfrown/i],
+  browUp: [/browinnerup/i, /browouterup/i],
+  browDown: [/browdown/i],
+  squint: [/eyesquint/i],
+  blink: [/eyeblink/i],
+}
+
+// 말하는 동안 기본으로 살짝 웃는 표정(neutral baseline) + 감정별 가중치(명확히 보이도록 값을 키움)
+const EMOTION_WEIGHTS: Record<Emotion, Partial<Record<string, number>>> = {
+  neutral: { smile: 0.25 },
+  happy: { smile: 1, browUp: 0.4 },
+  sorry: { frown: 0.7, browDown: 0.5, smile: 0 },
+  surprised: { browUp: 1, smile: 0.1 },
+}
+
+function classifyEmotion(text: string): Emotion {
+  if (/죄송|미안|사과|아쉽|어렵|힘들/.test(text)) return 'sorry'
+  if (/축하|좋아요|좋습니다|감사|기쁘|행복|반갑|웃|즐거|최고|!{1,}/.test(text)) return 'happy'
+  if (/\?|궁금|놀라|정말요|진짜요|신기/.test(text)) return 'surprised'
+  return 'neutral'
+}
+
 const GREETING = '안녕하세요! 반갑습니다. 무엇이든 도와드리겠습니다.'
 const SYSTEM = `당신은 사용자를 맞이하는 AI 아바타입니다.
 따뜻하고 전문적으로 한국어로 응대하세요.
@@ -79,6 +112,13 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const clockRef = useRef(new THREE.Clock())
   const animFrameRef = useRef<number>(0)
   const objectUrlRef = useRef<string | null>(null)
+  const morphMapRef = useRef<Record<string, MorphRef[]>>({})
+  const morphGroupsRef = useRef<Record<string, string[]>>({})
+  const morphValuesRef = useRef<Record<string, number>>({})
+  const lipsyncAnalyserRef = useRef<AnalyserNode | null>(null)
+  const emotionRef = useRef<Emotion>('neutral')
+  const blinkKeysRef = useRef<string[]>([])
+  const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -164,11 +204,13 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   // ── TTS ──
   const playTTS = useCallback(async (text: string) => {
     setSpeaking(true); speakingRef.current = true
+    emotionRef.current = classifyEmotion(text)
     let finished = false
     const failsafe = setTimeout(() => done(), 2000 + text.length * 200)
     const done = () => {
       if (finished) return; finished = true
       clearTimeout(failsafe); setSpeaking(false); speakingRef.current = false
+      emotionRef.current = 'neutral'
     }
     if (selectedVoice.kind === 'system') {
       const u = new SpeechSynthesisUtterance(text)
@@ -191,8 +233,10 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
       const ctx = audioCtxRef.current
       if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
       const src = ctx.createMediaElementSource(audio)
-      src.connect(ctx.destination)
-      const cleanup = () => { done(); URL.revokeObjectURL(url) }
+      const analyser = ctx.createAnalyser(); analyser.fftSize = 64
+      src.connect(analyser); analyser.connect(ctx.destination)
+      lipsyncAnalyserRef.current = analyser
+      const cleanup = () => { done(); lipsyncAnalyserRef.current = null; URL.revokeObjectURL(url) }
       audio.onended = cleanup; audio.onerror = cleanup
       audio.play().catch(() => cleanup())
     } catch {
@@ -302,11 +346,12 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     fillLight.position.set(-2, 1, -1)
     scene.add(fillLight)
 
+    // 상반신 위주 프레이밍 — 표정 변화는 전신 샷에서는 거의 안 보이므로 얼굴 쪽으로 기본 시야를 좁힌다
     const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100)
-    camera.position.set(0, 1.6, 2.5)
+    camera.position.set(0, 1.5, 1.3)
     const controls = new OrbitControls(camera, renderer.domElement)
-    controls.target.set(0, 1.0, 0); controls.enableDamping = true; controls.dampingFactor = 0.05
-    controls.minDistance = 0.5; controls.maxDistance = 5; controls.update()
+    controls.target.set(0, 1.45, 0); controls.enableDamping = true; controls.dampingFactor = 0.05
+    controls.minDistance = 0.4; controls.maxDistance = 5; controls.update()
 
     new GLTFLoader().load(url, (gltf) => {
       const box = new THREE.Box3().setFromObject(gltf.scene)
@@ -322,10 +367,107 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         const idle = gltf.animations.find(a => /idle|stand|wait/i.test(a.name)) ?? gltf.animations[0]
         mixer.clipAction(idle).play()
       }
+
+      // 입싱크(viseme 근사) + 표정용 모프타겟 전체 수집
+      // 동일한 타겟 이름(jawOpen 등)이 여러 메시(얼굴/눈/치아)에 중복 존재하므로 전부 보관
+      const morphMap: Record<string, MorphRef[]> = {}
+      gltf.scene.traverse(obj => {
+        const mesh = obj as THREE.Mesh
+        const dict = mesh.morphTargetDictionary
+        if (!dict) return
+        Object.entries(dict).forEach(([name, idx]) => {
+          (morphMap[name] ??= []).push({ mesh, index: idx })
+        })
+      })
+      morphMapRef.current = morphMap
+      const groups: Record<string, string[]> = {}
+      Object.entries(MORPH_GROUPS).forEach(([group, patterns]) => {
+        groups[group] = Object.keys(morphMap).filter(k => patterns.some(p => p.test(k)))
+      })
+      // 깜빡임은 느린 lerp를 거치면 흐릿해지므로 별도 처리(빠른 닫힘/열림 곡선을 직접 대입)
+      blinkKeysRef.current = groups.blink ?? []
+      delete groups.blink
+      morphGroupsRef.current = groups
+      morphValuesRef.current = {}
+      if (!Object.values(groups).some(arr => arr.length > 0)) {
+        console.warn('[RealisticAvatar] 입싱크/표정용 모프타겟을 GLB에서 찾지 못함 — 비활성')
+      }
+
       setLoading(false); setAvatarLoaded(true)
       const animate = () => {
         animFrameRef.current = requestAnimationFrame(animate)
-        mixerRef.current?.update(clockRef.current.getDelta())
+        const dt = clockRef.current.getDelta()
+        mixerRef.current?.update(dt)
+
+        // 자동 눈 깜빡임 — 빠른 닫힘/열림 곡선을 직접 대입(lerp 없이)
+        if (blinkKeysRef.current.length > 0) {
+          const blink = blinkStateRef.current
+          blink.elapsed += dt * 1000
+          let blinkValue = 0
+          const CLOSE_MS = 90, OPEN_MS = 130
+          if (blink.phase === 'closing') {
+            blinkValue = Math.min(1, blink.elapsed / CLOSE_MS)
+            if (blink.elapsed >= CLOSE_MS) { blink.phase = 'opening'; blink.elapsed = 0 }
+          } else if (blink.phase === 'opening') {
+            blinkValue = Math.max(0, 1 - blink.elapsed / OPEN_MS)
+            if (blink.elapsed >= OPEN_MS) { blink.phase = 'idle'; blink.elapsed = 0; blink.next = 2000 + Math.random() * 4000 }
+          } else if (blink.elapsed >= blink.next) {
+            blink.phase = 'closing'; blink.elapsed = 0
+          }
+          blinkKeysRef.current.forEach(key => {
+            morphMapRef.current[key]?.forEach(ref => {
+              const influences = ref.mesh.morphTargetInfluences
+              if (influences) influences[ref.index] = blinkValue
+            })
+          })
+        }
+
+        // 주파수 대역 기반 입싱크(viseme 근사) + 감정 기반 표정
+        const groups = morphGroupsRef.current
+        if (Object.keys(groups).length > 0) {
+          const analyser = lipsyncAnalyserRef.current
+          let low = 0, mid = 0, high = 0
+          if (analyser) {
+            const buf = new Uint8Array(analyser.frequencyBinCount)
+            analyser.getByteFrequencyData(buf)
+            const n = buf.length
+            const bandAvg = (s: number, e: number) => {
+              let sum = 0; for (let i = s; i < e; i++) sum += buf[i]
+              return sum / Math.max(1, e - s)
+            }
+            low = bandAvg(0, Math.floor(n * 0.33))
+            mid = bandAvg(Math.floor(n * 0.33), Math.floor(n * 0.66))
+            high = bandAvg(Math.floor(n * 0.66), n)
+          }
+          const norm = (v: number) => Math.min(1, Math.max(0, (v - 8) / 50))
+          const ew = EMOTION_WEIGHTS[emotionRef.current] || {}
+          const targets: Record<string, number> = {
+            aa: norm(low) * 0.9,
+            oo: norm(mid) * 0.5,
+            ee: norm(high) * 0.5,
+            consonant: norm(high) * 0.3,
+            smile: ew.smile ?? 0,
+            frown: ew.frown ?? 0,
+            browUp: ew.browUp ?? 0,
+            browDown: ew.browDown ?? 0,
+            squint: ew.squint ?? 0,
+          }
+          Object.entries(groups).forEach(([group, keys]) => {
+            const target = targets[group] ?? 0
+            keys.forEach(key => {
+              const refs = morphMapRef.current[key]
+              if (!refs?.length) return
+              const cur = morphValuesRef.current[key] ?? 0
+              const next = cur + (target - cur) * 0.35
+              morphValuesRef.current[key] = next
+              refs.forEach(ref => {
+                const influences = ref.mesh.morphTargetInfluences
+                if (influences) influences[ref.index] = next
+              })
+            })
+          })
+        }
+
         controls.update(); renderer.render(scene, camera)
       }
       animate()
@@ -407,14 +549,19 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     const userMsg: ChatMsg = { role: 'user', content: text }
     setMessages(prev => [...prev, userMsg]); setInput(''); setChatLoading(true)
     logTurn('user', text)
-    let key = settings.claudeSessionKey
-    if (!key && settings.mcpEndpoint) key = await claudeWebAutoConnect(settings.mcpEndpoint) || ''
     try {
       const history = [...messages, userMsg].slice(-8)
       const system = await buildSystemPrompt(text)
       let reply = ''
-      await streamClaudeWeb(key, settings.mcpEndpoint, history, system,
-        d => { reply += d }, settings.anthropicApiKey)
+      if (settings.aiProvider === 'ollama') {
+        await streamChatOllama(settings.ollamaEndpoint, settings.ollamaModel, history, system,
+          d => { reply += d })
+      } else {
+        let key = settings.claudeSessionKey
+        if (!key && settings.mcpEndpoint) key = await claudeWebAutoConnect(settings.mcpEndpoint) || ''
+        await streamClaudeWeb(key, settings.mcpEndpoint, history, system,
+          d => { reply += d }, settings.anthropicApiKey)
+      }
       setMessages(prev => [...prev, { role: 'assistant', content: reply }])
       if (reply) { logTurn('assistant', reply); playTTS(reply) }
     } catch {
@@ -438,7 +585,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const isConnected = !!(settings.claudeSessionKey || settings.anthropicApiKey)
+  const isConnected = settings.aiProvider === 'ollama' || !!(settings.claudeSessionKey || settings.anthropicApiKey)
 
   return (
     <div className="flex h-full overflow-hidden bg-gray-950">

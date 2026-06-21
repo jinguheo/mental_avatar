@@ -120,6 +120,33 @@ export default function SettingsView({ settings, onChange }: Props) {
       <h2 className="text-base font-semibold text-gray-900">설정</h2>
 
       <div className="space-y-1.5">
+        <label className={labelCls}>AI 제공자</label>
+        <div className="flex gap-2">
+          <button onClick={() => set('aiProvider', 'ollama')}
+            className={`flex-1 py-2 text-sm rounded-xl border transition ${settings.aiProvider === 'ollama' ? 'bg-gray-900 text-white border-gray-900' : 'border-gray-200 text-gray-600 hover:border-gray-400'}`}>
+            Ollama (로컬, 기본)
+          </button>
+          <button onClick={() => set('aiProvider', 'claude')}
+            className={`flex-1 py-2 text-sm rounded-xl border transition ${settings.aiProvider === 'claude' ? 'bg-gray-900 text-white border-gray-900' : 'border-gray-200 text-gray-600 hover:border-gray-400'}`}>
+            Claude.ai / API
+          </button>
+        </div>
+      </div>
+
+      {settings.aiProvider === 'ollama' && (
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <label className={labelCls}>Ollama 엔드포인트</label>
+            <input value={settings.ollamaEndpoint} onChange={e => set('ollamaEndpoint', e.target.value)} className={inputCls} />
+          </div>
+          <div className="space-y-1.5">
+            <label className={labelCls}>Ollama 모델</label>
+            <input value={settings.ollamaModel} onChange={e => set('ollamaModel', e.target.value)} className={inputCls} />
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
         <label className={labelCls}>MCP 엔드포인트 (my-dashboard MCP 서버)</label>
         <input
           value={settings.mcpEndpoint}
