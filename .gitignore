@@ -11,6 +11,9 @@ db/vectors/
 # 자동 백업(watcher가 1시간마다 생성, db+data 통째 복사)
 backups/
 
+# 이전용 데이터 번들(개인 데이터 포함 — 직접 전달용, git에 올리지 않음)
+migrate/data_bundle_*.zip
+
 # 문서 (개인 파일)
 docs/
 
