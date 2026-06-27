@@ -11,6 +11,7 @@ const API = 'http://127.0.0.1:8766'
 interface SearchResult {
   id: string; title: string; document: string
   source_type: string; distance: number
+  _source?: string; community?: string  // 백엔드 /search가 KG/graphify 결과 구분용으로 덧붙이는 필드
 }
 interface AvatarSummary {
   summary: string
@@ -1039,6 +1040,7 @@ ${b.topic_access.slice(0,8).map(t => `- ${t.name} (${t.access_cnt}회)`).join('\
 interface WikiPage {
   id: string; title: string; file_path: string
   status: string; updated_at: string; wiki_content: string
+  node_id?: string  // KG 노드 연결용(백엔드가 함께 반환)
 }
 interface AutoJob {
   running: boolean; total: number; done: number; failed: number

@@ -20,6 +20,12 @@ docs/
 # 로그
 *.log
 
+# Node 의존성 / 빌드 산출물 (디스크엔 두고 git 추적만 중단)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
 # Python 환경
 .venv/
 env/
