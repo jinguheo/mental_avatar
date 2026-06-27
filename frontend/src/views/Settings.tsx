@@ -4,6 +4,65 @@ import { useState, useEffect } from 'react'
 
 const API = 'http://127.0.0.1:8766'
 
+const TRAIT_DEFS = [
+  { key: 'openness',          label: '개방성' },
+  { key: 'conscientiousness', label: '성실성' },
+  { key: 'extraversion',      label: '외향성' },
+  { key: 'agreeableness',     label: '친화성' },
+  { key: 'stability',         label: '정서안정성' },
+]
+
+interface RadarData {
+  axes: string[]
+  keys: string[]
+  manual: number[]
+  auto: number[]
+  manual_set: boolean[]
+  auto_set: boolean[]
+  diff: (number | null)[]
+  auto_at: string
+}
+
+function RadarChart({ data }: { data: RadarData }) {
+  const size = 240, center = size / 2, maxR = size / 2 - 30
+  const n = data.axes.length
+  const angle = (i: number) => -Math.PI / 2 + (i * 2 * Math.PI) / n
+  const pt = (i: number, val: number): [number, number] => {
+    const r = (Math.max(0, Math.min(100, val)) / 100) * maxR
+    return [center + r * Math.cos(angle(i)), center + r * Math.sin(angle(i))]
+  }
+  const poly = (vals: number[]) => vals.map((v, i) => pt(i, v).join(',')).join(' ')
+
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full max-w-[260px] mx-auto">
+      {[25, 50, 75, 100].map(r => (
+        <polygon key={r}
+          points={Array.from({ length: n }, (_, i) => pt(i, r).join(',')).join(' ')}
+          fill="none" stroke="#e5e7eb" strokeWidth={1} />
+      ))}
+      {Array.from({ length: n }, (_, i) => {
+        if (i === 0) return null  // 정중앙 위로 뻗는 세로축 선은 생략
+        const [x, y] = pt(i, 100)
+        return <line key={i} x1={center} y1={center} x2={x} y2={y} stroke="#e5e7eb" strokeWidth={1} />
+      })}
+      {data.manual_set.some(Boolean) && (
+        <polygon points={poly(data.manual)} fill="rgba(79,70,229,0.22)" stroke="#4f46e5" strokeWidth={2} />
+      )}
+      {data.auto_set.some(Boolean) && (
+        <polygon points={poly(data.auto)} fill="rgba(249,115,22,0.18)" stroke="#f97316" strokeWidth={2} strokeDasharray="4,3" />
+      )}
+      {data.axes.map((label, i) => {
+        const [x, y] = pt(i, 118)
+        return (
+          <text key={label} x={x} y={y} fontSize={10} fill="#6b7280" textAnchor="middle" dominantBaseline="middle">
+            {label}
+          </text>
+        )
+      })}
+    </svg>
+  )
+}
+
 interface Props {
   settings: Settings
   onChange: (s: Settings) => void
@@ -30,6 +89,21 @@ export default function SettingsView({ settings, onChange }: Props) {
     reason?: string
   } | null>(null)
   const [styleApplyMsg, setStyleApplyMsg] = useState('')
+  const [prefAnalyzing, setPrefAnalyzing] = useState(false)
+  const [prefResult, setPrefResult] = useState<{
+    ready: boolean
+    count?: number
+    message?: string
+    suggestion?: { mbti_auto?: string; personality_auto?: string; preference_auto?: string; [traitKey: string]: string | number | undefined }
+    reason?: string
+  } | null>(null)
+  const [prefApplyMsg, setPrefApplyMsg] = useState('')
+  const [radar, setRadar] = useState<RadarData | null>(null)
+
+  const fetchRadar = () => {
+    fetch(`${API}/preference/radar`).then(r => r.json()).then(setRadar).catch(() => {})
+  }
+  useEffect(() => { fetchRadar() }, [])
 
   useEffect(() => {
     fetch(`${API}/profile/me`).then(r => r.json()).then(d => {
@@ -49,6 +123,7 @@ export default function SettingsView({ settings, onChange }: Props) {
         body: JSON.stringify(profile),
       })
       setProfileMsg('저장됐습니다')
+      fetchRadar()
       setTimeout(() => setProfileMsg(''), 2000)
     } catch { setProfileMsg('저장 실패') }
   }
@@ -96,6 +171,40 @@ export default function SettingsView({ settings, onChange }: Props) {
     }
   }
 
+  const analyzePreference = async () => {
+    setPrefAnalyzing(true)
+    setPrefResult(null)
+    setPrefApplyMsg('')
+    try {
+      const res = await fetch(`${API}/preference/analyze`)
+      setPrefResult(await res.json())
+    } catch {
+      setPrefResult({ ready: false, message: '분석 실패' })
+    } finally {
+      setPrefAnalyzing(false)
+    }
+  }
+
+  const applyPreferenceSuggestion = async () => {
+    if (!prefResult?.suggestion) return
+    try {
+      const res = await fetch(`${API}/preference/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(prefResult.suggestion),
+      })
+      const data = await res.json()
+      const flat: Record<string, string> = {}
+      Object.entries(data.profile || {}).forEach(([k, v]: any) => { flat[k] = v.value || '' })
+      setProfile(p => ({ ...p, ...flat }))
+      fetchRadar()
+      setPrefApplyMsg('적용됐습니다')
+      setTimeout(() => setPrefApplyMsg(''), 2000)
+    } catch {
+      setPrefApplyMsg('적용 실패')
+    }
+  }
+
   const set = (k: keyof Settings, v: string) => onChange({ ...settings, [k]: v })
 
   const captureSession = async () => {
@@ -116,7 +225,7 @@ export default function SettingsView({ settings, onChange }: Props) {
   const labelCls = "text-xs font-medium text-gray-600"
 
   return (
-    <div className="p-8 max-w-lg space-y-6">
+    <div className="p-8 max-w-lg space-y-6 h-full overflow-y-auto">
       <h2 className="text-base font-semibold text-gray-900">설정</h2>
 
       <div className="space-y-1.5">
@@ -309,6 +418,134 @@ export default function SettingsView({ settings, onChange }: Props) {
               프로파일에 적용
             </button>
             {styleApplyMsg && <p className={`text-xs text-center ${styleApplyMsg.includes('적용됐') ? 'text-green-600' : 'text-red-500'}`}>{styleApplyMsg}</p>}
+          </div>
+        )}
+      </div>
+
+      {/* Preference (MBTI/성격/선호도) — 직접입력 + 자동측정 + 병합 */}
+      <div className="space-y-3 pt-2 border-t border-gray-100">
+        <h3 className="text-sm font-semibold text-gray-800">Preference (MBTI/성격/선호도)</h3>
+        <p className="text-xs text-gray-400">
+          직접 입력한 값은 항상 우선 반영됩니다. 비워두면 아래 자동측정 결과가 대신 쓰입니다.
+        </p>
+
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <label className={labelCls}>MBTI (직접 입력)</label>
+            <input value={profile.mbti_manual || ''} onChange={e => setProfile(p => ({ ...p, mbti_manual: e.target.value }))}
+              className={inputCls} placeholder="예: INTJ" />
+          </div>
+          <div className="space-y-1">
+            <label className={labelCls}>성격 (직접 입력)</label>
+            <textarea value={profile.personality_manual || ''} onChange={e => setProfile(p => ({ ...p, personality_manual: e.target.value }))}
+              className={inputCls} rows={2} placeholder="예: 분석적이고 끝까지 파고드는 편" />
+          </div>
+          <div className="space-y-1">
+            <label className={labelCls}>선호도/가치관 (직접 입력)</label>
+            <textarea value={profile.preference_manual || ''} onChange={e => setProfile(p => ({ ...p, preference_manual: e.target.value }))}
+              className={inputCls} rows={2} placeholder="예: 효율과 정확성을 우선시함" />
+          </div>
+          <div className="space-y-2">
+            <label className={labelCls}>Big Five 성향 (직접 입력, 0~100)</label>
+            {TRAIT_DEFS.map(({ key, label }) => {
+              const fieldKey = `trait_${key}_manual`
+              const val = profile[fieldKey] !== undefined && profile[fieldKey] !== '' ? Number(profile[fieldKey]) : 50
+              return (
+                <div key={key} className="flex items-center gap-2">
+                  <span className="text-xs text-gray-600 w-16 shrink-0">{label}</span>
+                  <input type="range" min={0} max={100} value={val}
+                    onChange={e => setProfile(p => ({ ...p, [fieldKey]: e.target.value }))}
+                    className="flex-1" />
+                  <span className="text-xs text-gray-500 w-8 text-right">{val}</span>
+                </div>
+              )
+            })}
+          </div>
+          <div className="space-y-1">
+            <label className={labelCls}>자동측정 주기</label>
+            <div className="flex flex-wrap gap-2">
+              {['1', '3', '7', '14', '30'].map(d => (
+                <button key={d} onClick={() => setProfile(p => ({ ...p, preference_interval_days: d }))}
+                  className={`px-3 py-1.5 text-xs rounded-full border transition ${
+                    (profile.preference_interval_days || '7') === d
+                      ? 'bg-emerald-600 text-white border-emerald-600'
+                      : 'border-gray-200 text-gray-600 hover:border-gray-400'
+                  }`}>{d}일</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <button onClick={saveProfile}
+          className="w-full py-2 rounded-xl bg-gray-900 text-white text-sm hover:bg-gray-700 transition">
+          Preference 저장
+        </button>
+
+        <button onClick={analyzePreference} disabled={prefAnalyzing}
+          className="w-full py-2 rounded-xl bg-gray-900 text-white text-sm hover:bg-gray-700 disabled:opacity-40 transition">
+          {prefAnalyzing ? '분석 중…' : '지금 자동측정 실행'}
+        </button>
+
+        {prefResult && !prefResult.ready && (
+          <p className="text-xs text-gray-400">{prefResult.message}</p>
+        )}
+
+        {prefResult?.ready && prefResult.suggestion && (
+          <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-2 text-xs text-gray-600">
+            <p className="text-gray-400">최근 대화 {prefResult.count}개 + 지식그래프 토픽 분석 결과</p>
+            <ul className="space-y-1">
+              {prefResult.suggestion.mbti_auto && <li>MBTI: <span className="font-medium text-gray-900">{prefResult.suggestion.mbti_auto}</span></li>}
+              {prefResult.suggestion.personality_auto && <li>성격: <span className="font-medium text-gray-900">{prefResult.suggestion.personality_auto}</span></li>}
+              {prefResult.suggestion.preference_auto && <li>선호도: <span className="font-medium text-gray-900">{prefResult.suggestion.preference_auto}</span></li>}
+              {TRAIT_DEFS.map(({ key, label }) => {
+                const v = prefResult.suggestion?.[`trait_${key}_auto`]
+                return v !== undefined ? (
+                  <li key={key}>{label}: <span className="font-medium text-gray-900">{v}점</span></li>
+                ) : null
+              })}
+            </ul>
+            {prefResult.reason && <p className="text-gray-400">{prefResult.reason}</p>}
+            <button onClick={applyPreferenceSuggestion}
+              className="w-full py-1.5 rounded-xl bg-indigo-600 text-white text-xs hover:bg-indigo-500 transition">
+              프로파일에 적용
+            </button>
+            {prefApplyMsg && <p className={`text-xs text-center ${prefApplyMsg.includes('적용됐') ? 'text-green-600' : 'text-red-500'}`}>{prefApplyMsg}</p>}
+          </div>
+        )}
+
+        {profile.preference_auto_at && (
+          <p className="text-xs text-gray-400">마지막 자동측정: {profile.preference_auto_at}</p>
+        )}
+
+        {/* 레이더 차트 — 직접입력(파란 실선) vs 자동측정(주황 점선) 비교 */}
+        {radar && (
+          <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-2">
+            <p className="text-xs text-gray-500">성향 비교 (직접입력 vs 자동측정)</p>
+            <RadarChart data={radar} />
+            <div className="flex justify-center gap-4 text-xs">
+              <span className="flex items-center gap-1 text-indigo-600"><span className="w-2.5 h-2.5 rounded-full bg-indigo-600 inline-block" />직접입력</span>
+              <span className="flex items-center gap-1 text-orange-500"><span className="w-2.5 h-2.5 rounded-full bg-orange-500 inline-block" />자동측정</span>
+            </div>
+            <ul className="text-xs text-gray-600 space-y-0.5 pt-1 border-t border-gray-200">
+              {radar.axes.map((label, i) => {
+                const m = radar.manual_set[i] ? radar.manual[i] : null
+                const a = radar.auto_set[i] ? radar.auto[i] : null
+                const d = radar.diff[i]
+                return (
+                  <li key={label} className="flex items-center justify-between">
+                    <span>{label}</span>
+                    <span>
+                      {m !== null ? `직접 ${m}` : '직접 미입력'} / {a !== null ? `AI ${a}` : 'AI 미측정'}
+                      {d !== null && (
+                        <span className={`ml-1 font-medium ${d >= 25 ? 'text-red-500' : d >= 10 ? 'text-amber-500' : 'text-gray-400'}`}>
+                          (차이 {d})
+                        </span>
+                      )}
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
           </div>
         )}
       </div>

@@ -8,6 +8,9 @@ __pycache__/
 db/knowledge.db
 db/vectors/
 
+# 자동 백업(watcher가 1시간마다 생성, db+data 통째 복사)
+backups/
+
 # 문서 (개인 파일)
 docs/
 

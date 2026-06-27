@@ -1,13 +1,28 @@
-"""docs/ 폴더 감시 — 새 파일 자동 ingest"""
-import sys, os, time, requests
+"""docs/ 폴더 감시 — 새 파일 자동 ingest + DB/벡터/얼굴·목소리 주기 백업"""
+import sys, os, time, shutil, requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-DOCS_DIR   = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "docs"))
+ROOT_DIR   = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DOCS_DIR   = os.path.join(ROOT_DIR, "docs")
 API_BASE   = "http://127.0.0.1:8766"
 EXTENSIONS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".txt", ".md"}
+
+# ── 백업 설정: db/knowledge.db + db/vectors/ + data/ 를 통째로 복사 ──
+BACKUP_DIR      = os.path.join(ROOT_DIR, "backups")
+BACKUP_SOURCES  = [
+    os.path.join(ROOT_DIR, "db", "knowledge.db"),
+    os.path.join(ROOT_DIR, "db", "vectors"),
+    os.path.join(ROOT_DIR, "data"),
+]
+BACKUP_INTERVAL_SEC = 3600   # 1시간마다
+BACKUP_KEEP          = 24    # 최근 24개(=하루치)만 보관, 오래된 건 삭제
+
+# preference(MBTI/성격/선호도) 자동측정 — 실제 주기는 /preference/due가 사용자 설정(preference_interval_days)으로 판단,
+# watcher는 그 판단을 부담없는 간격(1시간)으로 확인만 함
+PREFERENCE_CHECK_INTERVAL_SEC = 3600
 
 
 class DocHandler(FileSystemEventHandler):
@@ -54,20 +69,82 @@ def _process_queue():
         print(f"[watcher] 큐 처리 오류: {e}")
 
 
+def _run_backup():
+    """db/knowledge.db + db/vectors/ + data/ 를 backups/<timestamp>/ 로 복사 후 오래된 백업 정리"""
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    dest_dir = os.path.join(BACKUP_DIR, stamp)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        copied = []
+        for src in BACKUP_SOURCES:
+            if not os.path.exists(src):
+                continue
+            name = os.path.basename(src)
+            dest = os.path.join(dest_dir, name)
+            if os.path.isdir(src):
+                shutil.copytree(src, dest)
+            else:
+                shutil.copy2(src, dest)
+            copied.append(name)
+        print(f"[watcher] 백업 완료: {dest_dir} ({', '.join(copied) or '대상 없음'})")
+        _prune_old_backups()
+    except Exception as e:
+        print(f"[watcher] 백업 오류: {e}")
+
+
+def _check_preference_schedule():
+    """사용자가 설정한 측정 주기가 지났으면 MBTI/성격/선호도 자동측정을 실행"""
+    try:
+        due = requests.get(f"{API_BASE}/preference/due", timeout=10).json().get("due")
+        if not due:
+            return
+        resp = requests.post(f"{API_BASE}/preference/analyze_and_apply", timeout=120)
+        data = resp.json()
+        if data.get("applied"):
+            print(f"[watcher] preference 자동측정 완료 (대화 {data.get('count', 0)}건 기반)")
+        elif data.get("ready") is False:
+            print(f"[watcher] preference 자동측정 보류: {data.get('message')}")
+    except Exception as e:
+        print(f"[watcher] preference 자동측정 오류: {e}")
+
+
+def _prune_old_backups():
+    if not os.path.isdir(BACKUP_DIR):
+        return
+    entries = sorted(
+        (d for d in os.listdir(BACKUP_DIR) if os.path.isdir(os.path.join(BACKUP_DIR, d))),
+        reverse=True,
+    )
+    for old in entries[BACKUP_KEEP:]:
+        shutil.rmtree(os.path.join(BACKUP_DIR, old), ignore_errors=True)
+
+
 def start():
     os.makedirs(DOCS_DIR, exist_ok=True)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     observer = Observer()
     observer.schedule(DocHandler(), DOCS_DIR, recursive=True)
     observer.start()
     print(f"[watcher] 감시 시작: {DOCS_DIR}")
+    _run_backup()  # 시작 시 1회 즉시 백업(서버 재시작 직후에도 최신 상태 보존)
     tick = 0
+    backup_tick = 0
+    pref_tick = 0
     try:
         while True:
             time.sleep(2)
             tick += 2
+            backup_tick += 2
+            pref_tick += 2
             if tick >= 30:
                 tick = 0
                 _process_queue()
+            if backup_tick >= BACKUP_INTERVAL_SEC:
+                backup_tick = 0
+                _run_backup()
+            if pref_tick >= PREFERENCE_CHECK_INTERVAL_SEC:
+                pref_tick = 0
+                _check_preference_schedule()
     except KeyboardInterrupt:
         observer.stop()
     observer.join()

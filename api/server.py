@@ -772,6 +772,39 @@ def conversation_style_apply():
     return jsonify({"profile": avatar_core.apply_style_suggestion(data)})
 
 
+@app.route("/preference/analyze", methods=["GET"])
+def preference_analyze():
+    """최근 대화+KG 토픽에서 MBTI/성격/선호도 추정 (자동측정 루프 1단계: 제안)"""
+    limit = int(request.args.get("limit", 60))
+    return jsonify(avatar_core.analyze_preference(limit))
+
+
+@app.route("/preference/apply", methods=["POST"])
+def preference_apply():
+    """추정된 preference 제안을 프로파일에 반영 (자동측정 루프 2단계: 적용)"""
+    data = request.get_json(silent=True) or {}
+    return jsonify({"profile": avatar_core.apply_preference_suggestion(data)})
+
+
+@app.route("/preference/analyze_and_apply", methods=["POST"])
+def preference_analyze_and_apply():
+    """주기적 자동측정용 — 분석+적용을 한 번에 (watcher가 주기마다 호출)"""
+    limit = int((request.get_json(silent=True) or {}).get("limit", 60))
+    return jsonify(avatar_core.analyze_and_apply_preference(limit))
+
+
+@app.route("/preference/due", methods=["GET"])
+def preference_due_check():
+    """설정된 측정 주기(preference_interval_days) 기준으로 지금 자동측정이 필요한지"""
+    return jsonify({"due": avatar_core.preference_due()})
+
+
+@app.route("/preference/radar", methods=["GET"])
+def preference_radar():
+    """Big Five 5축 직접입력 vs 자동측정 점수 + 차이 — 레이더 차트 비교용"""
+    return jsonify(avatar_core.preference_radar())
+
+
 @app.route("/profile/behavior", methods=["GET"])
 def profile_behavior():
     """행동 데이터 집계 — 파일 열기, 검색, 노드 접근 이력"""

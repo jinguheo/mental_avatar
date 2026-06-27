@@ -10,6 +10,9 @@ const API      = 'http://127.0.0.1:8766'
 const MP_WASM  = '/mediapipe/wasm'
 const MP_MODEL = '/mediapipe/models/face_landmarker.task'
 
+const LS_SNAPSHOT  = 'mental-avatar-face-snapshot'
+const LS_LANDMARKS = 'mental-avatar-face-landmarks'
+
 type LM = { x: number; y: number; z: number }
 
 function buildTriangles(connections: { start: number; end: number }[]): number[] {
@@ -58,6 +61,9 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const landmarkerRef = useRef<unknown>(null)
   const streamRef     = useRef<MediaStream | null>(null)
   const lastTsRef     = useRef(0)
+  const lastLandmarksRef = useRef<LM[] | null>(null)
+  const staticTexRef  = useRef<THREE.Texture | null>(null)
+  const faceIndexReadyRef = useRef(false)
   const onBlendshapesRef = useRef(onBlendshapes)
   useEffect(() => { onBlendshapesRef.current = onBlendshapes }, [onBlendshapes])
   const onHeadPoseRef = useRef(onHeadPose)
@@ -71,6 +77,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const [recording, setRecording]     = useState(false)
   const [recStatus, setRecStatus]     = useState('')
   const [resultUrl, setResultUrl]     = useState<string | null>(null)
+  const [hasSavedFace, setHasSavedFace] = useState(false)
   const recorderRef  = useRef<MediaRecorder | null>(null)
   const recChunksRef = useRef<Blob[]>([])
 
@@ -141,6 +148,15 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   useEffect(() => { if (wireRef.current) wireRef.current.visible = showWire }, [showWire])
   useEffect(() => { if (faceMeshRef.current) faceMeshRef.current.visible = showMesh }, [showMesh])
 
+  // 얼굴 메시 삼각분할 인덱스만 필요한 경우(웹캠 없이 저장된 얼굴 복원 시) — 모델 로딩 없이 정적 상수만 사용
+  const ensureFaceIndex = useCallback(async () => {
+    if (faceIndexReadyRef.current) return
+    const { FaceLandmarker } = await import('@mediapipe/tasks-vision')
+    const filtered = FaceLandmarker.FACE_LANDMARKS_TESSELATION.filter(c => c.start < 468 && c.end < 468)
+    faceMeshRef.current?.geometry.setIndex(buildTriangles(filtered))
+    faceIndexReadyRef.current = true
+  }, [])
+
   const initLandmarker = useCallback(async () => {
     setStatus('loading'); setStatusMsg('MediaPipe 로딩 중…')
     try {
@@ -154,13 +170,12 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         minTrackingConfidence: 0.3,
       })
       landmarkerRef.current = lm
-      const filtered = FaceLandmarker.FACE_LANDMARKS_TESSELATION.filter(c => c.start < 468 && c.end < 468)
-      faceMeshRef.current?.geometry.setIndex(buildTriangles(filtered))
+      await ensureFaceIndex()
       setStatusMsg('완료'); return lm
     } catch (e) {
       setStatus('error'); setStatusMsg('로드 실패: ' + String(e)); return null
     }
-  }, [])
+  }, [ensureFaceIndex])
 
   const updateFaceMesh = useCallback((lms: LM[]) => {
     const cam = cameraRef.current
@@ -232,7 +247,10 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const r = (lm as any).detectForVideo(video, now)
-          if (r.faceLandmarks?.length > 0) updateFaceMesh(r.faceLandmarks[0])
+          if (r.faceLandmarks?.length > 0) {
+            updateFaceMesh(r.faceLandmarks[0])
+            lastLandmarksRef.current = r.faceLandmarks[0]
+          }
           if (onBlendshapesRef.current && r.faceBlendshapes?.length > 0) {
             const scores: Record<string, number> = {}
             for (const c of r.faceBlendshapes[0].categories) scores[c.categoryName] = c.score
@@ -292,7 +310,9 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       rendererRef.current.setSize(canvas.clientWidth, canvas.clientHeight, false)
     }
 
-    // VideoTexture → face mesh에 텍스처 매핑
+    // VideoTexture → face mesh에 텍스처 매핑 (정지 이미지였던 경우 교체)
+    staticTexRef.current?.dispose()
+    staticTexRef.current = null
     const tex = new THREE.VideoTexture(video)
     tex.minFilter = THREE.LinearFilter
     tex.magFilter = THREE.LinearFilter
@@ -308,20 +328,87 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     trackLoop(lm)
   }, [status, initLandmarker, trackLoop])
 
+  // 마지막 프레임을 정지 이미지로 캡처해 저장 + 메시에 계속 표시(웹캠 꺼도 외형 유지)
+  const captureAndPersistSnapshot = useCallback(() => {
+    const video = videoRef.current
+    const landmarks = lastLandmarksRef.current
+    if (!video || !landmarks || video.videoWidth === 0) return
+
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.drawImage(video, 0, 0)
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+
+    try {
+      localStorage.setItem(LS_SNAPSHOT, dataUrl)
+      localStorage.setItem(LS_LANDMARKS, JSON.stringify(landmarks))
+    } catch { /* 용량 초과 등은 무시 */ }
+
+    if (faceMeshRef.current) {
+      const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
+      staticTexRef.current?.dispose()
+      const tex = new THREE.TextureLoader().load(dataUrl)
+      tex.minFilter = THREE.LinearFilter
+      tex.magFilter = THREE.LinearFilter
+      staticTexRef.current = tex
+      mat.map = tex
+      mat.opacity = 1
+      mat.needsUpdate = true
+    }
+    setHasSavedFace(true)
+
+    // 서버에도 등록(다른 화면/재시작 후에도 얼굴 이미지 재사용 가능하도록)
+    canvas.toBlob(blob => {
+      if (!blob) return
+      const form = new FormData()
+      form.append('face', blob, 'captured_face.jpg')
+      fetch(`${API}/avatar/register_face`, { method: 'POST', body: form }).catch(() => {})
+    }, 'image/jpeg', 0.85)
+  }, [])
+
   const stopTracking = useCallback(() => {
+    captureAndPersistSnapshot()
     streamRef.current?.getTracks().forEach(t => t.stop())
     streamRef.current = null
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.pause() }
-    if (faceMeshRef.current) {
-      const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
-      mat.map = null; mat.opacity = 0; mat.needsUpdate = true
-    }
     videoTexRef.current?.dispose()
     videoTexRef.current = null
     setStatus('idle'); setStatusMsg('')
     onBlendshapesRef.current?.(null)
     onHeadPoseRef.current?.(null)
-  }, [])
+  }, [captureAndPersistSnapshot])
+
+  // 마운트 시 저장된 얼굴 모델 복원(웹캠 켜기 전에도 이전 외형 표시)
+  useEffect(() => {
+    const snapshot = localStorage.getItem(LS_SNAPSHOT)
+    const landmarksRaw = localStorage.getItem(LS_LANDMARKS)
+    if (!snapshot || !landmarksRaw) return
+    let landmarks: LM[]
+    try { landmarks = JSON.parse(landmarksRaw) } catch { return }
+
+    let cancelled = false
+    ;(async () => {
+      await ensureFaceIndex()
+      if (cancelled) return
+      lastLandmarksRef.current = landmarks
+      updateFaceMesh(landmarks)
+      if (faceMeshRef.current) {
+        const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
+        const tex = new THREE.TextureLoader().load(snapshot)
+        tex.minFilter = THREE.LinearFilter
+        tex.magFilter = THREE.LinearFilter
+        staticTexRef.current = tex
+        mat.map = tex
+        mat.opacity = 1
+        mat.needsUpdate = true
+      }
+      setHasSavedFace(true)
+    })()
+    return () => { cancelled = true }
+  }, [ensureFaceIndex, updateFaceMesh])
 
   // ── 녹화 → 립싱크 영상 생성 ──
   const startRecording = useCallback(async () => {
@@ -452,7 +539,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         </div>
       )}
 
-      {status === 'idle' && (
+      {status === 'idle' && !hasSavedFace && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-500 pointer-events-none gap-1">
           <span className="text-3xl">◈</span>
           <p className="text-xs">▶ 웹캠 시작</p>

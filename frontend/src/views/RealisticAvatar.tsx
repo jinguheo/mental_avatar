@@ -11,7 +11,15 @@ import type { Settings } from '@/types'
 import type { ChatMsg } from './Avatar3DChat'
 
 const API = 'http://127.0.0.1:8766'
+const CHAT_SINCE_KEY = 'mental-avatar-realistic-chat-since'
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
+
+// SQLite의 created_at(datetime('now','localtime'))과 동일한 'YYYY-MM-DD HH:MM:SS' 형식(로컬시간)
+function localTimestamp(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
 const IDB_NAME = 'mental-avatar-glb'
 const IDB_STORE = 'glb-files'
 
@@ -574,16 +582,34 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   useEffect(() => { sendMessageRef.current = sendMessage }, [sendMessage])
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  // 첫 진입 시 인사
+  // 첫 진입 시 이전 대화 불러오기(있으면 이어서 표시) — 없으면 인사로 시작
   useEffect(() => {
     if (messages.length > 0) return
-    const t = setTimeout(() => {
+    let cancelled = false
+    const t = setTimeout(async () => {
+      try {
+        const since = localStorage.getItem(CHAT_SINCE_KEY) || ''
+        const res = await fetch(`${API}/conversation/history?view=realistic_avatar&limit=50&since=${encodeURIComponent(since)}`)
+        const data = await res.json()
+        if (!cancelled && Array.isArray(data?.messages) && data.messages.length > 0) {
+          setMessages(data.messages)
+          return
+        }
+      } catch { /* 조회 실패 시 인사로 폴백 */ }
+      if (cancelled) return
       setMessages([{ role: 'assistant', content: GREETING }])
       playTTS(GREETING)
     }, 800)
-    return () => clearTimeout(t)
+    return () => { cancelled = true; clearTimeout(t) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 새로 시작: 이전 대화를 더 이상 불러오지 않도록 기준 시각 기록 후 인사로 초기화
+  const resetChat = useCallback(() => {
+    localStorage.setItem(CHAT_SINCE_KEY, localTimestamp())
+    setMessages([{ role: 'assistant', content: GREETING }])
+    playTTS(GREETING)
+  }, [setMessages, playTTS])
 
   const isConnected = settings.aiProvider === 'ollama' || !!(settings.claudeSessionKey || settings.anthropicApiKey)
 
@@ -679,7 +705,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
               <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
               <h2 className="text-sm font-semibold text-gray-200">실사 아바타</h2>
             </div>
-            <button onClick={() => setMessages([])}
+            <button onClick={resetChat}
               className="text-xs text-gray-400 hover:text-gray-200 border border-gray-700 rounded px-2 py-0.5 hover:bg-gray-800">
               새로 시작
             </button>

@@ -444,3 +444,59 @@ XTTS(목소리)·SadTalker(영상) 개별 + 통합 모두 성공.
 4. Graphify 커뮤니티 레이블 LLM 자동 생성
 
 ---
+
+## 2026-06-27 (세션 17) — 저장형 얼굴 / 자동백업 / Preference(MBTI 레이더) 시스템
+
+### 1. 저장형 얼굴 모델 (웹캠 꺼도 외형 유지)
+- `frontend/src/views/FaceTrackingPanel.tsx`
+- 웹캠 중지 시 마지막 프레임을 정지 이미지로 캡처 → localStorage 저장 + 서버 `/avatar/register_face` 등록
+- 메시 텍스처를 영상→정지이미지로 교체해 opacity=1 유지 (기존엔 꺼지면 사라짐)
+- 재마운트/새로고침 시 저장된 이미지+랜드마크로 모양 복원 (MediaPipe 모델 로딩 없이 삼각분할 인덱스만 사용)
+- 웹캠 다시 켜면 정지 텍스처 정리하고 실시간 영상으로 전환
+
+### 2. 실사 아바타 이전 대화 불러오기
+- `frontend/src/views/RealisticAvatar.tsx`
+- AI 아바타(Avatar3DChat)에만 있던 "이전 대화 이어보기"를 실사 아바타에도 적용
+- 첫 진입 시 `/conversation/history?view=realistic_avatar` 로 과거 대화 복원
+- "새로 시작" 버튼: CHAT_SINCE_KEY 타임스탬프 기록 후 인사로 초기화 (이전 기록은 DB/KG에 보존)
+
+### 3. 자동 백업 (데이터 유실 방지)
+- `watcher/file_watcher.py`, `.gitignore`
+- watcher 루프에 1시간마다 + 시작 시 1회 즉시 백업 추가
+- 대상: `db/knowledge.db` + `db/vectors/`(임베딩) + `data/`(얼굴/목소리)를 `backups/<timestamp>/` 로 통째 복사
+- 최근 24개(하루치)만 보관, 오래된 백업 자동 삭제. `backups/`는 .gitignore 추가
+- 배경: 기존 `/backup`,`/restore` API는 프론트 호출처 없는 死코드 + 벡터/실제 파일 미포함이라 사실상 백업 부재였음
+
+### 4. Preference 시스템 (MBTI/성격/선호도)
+- `core/avatar.py`, `api/server.py`, `frontend/src/views/Settings.tsx`
+- 직접입력(manual): MBTI, 성격, 선호도/가치관 텍스트 + Big Five 5축 슬라이더(0~100)
+- 자동측정(auto): 최근 대화 + 지식그래프 토픽을 LLM이 분석해 추정 (`/preference/analyze`, `/apply`, `/analyze_and_apply`, `/due`)
+- 병합: `preference_section_text()` — 직접입력 우선, 자동측정은 참고로 모든 아바타 채팅 시스템 프롬프트에 자동 삽입
+- 주기적 자동측정: watcher가 1시간마다 `/preference/due` 확인 → 설정 주기(preference_interval_days) 지나면 자동 실행
+
+### 5. 성향 비교 레이더 차트
+- my-dashboard 좌측 사이드바에 "성향" 탭 신설: `src/views/Preference.tsx`, `Sidebar.tsx`, `App.tsx`, `types/index.ts`
+- 순수 SVG 레이더 차트(라이브러리 무): 직접입력(인디고 실선) vs 자동측정(주황 점선) 겹쳐 비교 + 축별 차이 막대바
+- mental-avatar API(8766) 직접 호출 → 5174 안 띄워도 독립 작동
+- 1x2 카드 레이아웃(좌: 입력/버튼, 우: Big Five 카드 + MBTI 카드), 그라데이션/마커/섀도우로 디자인 개선
+
+### 6. MBTI 4축 객관적 판별 + 근거 표시
+- `core/avatar.py`
+- 웹검색(simplypsychology.org, myersbriggs.org, Wikipedia)으로 E-I/S-N/T-F/J-P 각 축 정의 확보 → `MBTI_AXIS_CRITERIA`로 저장
+- LLM 프롬프트에 기준 포함 → 축마다 `{letter, confidence, evidence}` 구조로 응답(임의 추측 금지)
+- 판단 근거를 `mbti_auto_reasoning`(JSON)으로 영구 저장, `/preference/radar`에 evidence/criteria 노출
+- Preference 화면 MBTI 카드에 "AI는 이렇게 판단했습니다" — 축별 기준+판정+확신도 배지+인용 근거 표시
+- MBTI 4글자를 4축 점수(전자=100/후자=0)로 변환해 Big Five와 동일 방식 레이더 비교
+
+### 검증
+- frontend tsc: 신규 코드 에러 0 (기존 KnowledgeGraph/electron 등 무관 에러만 잔존)
+- core/avatar.py: 가상 LLM 응답으로 analyze→apply→radar E2E 검증 (INTJ vs INTP J-P축 diff=100 확인)
+- 자동백업: `_run_backup()` 직접 실행해 db(3.3M)+vectors(5.8M)+data(1.1M) 복사 확인
+- 8766 서버/watcher 재시작해 신규 엔드포인트 반영 (좀비 프로세스 없이 단일 인스턴스)
+
+### 알려진 이슈 / 다음 할 것
+- 기존 대화 682건은 이미 KG 노드+임베딩으로 백필 완료(추가 작업 불필요)
+- mental-avatar Settings 탭은 단일 컬럼이라 레이더 2단 배치 미적용(my-dashboard "성향"에 집중)
+- xtts_server.py(8768) 수동 기동 이슈는 여전히 미해결(이전 세션 과제)
+
+---
