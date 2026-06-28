@@ -19,7 +19,7 @@ const VIEW_MODE_LABELS: Record<ViewMode, string> = { face: '얼굴만', upper: '
 // face: 얼굴이 화면을 꽉 채우는 클로즈업 — 카메라를 바짝 당기는 대신 FOV를 좁혀 왜곡 없이 확대(망원렌즈 효과).
 // upper: 기존 기본값(상반신). full: 전신이 다 보이는 화면.
 const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number]; fov: number }> = {
-  face:  { pos: [0, 1.58, 0.9], target: [0, 1.58, 0], fov: 22 },
+  face:  { pos: [0, 1.58, 0.6], target: [0, 1.58, 0], fov: 45 },
   upper: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0], fov: 45 },
   full:  { pos: [0, 0.9, 3.0], target: [0, 0.8, 0], fov: 45 },
 }
