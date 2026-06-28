@@ -113,6 +113,7 @@ export default function PptPresenter() {
   const [glbList, setGlbList] = useState<GlbEntry[]>([])
   const [showList, setShowList] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const [uploadDragging, setUploadDragging] = useState(false)
 
   const refreshList = useCallback(() => {
     idbList().then(setGlbList).catch(() => {})
@@ -439,10 +440,18 @@ export default function PptPresenter() {
   return (
     <div className="flex h-full overflow-hidden bg-gray-950">
       {!sessionId ? (
-        <div className="flex-1 relative flex items-center justify-center">
-          <label className="flex flex-col items-center gap-3 border-2 border-dashed border-gray-700 hover:border-blue-600 rounded-2xl px-10 py-12 cursor-pointer text-gray-400 hover:text-gray-200 transition-colors">
+        <div
+          className={`flex-1 relative flex items-center justify-center ${uploadDragging ? 'bg-blue-900/20' : ''}`}
+          onDragOver={e => { e.preventDefault(); setUploadDragging(true) }}
+          onDragLeave={() => setUploadDragging(false)}
+          onDrop={e => {
+            e.preventDefault(); setUploadDragging(false)
+            const f = e.dataTransfer.files[0]; if (f) handleUpload(f)
+          }}
+        >
+          <label className={`flex flex-col items-center gap-3 border-2 border-dashed rounded-2xl px-10 py-12 cursor-pointer text-gray-400 hover:text-gray-200 transition-colors ${uploadDragging ? 'border-blue-500' : 'border-gray-700 hover:border-blue-600'}`}>
             <span className="text-3xl">📊</span>
-            <span className="text-sm">{uploading ? '슬라이드 분석 + 대본 생성 중…' : 'PPTX 또는 PDF 파일을 선택하세요'}</span>
+            <span className="text-sm">{uploading ? '슬라이드 분석 + 대본 생성 중…' : uploadDragging ? '파일을 놓으세요' : 'PPTX 또는 PDF 파일을 선택하거나 드래그하세요'}</span>
             <input type="file" accept=".pptx,.ppt,.pdf" className="hidden" disabled={uploading}
               onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }} />
           </label>
