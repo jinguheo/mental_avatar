@@ -1,0 +1,176 @@
+"""PPT 자동 발표 — 슬라이드 추출(텍스트+이미지) + 발표 스크립트 생성
+
+PowerPoint COM으로 슬라이드를 PNG로 내보내 발표 화면에 그대로 쓰고,
+슬라이드별 텍스트/노트(+텍스트가 빈약하면 비전 모델로 이미지 설명)를 바탕으로
+사용자의 말투 프로필을 반영한 발표 대본을 LLM으로 생성한다.
+"""
+import os
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+from . import pattern, vision
+
+SCRIPT_PROMPT = """당신은 발표자 본인입니다. 아래 슬라이드 내용을 바탕으로, 청중 앞에서 실제로 말하듯 자연스러운 발표 대본을 작성하세요.
+
+{style_block}
+{prev_block}
+[슬라이드 {index}/{total}]
+제목: {title}
+본문:
+{body}
+{notes_block}
+{vision_block}
+
+규칙:
+- 슬라이드에 적힌 문장을 그대로 읽지 말고, 청중에게 구어체로 설명하듯 풀어서 말하세요.
+- 2~4문장, 한국어. 발표 대본 텍스트만 출력하세요(따옴표나 "대본:" 같은 군더더기 없이).
+- 직전 슬라이드와 자연스럽게 이어지도록 하세요(같은 얘기를 반복하지 마세요)."""
+
+
+def extract_slides(file_path: str) -> list[dict]:
+    """슬라이드별 제목/본문/스피커노트 추출"""
+    prs = Presentation(file_path)
+    slides = []
+    for i, slide in enumerate(prs.slides):
+        title_text = ""
+        body_parts = []
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            if shape.shape_type == 13:  # 제목 placeholder
+                title_text = shape.text_frame.text.strip()
+            else:
+                for para in shape.text_frame.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        body_parts.append(t)
+
+        notes_text = ""
+        if slide.has_notes_slide:
+            notes_text = slide.notes_slide.notes_text_frame.text.strip()
+
+        slides.append({
+            "index": i + 1,
+            "title": title_text,
+            "body": "\n".join(body_parts),
+            "notes": notes_text,
+        })
+    return slides
+
+
+def export_slide_images(file_path: str, out_dir: str) -> list[str]:
+    """PowerPoint COM으로 슬라이드 전체를 PNG로 내보내 파일명 목록(슬라이드 순서) 반환.
+    PowerPoint가 설치돼 있어야 함. 실패 시 빈 리스트."""
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        import win32com.client
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            # WithWindow=False만으로는 일부 PowerPoint 버전에서 창이 잠깐 보임 — 영향 없음, 발표 종료 후 자동 종료됨
+            pres = powerpoint.Presentations.Open(
+                os.path.abspath(file_path), WithWindow=False
+            )
+            pres.Export(os.path.abspath(out_dir), "PNG")
+            pres.Close()
+        finally:
+            try:
+                powerpoint.Quit()
+            except Exception:
+                pass
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        print(f"[ppt_present] PowerPoint COM 내보내기 실패: {e}")
+        return []
+
+    # PowerPoint가 "Slide1.PNG", "Slide2.PNG" ... 형식으로 내보냄 (버전에 따라 0패딩 다름)
+    files = [f for f in os.listdir(out_dir) if f.lower().endswith(".png")]
+
+    def _slide_num(fname: str) -> int:
+        digits = "".join(ch for ch in fname if ch.isdigit())
+        return int(digits) if digits else 0
+
+    files.sort(key=_slide_num)
+    return files
+
+
+def _describe_image_for_script(image_path: str) -> str:
+    """텍스트가 빈약한 슬라이드의 이미지를 비전 모델로 짧게 설명 (발표 대본용)"""
+    try:
+        with open(image_path, "rb") as f:
+            import base64
+            img_b64 = base64.b64encode(f.read()).decode()
+        prompt = "이 슬라이드 이미지에 보이는 내용(도표/그림/텍스트)을 한국어 2~3문장으로 설명하세요. 군더더기 없이 내용만."
+        return vision._ollama_vision([img_b64], prompt, num_predict=300)
+    except Exception as e:
+        print(f"[ppt_present] 슬라이드 이미지 설명 실패: {e}")
+        return ""
+
+
+def _style_block() -> str:
+    """행동축 말투 프로필을 발표 대본 프롬프트에 주입"""
+    from . import avatar as avatar_core
+    profile = avatar_core.get_profile()
+
+    def pval(key):
+        return profile.get(key, {}).get("value", "") if profile else ""
+
+    parts = []
+    if pval("speech_style"):
+        parts.append(f"- 말투: {pval('speech_style')}")
+    if pval("persona"):
+        parts.append(f"- 성격: {pval('persona')}")
+    if pval("language_tone"):
+        parts.append(f"- 톤: {pval('language_tone')}")
+    if not parts:
+        return ""
+    return "발표자의 말투/성격(이 스타일을 일관되게 유지하세요):\n" + "\n".join(parts) + "\n"
+
+
+def generate_script(slide: dict, total: int, style_block: str, prev_script: str, image_path: str | None) -> str:
+    body = slide["body"] or "(본문 없음)"
+    notes_block = f"\n스피커 노트:\n{slide['notes']}\n" if slide["notes"] else ""
+
+    vision_block = ""
+    is_sparse = len((slide["body"] or "") + (slide["notes"] or "")) < 60
+    if is_sparse and image_path:
+        desc = _describe_image_for_script(image_path)
+        if desc:
+            vision_block = f"\n슬라이드 이미지 설명:\n{desc}\n"
+
+    prev_block = f"직전 슬라이드에서 한 말: \"{prev_script}\"\n" if prev_script else ""
+
+    prompt = SCRIPT_PROMPT.format(
+        style_block=style_block,
+        prev_block=prev_block,
+        index=slide["index"], total=total,
+        title=slide["title"] or "(제목 없음)",
+        body=body,
+        notes_block=notes_block,
+        vision_block=vision_block,
+    )
+    script = pattern._llm_call(prompt)
+    return script.strip().strip('"')
+
+
+def process_presentation(file_path: str, out_dir: str) -> list[dict]:
+    """PPTX 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환"""
+    slides = extract_slides(file_path)
+    images = export_slide_images(file_path, out_dir)
+    style_block = _style_block()
+
+    result = []
+    prev_script = ""
+    for slide in slides:
+        image_name = images[slide["index"] - 1] if slide["index"] - 1 < len(images) else None
+        image_path = os.path.join(out_dir, image_name) if image_name else None
+        script = generate_script(slide, len(slides), style_block, prev_script, image_path)
+        prev_script = script
+        result.append({
+            "index": slide["index"],
+            "title": slide["title"],
+            "image": image_name,
+            "script": script,
+        })
+    return result

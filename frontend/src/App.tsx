@@ -6,8 +6,9 @@ import Avatar3DChat, { type ChatMsg } from './views/Avatar3DChat'
 import RealisticAvatar from './views/RealisticAvatar'
 import KnowledgeGraph from './views/KnowledgeGraph'
 import SettingsView from './views/Settings'
+import PptPresenter from './views/PptPresenter'
 
-type Tab = 'mode-a' | 'mode-c' | 'mode-r' | 'kg' | 'settings'
+type Tab = 'mode-a' | 'mode-c' | 'mode-r' | 'kg' | 'presenter' | 'settings'
 
 const STORAGE_KEY = 'mental-avatar-settings'
 const CHAT_STORAGE_KEY = 'mental-avatar-chat'
@@ -57,6 +58,7 @@ export default function App() {
     { id: 'mode-a',   label: '🎬 영상 아바타' },
     { id: 'mode-c',   label: '🤖 AI 아바타' },
     { id: 'mode-r',   label: '✨ 실사 아바타' },
+    { id: 'presenter', label: '📊 PPT 발표' },
     { id: 'settings', label: '⚙ 설정' },
   ]
 
@@ -87,6 +89,7 @@ export default function App() {
         {tab === 'mode-c'   && <Avatar3DChat settings={settings} messages={avatarMessages} setMessages={setAvatarMessages} />}
         {tab === 'mode-r'   && <RealisticAvatar settings={settings} messages={realisticMessages} setMessages={setRealisticMessages} />}
         {tab === 'kg'       && <KnowledgeGraph settings={settings} />}
+        {tab === 'presenter' && <PptPresenter />}
         {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
       </main>
     </div>

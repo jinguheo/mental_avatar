@@ -9,7 +9,7 @@ import uuid, subprocess
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -1994,6 +1994,39 @@ tts.tts_to_file(
 
     return send_file(str(mp4_files[0]), mimetype="video/mp4",
                      as_attachment=False, download_name="avatar.mp4")
+
+
+# ── PPT 자동 발표 ────────────────────────────────────────────
+PRESENTER_TMP = Path(__file__).parent.parent / "tmp" / "presenter"
+
+
+@app.route("/presenter/upload", methods=["POST"])
+def presenter_upload():
+    """PPTX 업로드 → 슬라이드 이미지 내보내기 + 발표 대본 생성(LLM, 동기 처리)"""
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith((".pptx", ".ppt")):
+        return jsonify({"error": "pptx 파일이 필요합니다"}), 400
+
+    session_id = uuid.uuid4().hex
+    session_dir = PRESENTER_TMP / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    pptx_path = session_dir / "source.pptx"
+    f.save(str(pptx_path))
+
+    try:
+        slides = ppt_present.process_presentation(str(pptx_path), str(session_dir))
+    except Exception as e:
+        return jsonify({"error": f"발표 자료 처리 실패: {e}"}), 500
+
+    return jsonify({"session_id": session_id, "slides": slides})
+
+
+@app.route("/presenter/slide_image/<session_id>/<filename>", methods=["GET"])
+def presenter_slide_image(session_id: str, filename: str):
+    path = PRESENTER_TMP / session_id / filename
+    if not path.exists():
+        return jsonify({"error": "not found"}), 404
+    return send_file(str(path), mimetype="image/png")
 
 
 if __name__ == "__main__":

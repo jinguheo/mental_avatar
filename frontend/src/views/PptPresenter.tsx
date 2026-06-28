@@ -1,0 +1,338 @@
+/**
+ * PptPresenter — PPTX 업로드 → 슬라이드별 발표 대본(LLM) 생성 → 3D 아바타가 순차 발표(TTS)
+ *
+ * MVP 범위: 슬라이드 이미지 표시 + 아바타가 내 목소리로 대본을 순서대로 읽고 자동 전환.
+ * 표정/제스처 립싱크는 다음 단계(RealisticAvatar의 모프타겟 파이프라인 재사용 예정).
+ */
+import { useEffect, useRef, useState, useCallback } from 'react'
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+
+const API = 'http://127.0.0.1:8766'
+const IDB_NAME = 'mental-avatar-glb'
+const IDB_STORE = 'glb-files'
+
+interface GlbEntry { name: string; size: number; data: ArrayBuffer; loadedAt: number }
+
+function openIDB(): Promise<IDBDatabase> {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(IDB_NAME, 1)
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE, { keyPath: 'name' })
+    req.onsuccess = () => res(req.result)
+    req.onerror = () => rej(req.error)
+  })
+}
+async function idbList(): Promise<GlbEntry[]> {
+  const db = await openIDB()
+  return new Promise((res, rej) => {
+    const tx = db.transaction(IDB_STORE, 'readonly')
+    const req = tx.objectStore(IDB_STORE).getAll()
+    req.onsuccess = () => res((req.result as GlbEntry[]).sort((a, b) => b.loadedAt - a.loadedAt))
+    req.onerror = () => rej(req.error)
+  })
+}
+
+interface Slide { index: number; title: string; image: string | null; script: string }
+
+interface VoiceOption { id: string; label: string }
+const VOICE_OPTIONS: VoiceOption[] = [
+  { id: 'mine',   label: '내 목소리' },
+  { id: 'pretty', label: '예쁜 목소리' },
+  { id: 'child',  label: '어린이 목소리' },
+  { id: 'calm',   label: '차분한 목소리' },
+]
+
+export default function PptPresenter() {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+  const mixerRef = useRef<THREE.AnimationMixer | null>(null)
+  const clockRef = useRef(new THREE.Clock())
+  const animFrameRef = useRef<number>(0)
+  const objectUrlRef = useRef<string | null>(null)
+  const [avatarLoaded, setAvatarLoaded] = useState(false)
+  const [avatarError, setAvatarError] = useState('')
+
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
+  const [sessionId, setSessionId] = useState('')
+  const [slides, setSlides] = useState<Slide[]>([])
+  const [currentIndex, setCurrentIndex] = useState(0)
+  const [speaking, setSpeaking] = useState(false)
+  const [autoPlay, setAutoPlay] = useState(false)
+  const [voiceId, setVoiceId] = useState('mine')
+
+  const slidesRef = useRef<Slide[]>([])
+  const voiceIdRef = useRef('mine')
+  const autoPlayRef = useRef(false)
+  const ttsSeqRef = useRef(0)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => { slidesRef.current = slides }, [slides])
+  useEffect(() => { voiceIdRef.current = voiceId }, [voiceId])
+
+  // ── 아바타 GLB 뷰어 (idle 애니메이션만 — 립싱크는 다음 단계) ──
+  const loadGLB = useCallback((url: string) => {
+    const container = containerRef.current
+    if (!container) return
+    setAvatarError(''); setAvatarLoaded(false)
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+    if (rendererRef.current) { rendererRef.current.dispose(); container.innerHTML = '' }
+
+    const w = container.clientWidth || 400, h = container.clientHeight || 600
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setSize(w, h); renderer.setPixelRatio(window.devicePixelRatio)
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+    container.appendChild(renderer.domElement); rendererRef.current = renderer
+
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color(0x0d1b2a)
+    scene.add(new THREE.AmbientLight(0xffffff, 1.2))
+    const dir = new THREE.DirectionalLight(0xffffff, 2); dir.position.set(1, 3, 2); scene.add(dir)
+
+    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100)
+    camera.position.set(0, 1.5, 1.3)
+    const controls = new OrbitControls(camera, renderer.domElement)
+    controls.target.set(0, 1.45, 0); controls.enableDamping = true; controls.update()
+
+    new GLTFLoader().load(url, (gltf) => {
+      const box = new THREE.Box3().setFromObject(gltf.scene)
+      const size = box.getSize(new THREE.Vector3())
+      const center = box.getCenter(new THREE.Vector3())
+      const scale = 1.8 / size.y
+      gltf.scene.scale.setScalar(scale)
+      gltf.scene.position.sub(center.multiplyScalar(scale))
+      gltf.scene.position.y += size.y * scale * 0.5 - 0.1
+      scene.add(gltf.scene)
+      if (gltf.animations.length > 0) {
+        const mixer = new THREE.AnimationMixer(gltf.scene); mixerRef.current = mixer
+        const idle = gltf.animations.find(a => /idle|stand|wait/i.test(a.name)) ?? gltf.animations[0]
+        mixer.clipAction(idle).play()
+      }
+      setAvatarLoaded(true)
+      const animate = () => {
+        animFrameRef.current = requestAnimationFrame(animate)
+        mixerRef.current?.update(clockRef.current.getDelta())
+        controls.update(); renderer.render(scene, camera)
+      }
+      animate()
+      const onResize = () => {
+        const w2 = container.clientWidth, h2 = container.clientHeight
+        camera.aspect = w2 / h2; camera.updateProjectionMatrix(); renderer.setSize(w2, h2)
+      }
+      window.addEventListener('resize', onResize)
+    }, undefined, (err) => setAvatarError(String(err)))
+  }, [])
+
+  useEffect(() => {
+    idbList().then(list => {
+      if (list[0]) {
+        const blob = new Blob([list[0].data], { type: 'model/gltf-binary' })
+        const url = URL.createObjectURL(blob)
+        objectUrlRef.current = url
+        loadGLB(url)
+      }
+    }).catch(() => {})
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+      rendererRef.current?.dispose()
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── AudioContext unlock (Edge 등은 사용자 제스처 안에서 생성해야 동작) ──
+  useEffect(() => {
+    const unlock = () => {
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
+      if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume().catch(() => {})
+      window.removeEventListener('pointerdown', unlock)
+    }
+    window.addEventListener('pointerdown', unlock)
+    return () => window.removeEventListener('pointerdown', unlock)
+  }, [])
+
+  // ── 업로드 ──
+  const handleUpload = useCallback(async (file: File) => {
+    if (!file.name.toLowerCase().endsWith('.pptx')) {
+      setUploadError('.pptx 파일만 지원합니다'); return
+    }
+    setUploading(true); setUploadError(''); setSlides([]); setSessionId(''); setCurrentIndex(0)
+    try {
+      const form = new FormData(); form.append('file', file)
+      const res = await fetch(`${API}/presenter/upload`, { method: 'POST', body: form })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setSessionId(data.session_id)
+      setSlides(data.slides)
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : '업로드 실패')
+    } finally {
+      setUploading(false)
+    }
+  }, [])
+
+  // ── 발표(TTS 순차 재생) ──
+  const stopSpeaking = useCallback(() => {
+    autoPlayRef.current = false; setAutoPlay(false)
+    ttsSeqRef.current += 1
+    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
+    setSpeaking(false)
+  }, [])
+
+  const speakSlide = useCallback(async (idx: number) => {
+    const slide = slidesRef.current[idx]
+    if (!slide) return
+    ttsSeqRef.current += 1
+    const seq = ttsSeqRef.current
+    const stale = () => seq !== ttsSeqRef.current
+    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
+    setCurrentIndex(idx); setSpeaking(true)
+    try {
+      const form = new FormData()
+      form.append('text', slide.script); form.append('voice', voiceIdRef.current)
+      const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
+      if (!res.ok) throw new Error('tts failed')
+      const blob = await res.blob()
+      if (stale()) return
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      currentAudioRef.current = audio
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
+      const ctx = audioCtxRef.current
+      if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
+      const src = ctx.createMediaElementSource(audio)
+      src.connect(ctx.destination)
+      const cleanup = () => {
+        URL.revokeObjectURL(url)
+        if (stale()) return
+        setSpeaking(false)
+        const next = idx + 1
+        if (autoPlayRef.current && next < slidesRef.current.length) {
+          speakSlide(next)
+        } else {
+          autoPlayRef.current = false; setAutoPlay(false)
+        }
+      }
+      audio.onended = cleanup; audio.onerror = cleanup
+      audio.play().catch(cleanup)
+    } catch {
+      if (!stale()) { setSpeaking(false); autoPlayRef.current = false; setAutoPlay(false) }
+    }
+  }, [])
+
+  const handlePlay = useCallback(() => {
+    autoPlayRef.current = true; setAutoPlay(true)
+    speakSlide(currentIndex)
+  }, [currentIndex, speakSlide])
+
+  const goTo = useCallback((idx: number) => {
+    if (idx < 0 || idx >= slidesRef.current.length) return
+    const wasPlaying = autoPlayRef.current
+    ttsSeqRef.current += 1
+    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
+    setSpeaking(false); setCurrentIndex(idx)
+    if (wasPlaying) speakSlide(idx)
+  }, [speakSlide])
+
+  const editScript = useCallback((idx: number, text: string) => {
+    setSlides(prev => prev.map(s => s.index === idx + 1 ? { ...s, script: text } : s))
+  }, [])
+
+  const current = slides[currentIndex]
+
+  return (
+    <div className="flex h-full overflow-hidden bg-gray-950">
+      {!sessionId ? (
+        <div className="flex-1 flex items-center justify-center">
+          <label className="flex flex-col items-center gap-3 border-2 border-dashed border-gray-700 hover:border-blue-600 rounded-2xl px-10 py-12 cursor-pointer text-gray-400 hover:text-gray-200 transition-colors">
+            <span className="text-3xl">📊</span>
+            <span className="text-sm">{uploading ? '슬라이드 분석 + 대본 생성 중…' : 'PPTX 파일을 선택하세요'}</span>
+            <input type="file" accept=".pptx" className="hidden" disabled={uploading}
+              onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }} />
+          </label>
+          {uploadError && <p className="absolute bottom-8 text-sm text-red-400">{uploadError}</p>}
+        </div>
+      ) : (
+        <>
+          {/* 슬라이드 영역 */}
+          <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden">
+            <div className="flex-1 flex items-center justify-center bg-black rounded-xl overflow-hidden">
+              {current?.image ? (
+                <img
+                  src={`${API}/presenter/slide_image/${sessionId}/${current.image}`}
+                  alt={`슬라이드 ${current.index}`}
+                  className="max-w-full max-h-full object-contain"
+                />
+              ) : (
+                <span className="text-gray-600 text-sm">이미지 없음</span>
+              )}
+            </div>
+            <textarea
+              value={current?.script || ''}
+              onChange={e => editScript(currentIndex, e.target.value)}
+              rows={3}
+              className="bg-gray-900 text-gray-200 text-sm rounded-xl p-3 outline-none border border-gray-800 focus:border-blue-700 resize-none"
+              placeholder="발표 대본 (수정 가능)"
+            />
+            <div className="flex items-center justify-between">
+              <button onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0}
+                className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
+                ← 이전
+              </button>
+              <span className="text-xs text-gray-500">{slides.length ? `${currentIndex + 1} / ${slides.length}` : ''}</span>
+              <div className="flex gap-2">
+                {!autoPlay ? (
+                  <button onClick={handlePlay} className="px-4 py-1.5 text-sm rounded-lg bg-blue-700 hover:bg-blue-600 text-white">
+                    ▶ 발표 시작
+                  </button>
+                ) : (
+                  <button onClick={stopSpeaking} className="px-4 py-1.5 text-sm rounded-lg bg-red-700 hover:bg-red-600 text-white">
+                    ⏸ 정지
+                  </button>
+                )}
+                <button onClick={() => goTo(currentIndex + 1)} disabled={currentIndex >= slides.length - 1}
+                  className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
+                  다음 →
+                </button>
+              </div>
+            </div>
+            <button onClick={() => { stopSpeaking(); setSessionId(''); setSlides([]) }}
+              className="text-xs text-gray-500 hover:text-gray-300 self-start">
+              ↺ 새 파일 업로드
+            </button>
+          </div>
+
+          {/* 아바타 영역 */}
+          <div className="w-80 flex flex-col border-l border-gray-800 bg-gray-900/95">
+            <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-200">발표 아바타</h2>
+              {speaking && <span className="text-xs text-blue-400 animate-pulse">말하는 중</span>}
+            </div>
+            <div className="flex-1 relative">
+              <div ref={containerRef} className="w-full h-full" />
+              {!avatarLoaded && (
+                <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-xs px-4 text-center pointer-events-none">
+                  저장된 아바타가 없습니다.<br />실사 아바타 탭에서 먼저 GLB를 등록하세요.
+                </div>
+              )}
+              {avatarError && <div className="absolute bottom-2 left-2 right-2 text-xs text-red-400 bg-red-900/60 rounded p-1">{avatarError}</div>}
+            </div>
+            <div className="p-3 border-t border-gray-800">
+              <span className="text-[10px] text-gray-400 px-1">목소리</span>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {VOICE_OPTIONS.map(v => (
+                  <button key={v.id} onClick={() => setVoiceId(v.id)}
+                    className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${voiceId === v.id ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
