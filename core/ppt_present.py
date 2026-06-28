@@ -191,8 +191,11 @@ def generate_script(slide: dict, total: int, style_block: str, prev_script: str,
     return script.strip().strip('"')
 
 
-def process_presentation(file_path: str, out_dir: str) -> list[dict]:
-    """PPTX/PDF 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환"""
+def process_presentation(file_path: str, out_dir: str, progress_cb=None) -> list[dict]:
+    """PPTX/PDF 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환.
+
+    progress_cb(current, total)가 주어지면 슬라이드 추출 직후(current=0)와
+    슬라이드별 대본 생성 완료마다 호출 — 오래 걸리는 LLM 순차 호출 진행률 표시용."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".pdf":
         slides = extract_slides_pdf(file_path)
@@ -203,13 +206,16 @@ def process_presentation(file_path: str, out_dir: str) -> list[dict]:
     else:
         raise ValueError(f"지원하지 않는 파일 형식: {ext}")
     style_block = _style_block()
+    total = len(slides)
+    if progress_cb:
+        progress_cb(0, total)
 
     result = []
     prev_script = ""
     for slide in slides:
         image_name = images[slide["index"] - 1] if slide["index"] - 1 < len(images) else None
         image_path = os.path.join(out_dir, image_name) if image_name else None
-        script = generate_script(slide, len(slides), style_block, prev_script, image_path)
+        script = generate_script(slide, total, style_block, prev_script, image_path)
         prev_script = script
         result.append({
             "index": slide["index"],
@@ -217,4 +223,6 @@ def process_presentation(file_path: str, out_dir: str) -> list[dict]:
             "image": image_name,
             "script": script,
         })
+        if progress_cb:
+            progress_cb(slide["index"], total)
     return result

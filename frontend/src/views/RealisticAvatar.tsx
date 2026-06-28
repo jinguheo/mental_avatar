@@ -108,9 +108,9 @@ const TEMPLATE_VOICES: VoiceOption[] = [
 const VOICE_OPTION_KEY = 'mental-avatar-realistic-voice'
 const VIEW_MODE_KEY = 'mental-avatar-camera-view'
 type ViewMode = 'face' | 'full'
-// face: 표정이 잘 보이는 상반신 클로즈업(기존 기본값). full: 전신이 다 보이는 화면.
+// face: 얼굴 위주 클로즈업(머리 높이까지 바짝 당김). full: 전신이 다 보이는 화면.
 const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number] }> = {
-  face: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0] },
+  face: { pos: [0, 1.58, 0.5], target: [0, 1.58, 0] },
   full: { pos: [0, 0.9, 3.0], target: [0, 0.8, 0] },
 }
 

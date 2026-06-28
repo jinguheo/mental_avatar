@@ -1998,11 +1998,32 @@ tts.tts_to_file(
 
 # ── PPT 자동 발표 ────────────────────────────────────────────
 PRESENTER_TMP = Path(__file__).parent.parent / "tmp" / "presenter"
+# 비동기 처리 잡 저장소 {job_id: {stage, current, total, error, slides, session_id}}
+# 슬라이드가 많으면 슬라이드당 LLM 호출이 순차로 걸려 수십 초~분 단위로 걸릴 수 있어
+# 프론트가 진행률(current/total)을 폴링할 수 있게 백그라운드 스레드로 돌린다.
+_presenter_jobs: dict = {}
+
+
+def _run_presenter_job(job_id: str, src_path: Path, session_dir: Path) -> None:
+    job = _presenter_jobs[job_id]
+    job["stage"] = "processing"
+
+    def _progress(current: int, total: int):
+        job["current"] = current
+        job["total"] = total
+
+    try:
+        slides = ppt_present.process_presentation(str(src_path), str(session_dir), progress_cb=_progress)
+        job["slides"] = slides
+        job["stage"] = "done"
+    except Exception as e:
+        job["stage"] = "error"
+        job["error"] = f"발표 자료 처리 실패: {e}"
 
 
 @app.route("/presenter/upload", methods=["POST"])
 def presenter_upload():
-    """PPTX/PDF 업로드 → 슬라이드 이미지 내보내기 + 발표 대본 생성(LLM, 동기 처리)"""
+    """PPTX/PDF 업로드 → job_id 즉시 반환, 백그라운드에서 슬라이드 이미지 내보내기 + 발표 대본 생성(LLM)"""
     f = request.files.get("file")
     ext = os.path.splitext(f.filename)[1].lower() if f else ""
     if not f or ext not in ppt_present.SUPPORTED_EXTS:
@@ -2014,12 +2035,23 @@ def presenter_upload():
     src_path = session_dir / f"source{ext}"
     f.save(str(src_path))
 
-    try:
-        slides = ppt_present.process_presentation(str(src_path), str(session_dir))
-    except Exception as e:
-        return jsonify({"error": f"발표 자료 처리 실패: {e}"}), 500
+    job_id = uuid.uuid4().hex
+    _presenter_jobs[job_id] = {
+        "stage": "queued", "current": 0, "total": 0, "error": "",
+        "slides": None, "session_id": session_id,
+    }
+    t = _threading.Thread(target=_run_presenter_job, args=(job_id, src_path, session_dir), daemon=True)
+    t.start()
 
-    return jsonify({"session_id": session_id, "slides": slides})
+    return jsonify({"job_id": job_id, "session_id": session_id})
+
+
+@app.route("/presenter/job/<job_id>", methods=["GET"])
+def presenter_job_status(job_id: str):
+    job = _presenter_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(job)
 
 
 @app.route("/presenter/slide_image/<session_id>/<filename>", methods=["GET"])

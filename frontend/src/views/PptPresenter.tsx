@@ -15,9 +15,9 @@ const IDB_STORE = 'glb-files'
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
 const VIEW_MODE_KEY = 'mental-avatar-camera-view'
 type ViewMode = 'face' | 'full'
-// face: 표정이 잘 보이는 상반신 클로즈업(기존 기본값). full: 전신이 다 보이는 화면.
+// face: 얼굴 위주 클로즈업(머리 높이까지 바짝 당김). full: 전신이 다 보이는 화면.
 const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number] }> = {
-  face: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0] },
+  face: { pos: [0, 1.58, 0.5], target: [0, 1.58, 0] },
   full: { pos: [0, 0.9, 3.0], target: [0, 0.8, 0] },
 }
 
@@ -143,6 +143,7 @@ export default function PptPresenter() {
 
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
+  const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 })
   const [sessionId, setSessionId] = useState('')
   const [slides, setSlides] = useState<Slide[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -370,13 +371,28 @@ export default function PptPresenter() {
       setUploadError('.pptx 또는 .pdf 파일만 지원합니다'); return
     }
     setUploading(true); setUploadError(''); setSlides([]); setSessionId(''); setCurrentIndex(0)
+    setUploadProgress({ current: 0, total: 0 })
     try {
       const form = new FormData(); form.append('file', file)
       const res = await fetch(`${API}/presenter/upload`, { method: 'POST', body: form })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
-      setSessionId(data.session_id)
-      setSlides(data.slides)
+      const jobId = data.job_id
+
+      // 슬라이드당 LLM 순차 호출이라 시간이 걸림 — job_id를 폴링해 진행률을 보여준다
+      for (;;) {
+        await new Promise(r => setTimeout(r, 1200))
+        const jres = await fetch(`${API}/presenter/job/${jobId}`)
+        const job = await jres.json()
+        if (job.error && job.stage !== 'error') throw new Error(job.error)
+        setUploadProgress({ current: job.current || 0, total: job.total || 0 })
+        if (job.stage === 'done') {
+          setSessionId(job.session_id)
+          setSlides(job.slides)
+          break
+        }
+        if (job.stage === 'error') throw new Error(job.error || '처리 실패')
+      }
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : '업로드 실패')
     } finally {
@@ -474,8 +490,20 @@ export default function PptPresenter() {
           }}
         >
           <label className={`flex flex-col items-center gap-3 border-2 border-dashed rounded-2xl px-10 py-12 cursor-pointer text-gray-400 hover:text-gray-200 transition-colors ${uploadDragging ? 'border-blue-500' : 'border-gray-700 hover:border-blue-600'}`}>
-            <span className="text-3xl">📊</span>
-            <span className="text-sm">{uploading ? '슬라이드 분석 + 대본 생성 중…' : uploadDragging ? '파일을 놓으세요' : 'PPTX 또는 PDF 파일을 선택하거나 드래그하세요'}</span>
+            <span className="text-3xl">{uploading ? '⏳' : '📊'}</span>
+            <span className="text-sm">
+              {uploading
+                ? (uploadProgress.total
+                    ? `슬라이드 ${uploadProgress.current}/${uploadProgress.total} 대본 생성 중…`
+                    : '슬라이드 분석 중…')
+                : uploadDragging ? '파일을 놓으세요' : 'PPTX 또는 PDF 파일을 선택하거나 드래그하세요'}
+            </span>
+            {uploading && uploadProgress.total > 0 && (
+              <div className="w-48 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                <div className="h-full bg-blue-600 transition-all" style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }} />
+              </div>
+            )}
+            {uploading && <span className="text-[11px] text-gray-600">슬라이드 수에 비례해 시간이 걸려요 (로컬 AI 순차 생성)</span>}
             <input type="file" accept=".pptx,.ppt,.pdf" className="hidden" disabled={uploading}
               onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }} />
           </label>
