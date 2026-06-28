@@ -2002,19 +2002,20 @@ PRESENTER_TMP = Path(__file__).parent.parent / "tmp" / "presenter"
 
 @app.route("/presenter/upload", methods=["POST"])
 def presenter_upload():
-    """PPTX 업로드 → 슬라이드 이미지 내보내기 + 발표 대본 생성(LLM, 동기 처리)"""
+    """PPTX/PDF 업로드 → 슬라이드 이미지 내보내기 + 발표 대본 생성(LLM, 동기 처리)"""
     f = request.files.get("file")
-    if not f or not f.filename.lower().endswith((".pptx", ".ppt")):
-        return jsonify({"error": "pptx 파일이 필요합니다"}), 400
+    ext = os.path.splitext(f.filename)[1].lower() if f else ""
+    if not f or ext not in ppt_present.SUPPORTED_EXTS:
+        return jsonify({"error": "pptx 또는 pdf 파일이 필요합니다"}), 400
 
     session_id = uuid.uuid4().hex
     session_dir = PRESENTER_TMP / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
-    pptx_path = session_dir / "source.pptx"
-    f.save(str(pptx_path))
+    src_path = session_dir / f"source{ext}"
+    f.save(str(src_path))
 
     try:
-        slides = ppt_present.process_presentation(str(pptx_path), str(session_dir))
+        slides = ppt_present.process_presentation(str(src_path), str(session_dir))
     except Exception as e:
         return jsonify({"error": f"발표 자료 처리 실패: {e}"}), 500
 

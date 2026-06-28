@@ -1,14 +1,19 @@
 """PPT 자동 발표 — 슬라이드 추출(텍스트+이미지) + 발표 스크립트 생성
 
-PowerPoint COM으로 슬라이드를 PNG로 내보내 발표 화면에 그대로 쓰고,
+PPTX는 PowerPoint COM으로, PDF는 PyMuPDF로 슬라이드(페이지)를 PNG로 내보내 발표 화면에 그대로 쓰고,
 슬라이드별 텍스트/노트(+텍스트가 빈약하면 비전 모델로 이미지 설명)를 바탕으로
 사용자의 말투 프로필을 반영한 발표 대본을 LLM으로 생성한다.
+
+PDF는 PPTX를 PDF로 내보낸 자료가 많아(스피커 노트 없음) 본문 텍스트만으로 처리하고,
+텍스트가 거의 없는 페이지(이미지 위주 슬라이드)는 렌더링된 페이지 이미지를 비전 모델로 보강한다.
 """
 import os
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from . import pattern, vision
+
+SUPPORTED_EXTS = (".pptx", ".ppt", ".pdf")
 
 SCRIPT_PROMPT = """당신은 발표자 본인입니다. 아래 슬라이드 내용을 바탕으로, 청중 앞에서 실제로 말하듯 자연스러운 발표 대본을 작성하세요.
 
@@ -95,6 +100,38 @@ def export_slide_images(file_path: str, out_dir: str) -> list[str]:
     return files
 
 
+def extract_slides_pdf(file_path: str) -> list[dict]:
+    """PDF 페이지별 텍스트 추출 (제목/스피커노트 개념 없음 — body만 채움)"""
+    import fitz
+    slides = []
+    doc = fitz.open(file_path)
+    for i, page in enumerate(doc):
+        text = page.get_text().strip()
+        slides.append({
+            "index": i + 1,
+            "title": "",
+            "body": text,
+            "notes": "",
+        })
+    doc.close()
+    return slides
+
+
+def export_slide_images_pdf(file_path: str, out_dir: str, dpi: int = 150) -> list[str]:
+    """PDF 페이지 전체를 PNG로 렌더 → 파일명 목록(페이지 순서) 반환"""
+    import fitz
+    os.makedirs(out_dir, exist_ok=True)
+    files = []
+    doc = fitz.open(file_path)
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(dpi=dpi)
+        fname = f"page_{i + 1}.png"
+        pix.save(os.path.join(out_dir, fname))
+        files.append(fname)
+    doc.close()
+    return files
+
+
 def _describe_image_for_script(image_path: str) -> str:
     """텍스트가 빈약한 슬라이드의 이미지를 비전 모델로 짧게 설명 (발표 대본용)"""
     try:
@@ -155,9 +192,16 @@ def generate_script(slide: dict, total: int, style_block: str, prev_script: str,
 
 
 def process_presentation(file_path: str, out_dir: str) -> list[dict]:
-    """PPTX 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환"""
-    slides = extract_slides(file_path)
-    images = export_slide_images(file_path, out_dir)
+    """PPTX/PDF 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환"""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".pdf":
+        slides = extract_slides_pdf(file_path)
+        images = export_slide_images_pdf(file_path, out_dir)
+    elif ext in (".pptx", ".ppt"):
+        slides = extract_slides(file_path)
+        images = export_slide_images(file_path, out_dir)
+    else:
+        raise ValueError(f"지원하지 않는 파일 형식: {ext}")
     style_block = _style_block()
 
     result = []

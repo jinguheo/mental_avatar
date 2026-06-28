@@ -1,5 +1,5 @@
 /**
- * PptPresenter — PPTX 업로드 → 슬라이드별 발표 대본(LLM) 생성 → 3D 아바타가 순차 발표(TTS+립싱크)
+ * PptPresenter — PPTX/PDF 업로드 → 슬라이드별 발표 대본(LLM) 생성 → 3D 아바타가 순차 발표(TTS+립싱크)
  *
  * 립싱크/표정은 RealisticAvatar.tsx와 동일한 모프타겟 파이프라인(주파수 대역 기반 viseme 근사 + 감정별 가중치).
  */
@@ -284,8 +284,9 @@ export default function PptPresenter() {
 
   // ── 업로드 ──
   const handleUpload = useCallback(async (file: File) => {
-    if (!file.name.toLowerCase().endsWith('.pptx')) {
-      setUploadError('.pptx 파일만 지원합니다'); return
+    const name = file.name.toLowerCase()
+    if (!name.endsWith('.pptx') && !name.endsWith('.ppt') && !name.endsWith('.pdf')) {
+      setUploadError('.pptx 또는 .pdf 파일만 지원합니다'); return
     }
     setUploading(true); setUploadError(''); setSlides([]); setSessionId(''); setCurrentIndex(0)
     try {
@@ -385,8 +386,8 @@ export default function PptPresenter() {
         <div className="flex-1 flex items-center justify-center">
           <label className="flex flex-col items-center gap-3 border-2 border-dashed border-gray-700 hover:border-blue-600 rounded-2xl px-10 py-12 cursor-pointer text-gray-400 hover:text-gray-200 transition-colors">
             <span className="text-3xl">📊</span>
-            <span className="text-sm">{uploading ? '슬라이드 분석 + 대본 생성 중…' : 'PPTX 파일을 선택하세요'}</span>
-            <input type="file" accept=".pptx" className="hidden" disabled={uploading}
+            <span className="text-sm">{uploading ? '슬라이드 분석 + 대본 생성 중…' : 'PPTX 또는 PDF 파일을 선택하세요'}</span>
+            <input type="file" accept=".pptx,.ppt,.pdf" className="hidden" disabled={uploading}
               onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }} />
           </label>
           {uploadError && <p className="absolute bottom-8 text-sm text-red-400">{uploadError}</p>}
