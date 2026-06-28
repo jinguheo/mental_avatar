@@ -14,11 +14,14 @@ const IDB_STORE = 'glb-files'
 // RealisticAvatar.tsx와 동일한 키 — 거기서 선택/등록한 GLB를 그대로 공유해서 보여준다
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
 const VIEW_MODE_KEY = 'mental-avatar-camera-view'
-type ViewMode = 'face' | 'full'
-// face: 얼굴 위주 클로즈업(머리 높이까지 바짝 당김). full: 전신이 다 보이는 화면.
-const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number] }> = {
-  face: { pos: [0, 1.58, 0.5], target: [0, 1.58, 0] },
-  full: { pos: [0, 0.9, 3.0], target: [0, 0.8, 0] },
+type ViewMode = 'face' | 'upper' | 'full'
+const VIEW_MODE_LABELS: Record<ViewMode, string> = { face: '얼굴만', upper: '상반신', full: '전체 보기' }
+// face: 얼굴이 화면을 꽉 채우는 클로즈업 — 카메라를 바짝 당기는 대신 FOV를 좁혀 왜곡 없이 확대(망원렌즈 효과).
+// upper: 기존 기본값(상반신). full: 전신이 다 보이는 화면.
+const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number]; fov: number }> = {
+  face:  { pos: [0, 1.58, 0.5], target: [0, 1.58, 0], fov: 15 },
+  upper: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0], fov: 45 },
+  full:  { pos: [0, 0.9, 3.0], target: [0, 0.8, 0], fov: 45 },
 }
 
 interface GlbEntry { name: string; size: number; data: ArrayBuffer; loadedAt: number }
@@ -132,6 +135,8 @@ export default function PptPresenter() {
     const preset = VIEW_PRESETS[mode]
     if (cameraRef.current && controlsRef.current) {
       cameraRef.current.position.set(...preset.pos)
+      cameraRef.current.fov = preset.fov
+      cameraRef.current.updateProjectionMatrix()
       controlsRef.current.target.set(...preset.target)
       controlsRef.current.update()
     }
@@ -181,7 +186,7 @@ export default function PptPresenter() {
     const dir = new THREE.DirectionalLight(0xffffff, 2); dir.position.set(1, 3, 2); scene.add(dir)
 
     const preset = VIEW_PRESETS[viewModeRef.current]
-    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100)
+    const camera = new THREE.PerspectiveCamera(preset.fov, w / h, 0.1, 100)
     camera.position.set(...preset.pos)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.target.set(...preset.target); controls.enableDamping = true; controls.update()
@@ -615,10 +620,10 @@ export default function PptPresenter() {
           <div className="absolute top-2 right-2 z-20 flex flex-col items-end gap-1 bg-black/50 backdrop-blur rounded-lg p-1.5">
             <span className="text-[10px] text-gray-400 px-1">보기</span>
             <div className="flex gap-1">
-              {(['face', 'full'] as ViewMode[]).map(m => (
+              {(['face', 'upper', 'full'] as ViewMode[]).map(m => (
                 <button key={m} onClick={() => setView(m)}
                   className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${viewMode === m ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
-                  {m === 'face' ? '얼굴만' : '전체 보기'}
+                  {VIEW_MODE_LABELS[m]}
                 </button>
               ))}
             </div>

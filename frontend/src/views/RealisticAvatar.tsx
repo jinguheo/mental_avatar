@@ -107,11 +107,14 @@ const TEMPLATE_VOICES: VoiceOption[] = [
 ]
 const VOICE_OPTION_KEY = 'mental-avatar-realistic-voice'
 const VIEW_MODE_KEY = 'mental-avatar-camera-view'
-type ViewMode = 'face' | 'full'
-// face: 얼굴 위주 클로즈업(머리 높이까지 바짝 당김). full: 전신이 다 보이는 화면.
-const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number] }> = {
-  face: { pos: [0, 1.58, 0.5], target: [0, 1.58, 0] },
-  full: { pos: [0, 0.9, 3.0], target: [0, 0.8, 0] },
+type ViewMode = 'face' | 'upper' | 'full'
+const VIEW_MODE_LABELS: Record<ViewMode, string> = { face: '얼굴만', upper: '상반신', full: '전체 보기' }
+// face: 얼굴이 화면을 꽉 채우는 클로즈업 — 카메라를 바짝 당기는 대신 FOV를 좁혀 왜곡 없이 확대(망원렌즈 효과).
+// upper: 기존 기본값(상반신). full: 전신이 다 보이는 화면.
+const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number]; fov: number }> = {
+  face:  { pos: [0, 1.58, 0.5], target: [0, 1.58, 0], fov: 15 },
+  upper: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0], fov: 45 },
+  full:  { pos: [0, 0.9, 3.0], target: [0, 0.8, 0], fov: 45 },
 }
 
 interface Props {
@@ -154,6 +157,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     const preset = VIEW_PRESETS[mode]
     if (cameraRef.current && controlsRef.current) {
       cameraRef.current.position.set(...preset.pos)
+      cameraRef.current.fov = preset.fov
+      cameraRef.current.updateProjectionMatrix()
       controlsRef.current.target.set(...preset.target)
       controlsRef.current.update()
     }
@@ -376,9 +381,9 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     fillLight.position.set(-2, 1, -1)
     scene.add(fillLight)
 
-    // 얼굴만/전체 보기 토글에 맞춰 초기 카메라 프레이밍 결정
+    // 얼굴만/상반신/전체 보기 토글에 맞춰 초기 카메라 프레이밍 결정
     const preset = VIEW_PRESETS[viewModeRef.current]
-    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100)
+    const camera = new THREE.PerspectiveCamera(preset.fov, w / h, 0.1, 100)
     camera.position.set(...preset.pos)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.target.set(...preset.target); controls.enableDamping = true; controls.dampingFactor = 0.05
@@ -691,10 +696,10 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
           <div>
             <span className="text-[10px] text-gray-400 px-1">보기</span>
             <div className="flex flex-wrap justify-end gap-1 max-w-[12rem]">
-              {(['face', 'full'] as ViewMode[]).map(m => (
+              {(['face', 'upper', 'full'] as ViewMode[]).map(m => (
                 <button key={m} onClick={() => setView(m)}
                   className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${viewMode === m ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
-                  {m === 'face' ? '얼굴만' : '전체 보기'}
+                  {VIEW_MODE_LABELS[m]}
                 </button>
               ))}
             </div>
