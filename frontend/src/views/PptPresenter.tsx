@@ -1,8 +1,7 @@
 /**
- * PptPresenter — PPTX 업로드 → 슬라이드별 발표 대본(LLM) 생성 → 3D 아바타가 순차 발표(TTS)
+ * PptPresenter — PPTX 업로드 → 슬라이드별 발표 대본(LLM) 생성 → 3D 아바타가 순차 발표(TTS+립싱크)
  *
- * MVP 범위: 슬라이드 이미지 표시 + 아바타가 내 목소리로 대본을 순서대로 읽고 자동 전환.
- * 표정/제스처 립싱크는 다음 단계(RealisticAvatar의 모프타겟 파이프라인 재사용 예정).
+ * 립싱크/표정은 RealisticAvatar.tsx와 동일한 모프타겟 파이프라인(주파수 대역 기반 viseme 근사 + 감정별 가중치).
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
@@ -43,6 +42,37 @@ const VOICE_OPTIONS: VoiceOption[] = [
   { id: 'calm',   label: '차분한 목소리' },
 ]
 
+interface MorphRef { mesh: THREE.Mesh; index: number }
+type Emotion = 'neutral' | 'happy' | 'sorry' | 'surprised'
+
+// 입싱크(viseme 근사) + 표정용 모프타겟 그룹 — Avaturn/ARKit/Oculus 명명 모두 대응 (RealisticAvatar.tsx와 동일)
+const MORPH_GROUPS: Record<string, RegExp[]> = {
+  aa: [/viseme_aa/i, /^mouthopen$/i, /jawopen/i],
+  oo: [/viseme_u/i, /viseme_o/i, /mouthpucker/i, /mouthfunnel/i],
+  ee: [/viseme_e/i, /viseme_i/i, /mouthstretch/i],
+  consonant: [/viseme_pp/i, /viseme_ff/i, /viseme_ss/i, /viseme_dd/i, /viseme_kk/i, /viseme_ch/i, /viseme_th/i, /viseme_rr/i, /viseme_nn/i],
+  smile: [/mouthsmile/i],
+  frown: [/mouthfrown/i],
+  browUp: [/browinnerup/i, /browouterup/i],
+  browDown: [/browdown/i],
+  squint: [/eyesquint/i],
+  blink: [/eyeblink/i],
+}
+
+const EMOTION_WEIGHTS: Record<Emotion, Partial<Record<string, number>>> = {
+  neutral: { smile: 0.25 },
+  happy: { smile: 1, browUp: 0.4 },
+  sorry: { frown: 0.7, browDown: 0.5, smile: 0 },
+  surprised: { browUp: 1, smile: 0.1 },
+}
+
+function classifyEmotion(text: string): Emotion {
+  if (/죄송|미안|사과|아쉽|어렵|힘들/.test(text)) return 'sorry'
+  if (/축하|좋아요|좋습니다|감사|기쁘|행복|반갑|웃|즐거|최고|!{1,}/.test(text)) return 'happy'
+  if (/\?|궁금|놀라|정말요|진짜요|신기/.test(text)) return 'surprised'
+  return 'neutral'
+}
+
 export default function PptPresenter() {
   const containerRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
@@ -50,6 +80,13 @@ export default function PptPresenter() {
   const clockRef = useRef(new THREE.Clock())
   const animFrameRef = useRef<number>(0)
   const objectUrlRef = useRef<string | null>(null)
+  const morphMapRef = useRef<Record<string, MorphRef[]>>({})
+  const morphGroupsRef = useRef<Record<string, string[]>>({})
+  const morphValuesRef = useRef<Record<string, number>>({})
+  const lipsyncAnalyserRef = useRef<AnalyserNode | null>(null)
+  const emotionRef = useRef<Emotion>('neutral')
+  const blinkKeysRef = useRef<string[]>([])
+  const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
   const [avatarLoaded, setAvatarLoaded] = useState(false)
   const [avatarError, setAvatarError] = useState('')
 
@@ -110,10 +147,102 @@ export default function PptPresenter() {
         const idle = gltf.animations.find(a => /idle|stand|wait/i.test(a.name)) ?? gltf.animations[0]
         mixer.clipAction(idle).play()
       }
+
+      // 입싱크(viseme 근사) + 표정용 모프타겟 전체 수집 (RealisticAvatar.tsx와 동일)
+      const morphMap: Record<string, MorphRef[]> = {}
+      gltf.scene.traverse(obj => {
+        const mesh = obj as THREE.Mesh
+        const dict = mesh.morphTargetDictionary
+        if (!dict) return
+        Object.entries(dict).forEach(([name, idx]) => {
+          (morphMap[name] ??= []).push({ mesh, index: idx })
+        })
+      })
+      morphMapRef.current = morphMap
+      const groups: Record<string, string[]> = {}
+      Object.entries(MORPH_GROUPS).forEach(([group, patterns]) => {
+        groups[group] = Object.keys(morphMap).filter(k => patterns.some(p => p.test(k)))
+      })
+      blinkKeysRef.current = groups.blink ?? []
+      delete groups.blink
+      morphGroupsRef.current = groups
+      morphValuesRef.current = {}
+
       setAvatarLoaded(true)
       const animate = () => {
         animFrameRef.current = requestAnimationFrame(animate)
-        mixerRef.current?.update(clockRef.current.getDelta())
+        const dt = clockRef.current.getDelta()
+        mixerRef.current?.update(dt)
+
+        // 자동 눈 깜빡임
+        if (blinkKeysRef.current.length > 0) {
+          const blink = blinkStateRef.current
+          blink.elapsed += dt * 1000
+          let blinkValue = 0
+          const CLOSE_MS = 90, OPEN_MS = 130
+          if (blink.phase === 'closing') {
+            blinkValue = Math.min(1, blink.elapsed / CLOSE_MS)
+            if (blink.elapsed >= CLOSE_MS) { blink.phase = 'opening'; blink.elapsed = 0 }
+          } else if (blink.phase === 'opening') {
+            blinkValue = Math.max(0, 1 - blink.elapsed / OPEN_MS)
+            if (blink.elapsed >= OPEN_MS) { blink.phase = 'idle'; blink.elapsed = 0; blink.next = 2000 + Math.random() * 4000 }
+          } else if (blink.elapsed >= blink.next) {
+            blink.phase = 'closing'; blink.elapsed = 0
+          }
+          blinkKeysRef.current.forEach(key => {
+            morphMapRef.current[key]?.forEach(ref => {
+              const influences = ref.mesh.morphTargetInfluences
+              if (influences) influences[ref.index] = blinkValue
+            })
+          })
+        }
+
+        // 주파수 대역 기반 입싱크(viseme 근사) + 감정 기반 표정
+        const groups2 = morphGroupsRef.current
+        if (Object.keys(groups2).length > 0) {
+          const analyser = lipsyncAnalyserRef.current
+          let low = 0, mid = 0, high = 0
+          if (analyser) {
+            const buf = new Uint8Array(analyser.frequencyBinCount)
+            analyser.getByteFrequencyData(buf)
+            const n = buf.length
+            const bandAvg = (s: number, e: number) => {
+              let sum = 0; for (let i = s; i < e; i++) sum += buf[i]
+              return sum / Math.max(1, e - s)
+            }
+            low = bandAvg(0, Math.floor(n * 0.33))
+            mid = bandAvg(Math.floor(n * 0.33), Math.floor(n * 0.66))
+            high = bandAvg(Math.floor(n * 0.66), n)
+          }
+          const norm = (v: number) => Math.min(1, Math.max(0, (v - 8) / 50))
+          const ew = EMOTION_WEIGHTS[emotionRef.current] || {}
+          const targets: Record<string, number> = {
+            aa: norm(low) * 0.9,
+            oo: norm(mid) * 0.5,
+            ee: norm(high) * 0.5,
+            consonant: norm(high) * 0.3,
+            smile: ew.smile ?? 0,
+            frown: ew.frown ?? 0,
+            browUp: ew.browUp ?? 0,
+            browDown: ew.browDown ?? 0,
+            squint: ew.squint ?? 0,
+          }
+          Object.entries(groups2).forEach(([group, keys]) => {
+            const target = targets[group] ?? 0
+            keys.forEach(key => {
+              const refs = morphMapRef.current[key]
+              if (!refs?.length) return
+              const cur = morphValuesRef.current[key] ?? 0
+              const next = cur + (target - cur) * 0.35
+              morphValuesRef.current[key] = next
+              refs.forEach(ref => {
+                const influences = ref.mesh.morphTargetInfluences
+                if (influences) influences[ref.index] = next
+              })
+            })
+          })
+        }
+
         controls.update(); renderer.render(scene, camera)
       }
       animate()
@@ -178,6 +307,7 @@ export default function PptPresenter() {
     autoPlayRef.current = false; setAutoPlay(false)
     ttsSeqRef.current += 1
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
+    lipsyncAnalyserRef.current = null; emotionRef.current = 'neutral'
     setSpeaking(false)
   }, [])
 
@@ -189,6 +319,7 @@ export default function PptPresenter() {
     const stale = () => seq !== ttsSeqRef.current
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
     setCurrentIndex(idx); setSpeaking(true)
+    emotionRef.current = classifyEmotion(slide.script)
     try {
       const form = new FormData()
       form.append('text', slide.script); form.append('voice', voiceIdRef.current)
@@ -203,9 +334,13 @@ export default function PptPresenter() {
       const ctx = audioCtxRef.current
       if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
       const src = ctx.createMediaElementSource(audio)
-      src.connect(ctx.destination)
+      const analyser = ctx.createAnalyser(); analyser.fftSize = 64
+      src.connect(analyser); analyser.connect(ctx.destination)
+      lipsyncAnalyserRef.current = analyser
       const cleanup = () => {
         URL.revokeObjectURL(url)
+        lipsyncAnalyserRef.current = null
+        emotionRef.current = 'neutral'
         if (stale()) return
         setSpeaking(false)
         const next = idx + 1
@@ -218,6 +353,7 @@ export default function PptPresenter() {
       audio.onended = cleanup; audio.onerror = cleanup
       audio.play().catch(cleanup)
     } catch {
+      lipsyncAnalyserRef.current = null; emotionRef.current = 'neutral'
       if (!stale()) { setSpeaking(false); autoPlayRef.current = false; setAutoPlay(false) }
     }
   }, [])
@@ -232,6 +368,7 @@ export default function PptPresenter() {
     const wasPlaying = autoPlayRef.current
     ttsSeqRef.current += 1
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
+    lipsyncAnalyserRef.current = null; emotionRef.current = 'neutral'
     setSpeaking(false); setCurrentIndex(idx)
     if (wasPlaying) speakSlide(idx)
   }, [speakSlide])
