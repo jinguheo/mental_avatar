@@ -13,6 +13,13 @@ const IDB_NAME = 'mental-avatar-glb'
 const IDB_STORE = 'glb-files'
 // RealisticAvatar.tsx와 동일한 키 — 거기서 선택/등록한 GLB를 그대로 공유해서 보여준다
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
+const VIEW_MODE_KEY = 'mental-avatar-camera-view'
+type ViewMode = 'face' | 'full'
+// face: 표정이 잘 보이는 상반신 클로즈업(기존 기본값). full: 전신이 다 보이는 화면.
+const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number] }> = {
+  face: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0] },
+  full: { pos: [0, 0.9, 3.0], target: [0, 0.8, 0] },
+}
 
 interface GlbEntry { name: string; size: number; data: ArrayBuffer; loadedAt: number }
 
@@ -96,6 +103,9 @@ function classifyEmotion(text: string): Emotion {
 export default function PptPresenter() {
   const containerRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
+  const controlsRef = useRef<OrbitControls | null>(null)
+  const viewModeRef = useRef<ViewMode>((localStorage.getItem(VIEW_MODE_KEY) as ViewMode) || 'face')
   const mixerRef = useRef<THREE.AnimationMixer | null>(null)
   const clockRef = useRef(new THREE.Clock())
   const animFrameRef = useRef<number>(0)
@@ -114,6 +124,18 @@ export default function PptPresenter() {
   const [showList, setShowList] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [uploadDragging, setUploadDragging] = useState(false)
+  const [viewMode, setViewMode] = useState<ViewMode>(() => viewModeRef.current)
+
+  const setView = useCallback((mode: ViewMode) => {
+    setViewMode(mode); viewModeRef.current = mode
+    localStorage.setItem(VIEW_MODE_KEY, mode)
+    const preset = VIEW_PRESETS[mode]
+    if (cameraRef.current && controlsRef.current) {
+      cameraRef.current.position.set(...preset.pos)
+      controlsRef.current.target.set(...preset.target)
+      controlsRef.current.update()
+    }
+  }, [])
 
   const refreshList = useCallback(() => {
     idbList().then(setGlbList).catch(() => {})
@@ -157,10 +179,12 @@ export default function PptPresenter() {
     scene.add(new THREE.AmbientLight(0xffffff, 1.2))
     const dir = new THREE.DirectionalLight(0xffffff, 2); dir.position.set(1, 3, 2); scene.add(dir)
 
+    const preset = VIEW_PRESETS[viewModeRef.current]
     const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100)
-    camera.position.set(0, 1.5, 1.3)
+    camera.position.set(...preset.pos)
     const controls = new OrbitControls(camera, renderer.domElement)
-    controls.target.set(0, 1.45, 0); controls.enableDamping = true; controls.update()
+    controls.target.set(...preset.target); controls.enableDamping = true; controls.update()
+    cameraRef.current = camera; controlsRef.current = controls
 
     new GLTFLoader().load(url, (gltf) => {
       const box = new THREE.Box3().setFromObject(gltf.scene)
@@ -557,6 +581,19 @@ export default function PptPresenter() {
                 ))}
               </div>
             )}
+          </div>
+
+          {/* 보기 토글 (우상단) */}
+          <div className="absolute top-2 right-2 z-20 flex flex-col items-end gap-1 bg-black/50 backdrop-blur rounded-lg p-1.5">
+            <span className="text-[10px] text-gray-400 px-1">보기</span>
+            <div className="flex gap-1">
+              {(['face', 'full'] as ViewMode[]).map(m => (
+                <button key={m} onClick={() => setView(m)}
+                  className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${viewMode === m ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
+                  {m === 'face' ? '얼굴만' : '전체 보기'}
+                </button>
+              ))}
+            </div>
           </div>
 
           {!avatarLoaded && (

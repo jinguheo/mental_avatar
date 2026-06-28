@@ -106,6 +106,13 @@ const TEMPLATE_VOICES: VoiceOption[] = [
   { id: 'calm',   label: '차분한 목소리', kind: 'template' },
 ]
 const VOICE_OPTION_KEY = 'mental-avatar-realistic-voice'
+const VIEW_MODE_KEY = 'mental-avatar-camera-view'
+type ViewMode = 'face' | 'full'
+// face: 표정이 잘 보이는 상반신 클로즈업(기존 기본값). full: 전신이 다 보이는 화면.
+const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [number, number, number] }> = {
+  face: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0] },
+  full: { pos: [0, 0.9, 3.0], target: [0, 0.8, 0] },
+}
 
 interface Props {
   settings: Settings
@@ -116,6 +123,9 @@ interface Props {
 export default function RealisticAvatar({ settings, messages, setMessages }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
+  const controlsRef = useRef<OrbitControls | null>(null)
+  const viewModeRef = useRef<ViewMode>((localStorage.getItem(VIEW_MODE_KEY) as ViewMode) || 'face')
   const mixerRef = useRef<THREE.AnimationMixer | null>(null)
   const clockRef = useRef(new THREE.Clock())
   const animFrameRef = useRef<number>(0)
@@ -136,6 +146,18 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const [serverOnline, setServerOnline] = useState(true)
   const [glbList, setGlbList] = useState<GlbEntry[]>([])
   const [showList, setShowList] = useState(false)
+  const [viewMode, setViewMode] = useState<ViewMode>(() => viewModeRef.current)
+
+  const setView = useCallback((mode: ViewMode) => {
+    setViewMode(mode); viewModeRef.current = mode
+    localStorage.setItem(VIEW_MODE_KEY, mode)
+    const preset = VIEW_PRESETS[mode]
+    if (cameraRef.current && controlsRef.current) {
+      cameraRef.current.position.set(...preset.pos)
+      controlsRef.current.target.set(...preset.target)
+      controlsRef.current.update()
+    }
+  }, [])
 
   const refreshList = useCallback(() => {
     idbList().then(setGlbList).catch(() => {})
@@ -354,12 +376,14 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     fillLight.position.set(-2, 1, -1)
     scene.add(fillLight)
 
-    // 상반신 위주 프레이밍 — 표정 변화는 전신 샷에서는 거의 안 보이므로 얼굴 쪽으로 기본 시야를 좁힌다
+    // 얼굴만/전체 보기 토글에 맞춰 초기 카메라 프레이밍 결정
+    const preset = VIEW_PRESETS[viewModeRef.current]
     const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100)
-    camera.position.set(0, 1.5, 1.3)
+    camera.position.set(...preset.pos)
     const controls = new OrbitControls(camera, renderer.domElement)
-    controls.target.set(0, 1.45, 0); controls.enableDamping = true; controls.dampingFactor = 0.05
-    controls.minDistance = 0.4; controls.maxDistance = 5; controls.update()
+    controls.target.set(...preset.target); controls.enableDamping = true; controls.dampingFactor = 0.05
+    controls.minDistance = 0.4; controls.maxDistance = 6; controls.update()
+    cameraRef.current = camera; controlsRef.current = controls
 
     new GLTFLoader().load(url, (gltf) => {
       const box = new THREE.Box3().setFromObject(gltf.scene)
@@ -663,15 +687,28 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         </div>
 
         {/* 목소리 선택 (우상단) */}
-        <div className="absolute top-3 right-3 z-20 flex flex-col items-end gap-1 bg-black/40 backdrop-blur rounded-xl p-2">
-          <span className="text-[10px] text-gray-400 px-1">목소리</span>
-          <div className="flex flex-wrap justify-end gap-1 max-w-[12rem]">
-            {voiceOptions.map(v => (
-              <button key={v.id} onClick={() => { setVoiceOptionId(v.id); localStorage.setItem(VOICE_OPTION_KEY, v.id) }}
-                className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${voiceOptionId === v.id ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
-                {v.label}
-              </button>
-            ))}
+        <div className="absolute top-3 right-3 z-20 flex flex-col items-end gap-2 bg-black/40 backdrop-blur rounded-xl p-2">
+          <div>
+            <span className="text-[10px] text-gray-400 px-1">보기</span>
+            <div className="flex flex-wrap justify-end gap-1 max-w-[12rem]">
+              {(['face', 'full'] as ViewMode[]).map(m => (
+                <button key={m} onClick={() => setView(m)}
+                  className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${viewMode === m ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
+                  {m === 'face' ? '얼굴만' : '전체 보기'}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <span className="text-[10px] text-gray-400 px-1">목소리</span>
+            <div className="flex flex-wrap justify-end gap-1 max-w-[12rem]">
+              {voiceOptions.map(v => (
+                <button key={v.id} onClick={() => { setVoiceOptionId(v.id); localStorage.setItem(VOICE_OPTION_KEY, v.id) }}
+                  className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${voiceOptionId === v.id ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
+                  {v.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
