@@ -11,6 +11,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 const API = 'http://127.0.0.1:8766'
 const IDB_NAME = 'mental-avatar-glb'
 const IDB_STORE = 'glb-files'
+// RealisticAvatar.tsx와 동일한 키 — 거기서 선택/등록한 GLB를 그대로 공유해서 보여준다
+const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
 
 interface GlbEntry { name: string; size: number; data: ArrayBuffer; loadedAt: number }
 
@@ -29,6 +31,24 @@ async function idbList(): Promise<GlbEntry[]> {
     const req = tx.objectStore(IDB_STORE).getAll()
     req.onsuccess = () => res((req.result as GlbEntry[]).sort((a, b) => b.loadedAt - a.loadedAt))
     req.onerror = () => rej(req.error)
+  })
+}
+async function idbSave(entry: GlbEntry) {
+  const db = await openIDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).put(entry)
+    tx.oncomplete = () => res()
+    tx.onerror = () => rej(tx.error)
+  })
+}
+async function idbDelete(name: string) {
+  const db = await openIDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).delete(name)
+    tx.oncomplete = () => res()
+    tx.onerror = () => rej(tx.error)
   })
 }
 
@@ -89,6 +109,14 @@ export default function PptPresenter() {
   const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
   const [avatarLoaded, setAvatarLoaded] = useState(false)
   const [avatarError, setAvatarError] = useState('')
+  const [fileName, setFileName] = useState(() => localStorage.getItem(AVATAR_FILE_KEY) || '')
+  const [glbList, setGlbList] = useState<GlbEntry[]>([])
+  const [showList, setShowList] = useState(false)
+  const [dragging, setDragging] = useState(false)
+
+  const refreshList = useCallback(() => {
+    idbList().then(setGlbList).catch(() => {})
+  }, [])
 
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
@@ -254,12 +282,17 @@ export default function PptPresenter() {
     }, undefined, (err) => setAvatarError(String(err)))
   }, [])
 
+  // 마운트 시 실사 아바타 탭과 동일한 키(AVATAR_FILE_KEY)로 "마지막 선택한 GLB"를 그대로 불러옴
   useEffect(() => {
+    refreshList()
+    const lastName = localStorage.getItem(AVATAR_FILE_KEY)
     idbList().then(list => {
-      if (list[0]) {
-        const blob = new Blob([list[0].data], { type: 'model/gltf-binary' })
+      const entry = (lastName && list.find(e => e.name === lastName)) || list[0]
+      if (entry) {
+        const blob = new Blob([entry.data], { type: 'model/gltf-binary' })
         const url = URL.createObjectURL(blob)
         objectUrlRef.current = url
+        setFileName(entry.name)
         loadGLB(url)
       }
     }).catch(() => {})
@@ -270,6 +303,29 @@ export default function PptPresenter() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const handleFile = useCallback((file: File) => {
+    if (!file.name.endsWith('.glb')) { setAvatarError('GLB 파일만 지원합니다'); return }
+    file.arrayBuffer().then(data => {
+      idbSave({ name: file.name, size: file.size, data, loadedAt: Date.now() })
+        .then(refreshList).catch(() => {})
+    })
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+    const url = URL.createObjectURL(file); objectUrlRef.current = url
+    localStorage.setItem(AVATAR_FILE_KEY, file.name); setFileName(file.name)
+    setShowList(false)
+    loadGLB(url)
+  }, [loadGLB, refreshList])
+
+  const loadFromIDB = useCallback((entry: GlbEntry) => {
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+    const blob = new Blob([entry.data], { type: 'model/gltf-binary' })
+    const url = URL.createObjectURL(blob); objectUrlRef.current = url
+    localStorage.setItem(AVATAR_FILE_KEY, entry.name); setFileName(entry.name)
+    setShowList(false)
+    idbSave({ ...entry, loadedAt: Date.now() }).then(refreshList).catch(() => {})
+    loadGLB(url)
+  }, [loadGLB, refreshList])
 
   // ── AudioContext unlock (Edge 등은 사용자 제스처 안에서 생성해야 동작) ──
   useEffect(() => {
@@ -383,7 +439,7 @@ export default function PptPresenter() {
   return (
     <div className="flex h-full overflow-hidden bg-gray-950">
       {!sessionId ? (
-        <div className="flex-1 flex items-center justify-center">
+        <div className="flex-1 relative flex items-center justify-center">
           <label className="flex flex-col items-center gap-3 border-2 border-dashed border-gray-700 hover:border-blue-600 rounded-2xl px-10 py-12 cursor-pointer text-gray-400 hover:text-gray-200 transition-colors">
             <span className="text-3xl">📊</span>
             <span className="text-sm">{uploading ? '슬라이드 분석 + 대본 생성 중…' : 'PPTX 또는 PDF 파일을 선택하세요'}</span>
@@ -393,84 +449,127 @@ export default function PptPresenter() {
           {uploadError && <p className="absolute bottom-8 text-sm text-red-400">{uploadError}</p>}
         </div>
       ) : (
-        <>
-          {/* 슬라이드 영역 */}
-          <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden">
-            <div className="flex-1 flex items-center justify-center bg-black rounded-xl overflow-hidden">
-              {current?.image ? (
-                <img
-                  src={`${API}/presenter/slide_image/${sessionId}/${current.image}`}
-                  alt={`슬라이드 ${current.index}`}
-                  className="max-w-full max-h-full object-contain"
-                />
-              ) : (
-                <span className="text-gray-600 text-sm">이미지 없음</span>
-              )}
-            </div>
-            <textarea
-              value={current?.script || ''}
-              onChange={e => editScript(currentIndex, e.target.value)}
-              rows={3}
-              className="bg-gray-900 text-gray-200 text-sm rounded-xl p-3 outline-none border border-gray-800 focus:border-blue-700 resize-none"
-              placeholder="발표 대본 (수정 가능)"
-            />
-            <div className="flex items-center justify-between">
-              <button onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0}
-                className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
-                ← 이전
-              </button>
-              <span className="text-xs text-gray-500">{slides.length ? `${currentIndex + 1} / ${slides.length}` : ''}</span>
-              <div className="flex gap-2">
-                {!autoPlay ? (
-                  <button onClick={handlePlay} className="px-4 py-1.5 text-sm rounded-lg bg-blue-700 hover:bg-blue-600 text-white">
-                    ▶ 발표 시작
-                  </button>
-                ) : (
-                  <button onClick={stopSpeaking} className="px-4 py-1.5 text-sm rounded-lg bg-red-700 hover:bg-red-600 text-white">
-                    ⏸ 정지
-                  </button>
-                )}
-                <button onClick={() => goTo(currentIndex + 1)} disabled={currentIndex >= slides.length - 1}
-                  className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
-                  다음 →
-                </button>
-              </div>
-            </div>
-            <button onClick={() => { stopSpeaking(); setSessionId(''); setSlides([]) }}
-              className="text-xs text-gray-500 hover:text-gray-300 self-start">
-              ↺ 새 파일 업로드
-            </button>
+        /* 슬라이드 영역 */
+        <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden">
+          <div className="flex-1 flex items-center justify-center bg-black rounded-xl overflow-hidden">
+            {current?.image ? (
+              <img
+                src={`${API}/presenter/slide_image/${sessionId}/${current.image}`}
+                alt={`슬라이드 ${current.index}`}
+                className="max-w-full max-h-full object-contain"
+              />
+            ) : (
+              <span className="text-gray-600 text-sm">이미지 없음</span>
+            )}
           </div>
-
-          {/* 아바타 영역 */}
-          <div className="w-80 flex flex-col border-l border-gray-800 bg-gray-900/95">
-            <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-200">발표 아바타</h2>
-              {speaking && <span className="text-xs text-blue-400 animate-pulse">말하는 중</span>}
-            </div>
-            <div className="flex-1 relative">
-              <div ref={containerRef} className="w-full h-full" />
-              {!avatarLoaded && (
-                <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-xs px-4 text-center pointer-events-none">
-                  저장된 아바타가 없습니다.<br />실사 아바타 탭에서 먼저 GLB를 등록하세요.
-                </div>
+          <textarea
+            value={current?.script || ''}
+            onChange={e => editScript(currentIndex, e.target.value)}
+            rows={3}
+            className="bg-gray-900 text-gray-200 text-sm rounded-xl p-3 outline-none border border-gray-800 focus:border-blue-700 resize-none"
+            placeholder="발표 대본 (수정 가능)"
+          />
+          <div className="flex items-center justify-between">
+            <button onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0}
+              className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
+              ← 이전
+            </button>
+            <span className="text-xs text-gray-500">{slides.length ? `${currentIndex + 1} / ${slides.length}` : ''}</span>
+            <div className="flex gap-2">
+              {!autoPlay ? (
+                <button onClick={handlePlay} className="px-4 py-1.5 text-sm rounded-lg bg-blue-700 hover:bg-blue-600 text-white">
+                  ▶ 발표 시작
+                </button>
+              ) : (
+                <button onClick={stopSpeaking} className="px-4 py-1.5 text-sm rounded-lg bg-red-700 hover:bg-red-600 text-white">
+                  ⏸ 정지
+                </button>
               )}
-              {avatarError && <div className="absolute bottom-2 left-2 right-2 text-xs text-red-400 bg-red-900/60 rounded p-1">{avatarError}</div>}
+              <button onClick={() => goTo(currentIndex + 1)} disabled={currentIndex >= slides.length - 1}
+                className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
+                다음 →
+              </button>
             </div>
-            <div className="p-3 border-t border-gray-800">
-              <span className="text-[10px] text-gray-400 px-1">목소리</span>
-              <div className="flex flex-wrap gap-1 mt-1">
-                {VOICE_OPTIONS.map(v => (
-                  <button key={v.id} onClick={() => setVoiceId(v.id)}
-                    className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${voiceId === v.id ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
-                    {v.label}
-                  </button>
+          </div>
+          <button onClick={() => { stopSpeaking(); setSessionId(''); setSlides([]) }}
+            className="text-xs text-gray-500 hover:text-gray-300 self-start">
+            ↺ 새 파일 업로드
+          </button>
+        </div>
+      )}
+
+      {/* 아바타 영역 — 업로드 전에도 항상 표시(실사 아바타 탭과 동일 GLB를 그대로 보여줌) */}
+      <div className="w-80 flex flex-col border-l border-gray-800 bg-gray-900/95">
+        <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-200">발표 아바타</h2>
+          {speaking && <span className="text-xs text-blue-400 animate-pulse">말하는 중</span>}
+        </div>
+        <div
+          className={`flex-1 relative ${dragging ? 'ring-2 ring-blue-500 ring-inset' : ''}`}
+          onDragOver={e => { e.preventDefault(); setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
+        >
+          <div ref={containerRef} className="w-full h-full" />
+
+          {/* 파일 선택 + 저장된 목록 (실사 아바타 탭과 동일) */}
+          <div className="absolute top-2 left-2 z-20 flex flex-col gap-1">
+            <div className="flex gap-1">
+              <label className="flex items-center gap-1 bg-black/50 backdrop-blur text-[11px] text-gray-300 hover:text-white rounded-lg px-2 py-1 cursor-pointer border border-gray-700 hover:border-gray-500 transition-colors max-w-[10rem] truncate">
+                📁 {fileName || 'GLB 선택'}
+                <input type="file" accept=".glb" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
+              </label>
+              {glbList.length > 0 && (
+                <button
+                  onClick={() => setShowList(v => !v)}
+                  className="bg-black/50 backdrop-blur text-[11px] text-gray-300 hover:text-white rounded-lg px-1.5 py-1 border border-gray-700 hover:border-gray-500 transition-colors"
+                  title="저장된 아바타 목록"
+                >
+                  {showList ? '▲' : '▼'} {glbList.length}
+                </button>
+              )}
+            </div>
+            {showList && (
+              <div className="bg-black/80 backdrop-blur border border-gray-700 rounded-xl overflow-hidden min-w-[200px] max-h-56 overflow-y-auto">
+                {glbList.map(entry => (
+                  <div key={entry.name} className="flex items-center gap-1 px-2 py-1.5 hover:bg-gray-800/80 group">
+                    <button
+                      onClick={() => loadFromIDB(entry)}
+                      className="flex-1 text-left text-[11px] text-gray-300 hover:text-white truncate"
+                    >
+                      {entry.name === fileName ? '▶ ' : ''}{entry.name}
+                      <span className="ml-1 text-[10px] text-gray-500">{(entry.size / 1024 / 1024).toFixed(1)}MB</span>
+                    </button>
+                    <button
+                      onClick={() => idbDelete(entry.name).then(refreshList)}
+                      className="text-[10px] text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity px-1"
+                    >✕</button>
+                  </div>
                 ))}
               </div>
-            </div>
+            )}
           </div>
-        </>
-      )}
+
+          {!avatarLoaded && (
+            <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-xs px-4 text-center pointer-events-none">
+              GLB 파일을 드래그하거나 좌상단에서 선택하세요
+            </div>
+          )}
+          {dragging && <div className="absolute inset-0 flex items-center justify-center bg-blue-900/30 text-blue-300 text-sm font-semibold pointer-events-none">GLB 파일을 놓으세요</div>}
+          {avatarError && <div className="absolute bottom-2 left-2 right-2 text-xs text-red-400 bg-red-900/60 rounded p-1">{avatarError}</div>}
+        </div>
+        <div className="p-3 border-t border-gray-800">
+          <span className="text-[10px] text-gray-400 px-1">목소리</span>
+          <div className="flex flex-wrap gap-1 mt-1">
+            {VOICE_OPTIONS.map(v => (
+              <button key={v.id} onClick={() => setVoiceId(v.id)}
+                className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${voiceId === v.id ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
+                {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
