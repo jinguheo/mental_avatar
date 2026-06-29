@@ -8,6 +8,7 @@ PDF는 PPTX를 PDF로 내보낸 자료가 많아(스피커 노트 없음) 본문
 텍스트가 거의 없는 페이지(이미지 위주 슬라이드)는 렌더링된 페이지 이미지를 비전 모델로 보강한다.
 """
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
@@ -205,32 +206,54 @@ def extract_and_export(file_path: str, out_dir: str) -> tuple[list[dict], list[s
     return slides, images
 
 
+# 슬라이드당 LLM 호출을 몇 개씩 동시에 돌릴지. 로컬 Ollama+GPU를 다른 작업(XTTS/WebGL)과 공유하므로
+# 너무 키우면 GPU 메모리 폭주로 드라이버가 리셋된 전례가 있어(server_restart_gotcha) 작게 유지.
+_BATCH_SIZE = 2
+
+
 def process_presentation(file_path: str, out_dir: str, progress_cb=None) -> list[dict]:
     """PPTX/PDF 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환.
 
     progress_cb(current, total)가 주어지면 슬라이드 추출 직후(current=0)와
-    슬라이드별 대본 생성 완료마다 호출 — 오래 걸리는 LLM 순차 호출 진행률 표시용."""
+    슬라이드별 대본 생성 완료마다 호출 — 오래 걸리는 LLM 호출 진행률 표시용.
+
+    슬라이드는 _BATCH_SIZE개씩 묶어 동시에 생성한다(전부 직렬화하면 너무 느림).
+    배치 내부 슬라이드들은 배치 시작 시점의 직전 대본을 공유해서 문맥을 잇고,
+    배치가 끝나면 그 배치의 마지막 슬라이드 대본을 다음 배치의 prev_script로 넘긴다
+    (완전 순차 대비 문맥 연결이 한 단계 느슨해지지만, 속도와 GPU 안전성을 위한 절충)."""
     slides, images = extract_and_export(file_path, out_dir)
     style_block = _style_block()
     total = len(slides)
     if progress_cb:
         progress_cb(0, total)
 
+    def image_path_for(slide):
+        image_name = images[slide["index"] - 1] if slide["index"] - 1 < len(images) else None
+        return image_name, (os.path.join(out_dir, image_name) if image_name else None)
+
     result = []
     prev_script = ""
-    for slide in slides:
-        image_name = images[slide["index"] - 1] if slide["index"] - 1 < len(images) else None
-        image_path = os.path.join(out_dir, image_name) if image_name else None
-        script = generate_script(slide, total, style_block, prev_script, image_path)
-        prev_script = script
-        result.append({
-            "index": slide["index"],
-            "title": slide["title"],
-            "image": image_name,
-            "script": script,
-        })
-        if progress_cb:
-            progress_cb(slide["index"], total)
+    done = 0
+    for pos in range(0, total, _BATCH_SIZE):
+        batch = slides[pos:pos + _BATCH_SIZE]
+        batch_prev = prev_script
+        with ThreadPoolExecutor(max_workers=len(batch)) as ex:
+            futures = []
+            for slide in batch:
+                image_name, image_path = image_path_for(slide)
+                futures.append((slide, image_name, ex.submit(generate_script, slide, total, style_block, batch_prev, image_path)))
+            for slide, image_name, fut in futures:
+                script = fut.result()
+                result.append({
+                    "index": slide["index"],
+                    "title": slide["title"],
+                    "image": image_name,
+                    "script": script,
+                })
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
+        prev_script = result[-1]["script"]
     return result
 
 
