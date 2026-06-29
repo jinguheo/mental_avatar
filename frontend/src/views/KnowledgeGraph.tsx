@@ -1477,9 +1477,17 @@ function MermaidDiagram({ code }: { code: string }) {
     }
     let cancelled = false
     const id = `mermaid-${Math.random().toString(36).slice(2)}`
-    mermaid.render(id, code.trim())
-      .then(({ svg }) => { if (!cancelled && ref.current) { ref.current.innerHTML = svg; setError('') } })
-      .catch(() => { if (!cancelled) setError('다이어그램 렌더링 실패') })
+    // mermaid.render()는 문법 오류여도 reject 대신 "Syntax error..." 에러 그림을 그린 svg로
+    // resolve해버려서(.catch가 못 잡음) — mermaid.parse()로 먼저 문법을 검증해 그 경우를 걸러낸다.
+    ;(async () => {
+      try {
+        await mermaid.parse(code.trim())
+        const { svg } = await mermaid.render(id, code.trim())
+        if (!cancelled && ref.current) { ref.current.innerHTML = svg; setError('') }
+      } catch {
+        if (!cancelled) setError('다이어그램 렌더링 실패')
+      }
+    })()
     return () => { cancelled = true }
   }, [code])
 
