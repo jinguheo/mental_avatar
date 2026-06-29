@@ -394,42 +394,101 @@ export default function PptPresenter() {
     return () => window.removeEventListener('pointerdown', unlock)
   }, [])
 
-  // ── 업로드 ──
-  const handleUpload = useCallback(async (file: File) => {
+  // ── 업로드 처리 공통 로직 — 단일 즉시 업로드/큐 처리 양쪽에서 재사용 ──
+  // 업로드 → job_id 폴링 → 완료 시 {session_id, slides} 반환 (실패하면 throw)
+  const processFile = useCallback(async (
+    file: File,
+    onProgress?: (current: number, total: number) => void
+  ): Promise<{ session_id: string; slides: Slide[] }> => {
     const name = file.name.toLowerCase()
     if (!name.endsWith('.pptx') && !name.endsWith('.ppt') && !name.endsWith('.pdf')) {
-      setUploadError('.pptx 또는 .pdf 파일만 지원합니다'); return
+      throw new Error('.pptx 또는 .pdf 파일만 지원합니다')
     }
+    const form = new FormData(); form.append('file', file)
+    const res = await fetch(`${API}/presenter/upload`, { method: 'POST', body: form })
+    const data = await res.json()
+    if (data.error) throw new Error(data.error)
+    const jobId = data.job_id
+
+    // 슬라이드당 LLM 순차 호출이라 시간이 걸림 — job_id를 폴링해 진행률을 보여준다
+    for (;;) {
+      await new Promise(r => setTimeout(r, 1200))
+      const jres = await fetch(`${API}/presenter/job/${jobId}`)
+      const job = await jres.json()
+      if (job.error && job.stage !== 'error') throw new Error(job.error)
+      onProgress?.(job.current || 0, job.total || 0)
+      if (job.stage === 'done') return { session_id: job.session_id, slides: job.slides }
+      if (job.stage === 'error') throw new Error(job.error || '처리 실패')
+    }
+  }, [])
+
+  // ── 단일 업로드(즉시 열기) ──
+  const handleUpload = useCallback(async (file: File) => {
     setUploading(true); setUploadError(''); setSlides([]); setSessionId(''); setCurrentIndex(0)
     setUploadProgress({ current: 0, total: 0 })
     try {
-      const form = new FormData(); form.append('file', file)
-      const res = await fetch(`${API}/presenter/upload`, { method: 'POST', body: form })
-      const data = await res.json()
-      if (data.error) throw new Error(data.error)
-      const jobId = data.job_id
-
-      // 슬라이드당 LLM 순차 호출이라 시간이 걸림 — job_id를 폴링해 진행률을 보여준다
-      for (;;) {
-        await new Promise(r => setTimeout(r, 1200))
-        const jres = await fetch(`${API}/presenter/job/${jobId}`)
-        const job = await jres.json()
-        if (job.error && job.stage !== 'error') throw new Error(job.error)
-        setUploadProgress({ current: job.current || 0, total: job.total || 0 })
-        if (job.stage === 'done') {
-          setSessionId(job.session_id)
-          setSlides(job.slides)
-          refreshSavedSessions()
-          break
-        }
-        if (job.stage === 'error') throw new Error(job.error || '처리 실패')
-      }
+      const { session_id, slides } = await processFile(file, (current, total) => setUploadProgress({ current, total }))
+      setSessionId(session_id); setSlides(slides)
+      refreshSavedSessions()
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : '업로드 실패')
     } finally {
       setUploading(false)
     }
-  }, [refreshSavedSessions])
+  }, [processFile, refreshSavedSessions])
+
+  // ── 여러 파일 일괄 업로드(큐) — 백그라운드에서 순차 처리, 결과는 "저장된 발표" 목록에서 확인 ──
+  interface QueueItem { id: string; name: string; status: 'queued' | 'processing' | 'done' | 'error'; current: number; total: number; error?: string }
+  const [uploadQueue, setUploadQueue] = useState<QueueItem[]>([])
+  const uploadQueueRef = useRef<QueueItem[]>([])
+  useEffect(() => { uploadQueueRef.current = uploadQueue }, [uploadQueue])
+  const fileMapRef = useRef<Map<string, File>>(new Map())
+  const queueRunningRef = useRef(false)
+
+  const runQueue = useCallback(async () => {
+    if (queueRunningRef.current) return
+    queueRunningRef.current = true
+    for (;;) {
+      const next = uploadQueueRef.current.find(q => q.status === 'queued')
+      if (!next) break
+      setUploadQueue(prev => prev.map(q => q.id === next.id ? { ...q, status: 'processing' } : q))
+      const file = fileMapRef.current.get(next.id)
+      try {
+        if (!file) throw new Error('파일을 찾을 수 없습니다')
+        await processFile(file, (current, total) => {
+          setUploadQueue(prev => prev.map(q => q.id === next.id ? { ...q, current, total } : q))
+        })
+        setUploadQueue(prev => prev.map(q => q.id === next.id ? { ...q, status: 'done' } : q))
+        refreshSavedSessions()
+      } catch (e) {
+        setUploadQueue(prev => prev.map(q => q.id === next.id ? { ...q, status: 'error', error: e instanceof Error ? e.message : '처리 실패' } : q))
+      }
+      fileMapRef.current.delete(next.id)
+    }
+    queueRunningRef.current = false
+  }, [processFile, refreshSavedSessions])
+
+  const enqueueFiles = useCallback((files: File[]) => {
+    const items: QueueItem[] = files.map(f => {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      fileMapRef.current.set(id, f)
+      return { id, name: f.name, status: 'queued' as const, current: 0, total: 0 }
+    })
+    setUploadQueue(prev => [...prev, ...items])
+    runQueue()
+  }, [runQueue])
+
+  const dismissQueueItem = useCallback((id: string) => {
+    setUploadQueue(prev => prev.filter(q => q.id !== id))
+    fileMapRef.current.delete(id)
+  }, [])
+
+  // 파일 선택/드롭 — 1개면 즉시 열기(기존 동작), 2개 이상이면 백그라운드 큐로 처리
+  const handleFiles = useCallback((files: File[]) => {
+    if (files.length === 0) return
+    if (files.length === 1) { handleUpload(files[0]); return }
+    enqueueFiles(files)
+  }, [handleUpload, enqueueFiles])
 
   // ── 발표(TTS 순차 재생) ──
   const stopSpeaking = useCallback(() => {
@@ -538,7 +597,37 @@ export default function PptPresenter() {
   const current = slides[currentIndex]
 
   return (
-    <div className="flex h-full overflow-hidden bg-gray-950">
+    <div className="flex h-full overflow-hidden bg-gray-950 relative">
+      {/* 일괄 업로드 큐 — 어느 화면(업로드/발표 보기)에 있든 백그라운드 처리 상태를 계속 볼 수 있게 항상 표시.
+          완료되면 "저장된 발표" 목록에도 자동으로 나타남 */}
+      {uploadQueue.length > 0 && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-black/85 backdrop-blur border border-gray-700 rounded-xl overflow-hidden min-w-[260px] max-h-72 overflow-y-auto">
+          <div className="text-[10px] text-gray-400 px-3 py-1.5 border-b border-gray-800">📋 일괄 처리 큐</div>
+          {uploadQueue.map(q => (
+            <div key={q.id} className="flex items-center gap-2 px-3 py-2 border-b border-gray-800/60 last:border-0">
+              <span className="text-sm shrink-0">
+                {q.status === 'queued' && '⏳'}
+                {q.status === 'processing' && '⚙️'}
+                {q.status === 'done' && '✅'}
+                {q.status === 'error' && '⚠️'}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-gray-200 truncate">{q.name}</div>
+                <div className="text-[10px] text-gray-500">
+                  {q.status === 'queued' && '대기 중'}
+                  {q.status === 'processing' && (q.total ? `슬라이드 ${q.current}/${q.total} 생성 중` : '분석 중…')}
+                  {q.status === 'done' && '완료 — 저장된 발표 목록에서 확인'}
+                  {q.status === 'error' && (q.error || '처리 실패')}
+                </div>
+              </div>
+              {(q.status === 'done' || q.status === 'error') && (
+                <button onClick={() => dismissQueueItem(q.id)} className="text-[10px] text-gray-600 hover:text-gray-300 px-1">✕</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {!sessionId ? (
         <div
           className={`flex-1 relative flex items-center justify-center ${uploadDragging ? 'bg-blue-900/20' : ''}`}
@@ -546,7 +635,7 @@ export default function PptPresenter() {
           onDragLeave={() => setUploadDragging(false)}
           onDrop={e => {
             e.preventDefault(); setUploadDragging(false)
-            const f = e.dataTransfer.files[0]; if (f) handleUpload(f)
+            handleFiles(Array.from(e.dataTransfer.files))
           }}
         >
           <label className={`flex flex-col items-center gap-3 border-2 border-dashed rounded-2xl px-10 py-12 cursor-pointer text-gray-400 hover:text-gray-200 transition-colors ${uploadDragging ? 'border-blue-500' : 'border-gray-700 hover:border-blue-600'}`}>
@@ -556,7 +645,7 @@ export default function PptPresenter() {
                 ? (uploadProgress.total
                     ? `슬라이드 ${uploadProgress.current}/${uploadProgress.total} 대본 생성 중…`
                     : '슬라이드 분석 중…')
-                : uploadDragging ? '파일을 놓으세요' : 'PPTX 또는 PDF 파일을 선택하거나 드래그하세요'}
+                : uploadDragging ? '파일을 놓으세요' : 'PPTX 또는 PDF 파일을 선택하거나 드래그하세요 (여러 개 선택 시 백그라운드 일괄 처리)'}
             </span>
             {uploading && uploadProgress.total > 0 && (
               <div className="w-48 h-1.5 bg-gray-800 rounded-full overflow-hidden">
@@ -564,8 +653,8 @@ export default function PptPresenter() {
               </div>
             )}
             {uploading && <span className="text-[11px] text-gray-600">슬라이드 수에 비례해 시간이 걸려요 (로컬 AI 순차 생성)</span>}
-            <input type="file" accept=".pptx,.ppt,.pdf" className="hidden" disabled={uploading}
-              onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }} />
+            <input type="file" accept=".pptx,.ppt,.pdf" multiple className="hidden" disabled={uploading}
+              onChange={e => { handleFiles(Array.from(e.target.files || [])); e.target.value = '' }} />
           </label>
           {uploadError && <p className="absolute bottom-8 text-sm text-red-400">{uploadError}</p>}
 
