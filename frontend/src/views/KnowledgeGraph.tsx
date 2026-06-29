@@ -1458,7 +1458,8 @@ function IngestTab() {
 // ── 탭 6: Project (코드 레포 폴더 단위 요약) ──────────
 interface ProjectSummary {
   id: string; name: string; folder_path: string; status: string; error?: string
-  updated_at: string; stats: { total_files: number; code_files: number; md_files: number; total_size: number }
+  updated_at: string; graphified_at?: string | null
+  stats: { total_files: number; code_files: number; md_files: number; total_size: number }
   overview?: string
 }
 interface ProjectDetail extends ProjectSummary {
@@ -1503,6 +1504,8 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
   const [error, setError] = useState('')
   const [gRunning, setGRunning] = useState(false)
   const [gMsg, setGMsg] = useState('')
+  const [gAllRunning, setGAllRunning] = useState(false)
+  const [gAllMsg, setGAllMsg] = useState('')
 
   const loadProjects = useCallback(async () => {
     const d = await apiFetch('/project/list').catch(() => ({ projects: [] }))
@@ -1588,6 +1591,8 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
   }
 
   const runGraphify = async () => {
+    if (!detail) return
+    const pid = detail.id
     setGRunning(true); setGMsg('')
     await fetch(`${API}/graphify/run`, { method: 'POST' }).catch(() => {})
     const poll = setInterval(async () => {
@@ -1598,7 +1603,30 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
         if (data.error) setGMsg(data.error)
         else if (data.html_ready) {
           setGMsg(`완료 — 노드 ${data.nodes} · 엣지 ${data.edges} · 커뮤니티 ${data.communities}`)
+          await fetch(`${API}/project/${pid}/graphify_mark`, { method: 'POST' }).catch(() => {})
+          await loadProjects(); await loadDetail(pid)
           window.open('http://127.0.0.1:8766/graphify/graph.html')
+        }
+      }
+    }, 3000)
+  }
+
+  // 일괄 처리 — Graphify는 전체 wiki를 하나의 그래프로 묶어 처리하는 전역 작업이라
+  // 한 번만 실행하면 모든 프로젝트의 md가 함께 포함됨. 실행 후 전체 프로젝트에 처리 표시.
+  const runGraphifyAll = async () => {
+    setGAllRunning(true); setGAllMsg('')
+    await fetch(`${API}/graphify/run`, { method: 'POST' }).catch(() => {})
+    const poll = setInterval(async () => {
+      const data = await fetch(`${API}/graphify/status`).then(r => r.json()).catch(() => ({}))
+      if (!data.running) {
+        clearInterval(poll)
+        setGAllRunning(false)
+        if (data.error) setGAllMsg(data.error)
+        else if (data.html_ready) {
+          setGAllMsg(`전체 완료 — 노드 ${data.nodes} · 엣지 ${data.edges} · 커뮤니티 ${data.communities}`)
+          await fetch(`${API}/project/graphify_mark_all`, { method: 'POST' }).catch(() => {})
+          await loadProjects()
+          if (detail) await loadDetail(detail.id)
         }
       }
     }, 3000)
@@ -1628,6 +1656,13 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
               className="flex-1 text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">📄 파일 선택</button>
           </div>
           {error && <div className="text-[11px] text-red-500">{error}</div>}
+          {projects.length > 0 && (
+            <button onClick={runGraphifyAll} disabled={gAllRunning}
+              className="text-xs px-3 py-1.5 border border-purple-200 bg-purple-50 text-purple-700 rounded-xl hover:bg-purple-100 disabled:opacity-50">
+              {gAllRunning ? '🕸 전체 처리 중...' : `🕸 전체 일괄 Graphify 처리 (${projects.length}개)`}
+            </button>
+          )}
+          {gAllMsg && <div className="text-[11px] text-gray-500">{gAllMsg}</div>}
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-1.5 min-h-0">
@@ -1644,6 +1679,9 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
                 <span>{p.status === 'error' ? '⚠ 오류' : `파일 ${p.stats?.total_files ?? 0}`}</span>
                 <span>·</span>
                 <span>{p.updated_at}</span>
+                {p.graphified_at && (
+                  <span className="ml-auto px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 text-[9px] font-medium">✓ 처리됨</span>
+                )}
               </div>
             </div>
           ))}
@@ -1678,8 +1716,11 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
                   className="text-[11px] px-2.5 py-1 border border-surface-border rounded-lg hover:bg-gray-50">새로고침</button>
                 <button onClick={runGraphify} disabled={gRunning}
                   className="text-[11px] px-2.5 py-1 border border-surface-border rounded-lg hover:bg-gray-50 disabled:opacity-50">
-                  {gRunning ? 'Graphify 처리 중...' : '🕸 Graphify로 처리'}
+                  {gRunning ? 'Graphify 처리 중...' : detail.graphified_at ? '🕸 다시 처리' : '🕸 Graphify로 처리'}
                 </button>
+                {detail.graphified_at && (
+                  <span className="text-[10px] px-2 py-1 rounded-lg bg-purple-50 text-purple-700 self-center">✓ {detail.graphified_at} 처리됨</span>
+                )}
                 <button onClick={() => removeProject(detail.id)}
                   className="text-[11px] px-2.5 py-1 border border-surface-border rounded-lg hover:bg-red-50 text-red-500">삭제</button>
               </div>

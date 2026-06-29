@@ -169,6 +169,11 @@ def init():
     except sqlite3.OperationalError:
         pass  # 이미 컬럼 존재 (기존 DB)
 
+    try:
+        c.execute("ALTER TABLE project_summaries ADD COLUMN graphified_at DATETIME")
+    except sqlite3.OperationalError:
+        pass  # 이미 컬럼 존재 (기존 DB) — 개별/일괄 Graphify 처리 완료 표시용
+
     conn.commit()
     conn.close()
     print(f"DB 초기화 완료: {DB_PATH}")

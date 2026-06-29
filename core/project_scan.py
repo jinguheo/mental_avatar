@@ -308,7 +308,7 @@ def generate_project_summary(folder_path: str, name: str = "") -> dict:
 def list_projects() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
-        """SELECT id, name, folder_path, status, error, updated_at,
+        """SELECT id, name, folder_path, status, error, updated_at, graphified_at,
                   stats_json, overview FROM project_summaries
            ORDER BY updated_at DESC"""
     ).fetchall()
@@ -340,6 +340,23 @@ def get_project(pid: str) -> dict | None:
     except Exception:
         d["stats"] = {}
     return d
+
+
+def mark_graphified(pid: str | None = None):
+    """Graphify 처리 완료 표시. pid가 없으면 전체 프로젝트에 표시(일괄 처리용).
+
+    Graphify는 graphify-wiki 전체를 하나의 그래프로 묶어 처리하는 전역 작업이라
+    프로젝트별로 별도 실행되지 않음 — 전역 실행이 끝난 뒤 "이 프로젝트의 md도
+    이번 처리에 포함됐다"는 의미로 타임스탬프만 남긴다."""
+    conn = get_conn()
+    if pid:
+        conn.execute(
+            "UPDATE project_summaries SET graphified_at=datetime('now','localtime') WHERE id=?", (pid,)
+        )
+    else:
+        conn.execute("UPDATE project_summaries SET graphified_at=datetime('now','localtime')")
+    conn.commit()
+    conn.close()
 
 
 def delete_project(pid: str):

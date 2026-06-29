@@ -1019,6 +1019,20 @@ def project_delete_route(pid):
     return jsonify({"success": True})
 
 
+@app.route("/project/<pid>/graphify_mark", methods=["POST"])
+def project_graphify_mark_route(pid):
+    """Graphify 처리가 끝난 뒤 프론트가 호출 — 이 프로젝트를 '처리됨'으로 표시"""
+    project_scan.mark_graphified(pid)
+    return jsonify({"success": True})
+
+
+@app.route("/project/graphify_mark_all", methods=["POST"])
+def project_graphify_mark_all_route():
+    """일괄 Graphify 처리가 끝난 뒤 호출 — 전체 프로젝트를 '처리됨'으로 표시"""
+    project_scan.mark_graphified()
+    return jsonify({"success": True})
+
+
 @app.route("/project/<pid>/refresh", methods=["POST"])
 def project_refresh_route(pid):
     proj = project_scan.get_project(pid)
