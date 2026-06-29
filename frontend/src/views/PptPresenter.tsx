@@ -151,6 +151,31 @@ export default function PptPresenter() {
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 })
   const [sessionId, setSessionId] = useState('')
   const [slides, setSlides] = useState<Slide[]>([])
+
+  // ── 저장된 발표(슬라이드+대본) 목록 — api/server.py가 세션 디렉터리에 slides.json으로 영속 저장 ──
+  interface SavedSession { session_id: string; source_name: string; created_at: string; slide_count: number; thumbnail: string | null }
+  const [savedSessions, setSavedSessions] = useState<SavedSession[]>([])
+  const [showSaved, setShowSaved] = useState(false)
+  const refreshSavedSessions = useCallback(() => {
+    fetch(`${API}/presenter/sessions`).then(r => r.json()).then(d => setSavedSessions(d.sessions || [])).catch(() => {})
+  }, [])
+  useEffect(() => { refreshSavedSessions() }, [refreshSavedSessions])
+
+  const loadSavedSession = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`${API}/presenter/session/${id}`)
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setSessionId(id); setSlides(data.slides); setCurrentIndex(0); setShowSaved(false)
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : '불러오기 실패')
+    }
+  }, [])
+
+  const deleteSavedSession = useCallback(async (id: string) => {
+    await fetch(`${API}/presenter/session/${id}`, { method: 'DELETE' }).catch(() => {})
+    refreshSavedSessions()
+  }, [refreshSavedSessions])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [speaking, setSpeaking] = useState(false)
   const [autoPlay, setAutoPlay] = useState(false)
@@ -394,6 +419,7 @@ export default function PptPresenter() {
         if (job.stage === 'done') {
           setSessionId(job.session_id)
           setSlides(job.slides)
+          refreshSavedSessions()
           break
         }
         if (job.stage === 'error') throw new Error(job.error || '처리 실패')
@@ -403,7 +429,7 @@ export default function PptPresenter() {
     } finally {
       setUploading(false)
     }
-  }, [])
+  }, [refreshSavedSessions])
 
   // ── 발표(TTS 순차 재생) ──
   const stopSpeaking = useCallback(() => {
@@ -480,6 +506,16 @@ export default function PptPresenter() {
     setSlides(prev => prev.map(s => s.index === idx + 1 ? { ...s, script: text } : s))
   }, [])
 
+  // 직접 수정한 대본을 저장 파일(slides.json)에 반영 — 텍스트박스 포커스 아웃 시 호출
+  const saveScriptsToServer = useCallback(() => {
+    if (!sessionId) return
+    fetch(`${API}/presenter/session/${sessionId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slides: slidesRef.current }),
+    }).catch(() => {})
+  }, [sessionId])
+
   const [regenerating, setRegenerating] = useState(false)
   const regenerateScript = useCallback(async (idx: number) => {
     const slide = slidesRef.current[idx]
@@ -532,6 +568,34 @@ export default function PptPresenter() {
               onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }} />
           </label>
           {uploadError && <p className="absolute bottom-8 text-sm text-red-400">{uploadError}</p>}
+
+          {/* 저장된 발표(슬라이드+대본) 목록 — 재처리 없이 즉시 불러오기 */}
+          {savedSessions.length > 0 && (
+            <div className="absolute top-4 left-4 z-20">
+              <button
+                onClick={() => setShowSaved(v => !v)}
+                className="text-xs px-2.5 py-1 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700 text-gray-300"
+              >
+                📁 저장된 발표 {showSaved ? '▲' : '▼'} {savedSessions.length}개
+              </button>
+              {showSaved && (
+                <div className="mt-1 bg-black/85 backdrop-blur border border-gray-700 rounded-xl overflow-hidden min-w-[260px] max-h-72 overflow-y-auto">
+                  {savedSessions.map(s => (
+                    <div key={s.session_id} className="flex items-center gap-2 px-3 py-2 hover:bg-gray-800/80 group border-b border-gray-800/60 last:border-0">
+                      <button onClick={() => loadSavedSession(s.session_id)} className="flex-1 text-left">
+                        <div className="text-xs text-gray-200 truncate">{s.source_name || s.session_id}</div>
+                        <div className="text-[10px] text-gray-500">{s.slide_count}슬라이드 · {s.created_at.replace('T', ' ').slice(0, 16)}</div>
+                      </button>
+                      <button
+                        onClick={() => deleteSavedSession(s.session_id)}
+                        className="text-[10px] text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity px-1"
+                      >✕</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         /* 슬라이드 영역 */
@@ -551,6 +615,7 @@ export default function PptPresenter() {
             <textarea
               value={current?.script || ''}
               onChange={e => editScript(currentIndex, e.target.value)}
+              onBlur={saveScriptsToServer}
               rows={3}
               className="w-full bg-gray-900 text-gray-200 text-sm rounded-xl p-3 pr-20 outline-none border border-gray-800 focus:border-blue-700 resize-none"
               placeholder="발표 대본 (수정 가능)"

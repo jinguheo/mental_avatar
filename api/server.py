@@ -1997,11 +1997,26 @@ tts.tts_to_file(
 
 
 # ── PPT 자동 발표 ────────────────────────────────────────────
+import json as _json
+import shutil as _shutil
+import datetime as _datetime
+
 PRESENTER_TMP = Path(__file__).parent.parent / "tmp" / "presenter"
+PRESENTER_META = "slides.json"  # 세션 디렉터리에 슬라이드+대본을 영속 저장하는 파일명
 # 비동기 처리 잡 저장소 {job_id: {stage, current, total, error, slides, session_id}}
 # 슬라이드가 많으면 슬라이드당 LLM 호출이 순차로 걸려 수십 초~분 단위로 걸릴 수 있어
 # 프론트가 진행률(current/total)을 폴링할 수 있게 백그라운드 스레드로 돌린다.
 _presenter_jobs: dict = {}
+
+
+def _save_presenter_meta(session_dir: Path, source_name: str, slides: list) -> None:
+    """슬라이드+대본을 세션 디렉터리에 파일로 저장 — 서버 재시작/잡 메모리 소실에도 남도록"""
+    meta = {
+        "source_name": source_name,
+        "created_at": _datetime.datetime.now().isoformat(timespec="seconds"),
+        "slides": slides,
+    }
+    (session_dir / PRESENTER_META).write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _run_presenter_job(job_id: str, src_path: Path, session_dir: Path) -> None:
@@ -2016,6 +2031,7 @@ def _run_presenter_job(job_id: str, src_path: Path, session_dir: Path) -> None:
         slides = ppt_present.process_presentation(str(src_path), str(session_dir), progress_cb=_progress)
         job["slides"] = slides
         job["stage"] = "done"
+        _save_presenter_meta(session_dir, src_path.name, slides)
     except Exception as e:
         job["stage"] = "error"
         job["error"] = f"발표 자료 처리 실패: {e}"
@@ -2073,9 +2089,78 @@ def presenter_regenerate(session_id: str, slide_index: int):
     try:
         raw_slides, images = ppt_present.extract_and_export(str(src_candidates[0]), str(session_dir))
         script = ppt_present.regenerate_slide(slide_index, raw_slides, images, str(session_dir), prev_script)
+        # 저장 파일이 있으면(완료된 세션) 재생성한 대본으로 함께 갱신
+        meta_path = session_dir / PRESENTER_META
+        if meta_path.exists():
+            meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+            for s in meta["slides"]:
+                if s["index"] == slide_index:
+                    s["script"] = script
+                    break
+            meta_path.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         return jsonify({"script": script})
     except Exception as e:
         return jsonify({"error": f"대본 재생성 실패: {e}"}), 500
+
+
+@app.route("/presenter/sessions", methods=["GET"])
+def presenter_sessions():
+    """파일로 저장된 발표(슬라이드+대본) 세션 목록 — 최신순"""
+    if not PRESENTER_TMP.exists():
+        return jsonify({"sessions": []})
+    items = []
+    for d in PRESENTER_TMP.iterdir():
+        meta_path = d / PRESENTER_META
+        if not d.is_dir() or not meta_path.exists():
+            continue
+        try:
+            meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+            items.append({
+                "session_id": d.name,
+                "source_name": meta.get("source_name", ""),
+                "created_at": meta.get("created_at", ""),
+                "slide_count": len(meta.get("slides", [])),
+                "thumbnail": (meta["slides"][0]["image"] if meta.get("slides") and meta["slides"][0].get("image") else None),
+            })
+        except Exception:
+            continue
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    return jsonify({"sessions": items})
+
+
+@app.route("/presenter/session/<session_id>", methods=["GET"])
+def presenter_session_get(session_id: str):
+    """저장된 발표 하나를 그대로 불러오기(재처리 없이 슬라이드+대본 즉시 반환)"""
+    meta_path = PRESENTER_TMP / session_id / PRESENTER_META
+    if not meta_path.exists():
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_json.loads(meta_path.read_text(encoding="utf-8")))
+
+
+@app.route("/presenter/session/<session_id>", methods=["PUT"])
+def presenter_session_update(session_id: str):
+    """슬라이드 대본을 직접 수정한 내용을 파일에 저장(사용자가 텍스트박스에서 고친 경우)"""
+    session_dir = PRESENTER_TMP / session_id
+    meta_path = session_dir / PRESENTER_META
+    if not meta_path.exists():
+        return jsonify({"error": "not found"}), 404
+    body = request.get_json(force=True) or {}
+    slides = body.get("slides")
+    if not isinstance(slides, list):
+        return jsonify({"error": "slides가 필요합니다"}), 400
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["slides"] = slides
+    meta_path.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
+
+@app.route("/presenter/session/<session_id>", methods=["DELETE"])
+def presenter_session_delete(session_id: str):
+    session_dir = PRESENTER_TMP / session_id
+    if not session_dir.exists():
+        return jsonify({"error": "not found"}), 404
+    _shutil.rmtree(session_dir, ignore_errors=True)
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
