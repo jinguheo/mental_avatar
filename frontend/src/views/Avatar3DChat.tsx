@@ -19,6 +19,23 @@ function localTimestamp(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+// 답변 텍스트 감정 분류 → 표정 매핑 (RealisticAvatar.tsx/PptPresenter.tsx와 동일한 규칙)
+// 이 아바타는 모프타겟이 없는 procedural geometry라 눈썹 높이/입 너비를 직접 보간해 표현한다.
+type Emotion = 'neutral' | 'happy' | 'sorry' | 'surprised'
+function classifyEmotion(text: string): Emotion {
+  if (/죄송|미안|사과|아쉽|어렵|힘들/.test(text)) return 'sorry'
+  if (/축하|좋아요|좋습니다|감사|기쁘|행복|반갑|웃|즐거|최고|!{1,}/.test(text)) return 'happy'
+  if (/\?|궁금|놀라|정말요|진짜요|신기/.test(text)) return 'surprised'
+  return 'neutral'
+}
+// 눈썹 높이 오프셋 + 입 너비 배율(>1 옆으로 늘어남=미소, <1 오므림) + 눈 확대(놀람)
+const EMOTION_EXPR: Record<Emotion, { browLift: number; mouthWidth: number; eyeScale: number }> = {
+  neutral:   { browLift: 0,     mouthWidth: 1,    eyeScale: 1 },
+  happy:     { browLift: 0.02,  mouthWidth: 1.25, eyeScale: 1 },
+  sorry:     { browLift: -0.03, mouthWidth: 0.85, eyeScale: 1 },
+  surprised: { browLift: 0.045, mouthWidth: 0.95, eyeScale: 1.18 },
+}
+
 const GREETING = '안녕하세요! 반갑습니다. 무엇이든 도와드리겠습니다.'
 const SYSTEM   = `당신은 사용자를 맞이하는 AI 리셉션 아바타입니다.
 따뜻하고 전문적으로 한국어로 응대하세요.
@@ -121,6 +138,7 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
   // 오디오
   const audioCtxRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
+  const emotionRef = useRef<Emotion>('neutral')
 
   // 웹캠 얼굴 추적 — FaceTrackingPanel이 매 프레임 전달하는 표정(블렌드셰이프) 점수.
   // 값이 들어오면(웹캠 ON) 3D 아바타 표정을 사용자 얼굴에 맞춰 구동한다.
@@ -176,6 +194,7 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
   // ── TTS ────────────────────────────────────────────────
   const playTTS = useCallback(async (text: string) => {
     setSpeaking(true); speakingRef.current = true
+    emotionRef.current = classifyEmotion(text)
     const voice = selectedVoice
     // done은 한 번만 실행 + failsafe 타이머 해제. TTS가 어떤 경로로 실패하든 speaking 플래그가
     // 영구히 박혀 마이크가 막히는 일을 막는다.
@@ -186,6 +205,7 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
       finished = true
       clearTimeout(failsafe)
       setSpeaking(false); speakingRef.current = false
+      emotionRef.current = 'neutral'
     }
 
     // 시스템 목소리 선택 시 — 브라우저 내장 TTS로 직접 재생 (XTTS 호출 생략)
@@ -640,6 +660,9 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
           }
         }
 
+        // 답변 감정에 따른 표정 목표값(눈썹 높이/입 너비/눈 크기) — 말하는 중이든 아니든 항상 향해 보간
+        const expr = EMOTION_EXPR[emotionRef.current]
+
         if (analyserRef.current && jawRef.current) {
           const buf = new Uint8Array(analyserRef.current.frequencyBinCount)
           analyserRef.current.getByteFrequencyData(buf)
@@ -649,21 +672,21 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
           jawRef.current.position.y += (-0.2 - open - jawRef.current.position.y) * 0.35
           jawRef.current.rotation.x = -open * 1.2
 
-          // 입술이 턱을 따라 벌어지는 입모양
+          // 입술이 턱을 따라 벌어지는 입모양 (가로 너비는 감정 표현 배율 적용)
           if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - open * 0.35 - lipUpRef.current.position.y) * 0.4
           if (lipDnRef.current) {
             lipDnRef.current.position.y += (-0.23 - open - lipDnRef.current.position.y) * 0.4
-            const s = 1 + open * 1.6
-            lipDnRef.current.scale.set(s, 1, 1)
+            const s = (1 + open * 1.6) * expr.mouthWidth
+            lipDnRef.current.scale.x += (s - lipDnRef.current.scale.x) * 0.3
           }
 
-          // 말하는 동안 살짝 끄덕이는 머리 움직임 + 눈썹 들썩임
+          // 말하는 동안 살짝 끄덕이는 머리 움직임 + 눈썹 들썩임(감정 기본 높이 위에 더해짐)
           if (groupRef.current) {
             groupRef.current.rotation.x += Math.sin(t * 5) * open * 0.5
           }
           const browLift = Math.sin(t * 3.3) * open * 0.4
-          if (browLRef.current) browLRef.current.position.y += (0.24 + browLift - browLRef.current.position.y) * 0.3
-          if (browRRef.current) browRRef.current.position.y += (0.24 + browLift - browRRef.current.position.y) * 0.3
+          if (browLRef.current) browLRef.current.position.y += (0.24 + expr.browLift + browLift - browLRef.current.position.y) * 0.3
+          if (browRRef.current) browRRef.current.position.y += (0.24 + expr.browLift + browLift - browRRef.current.position.y) * 0.3
         } else {
           if (jawRef.current) {
             jawRef.current.position.y += (-0.2 - jawRef.current.position.y) * 0.12
@@ -672,11 +695,15 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
           if (lipUpRef.current) lipUpRef.current.position.y += (-0.19 - lipUpRef.current.position.y) * 0.2
           if (lipDnRef.current) {
             lipDnRef.current.position.y += (-0.23 - lipDnRef.current.position.y) * 0.2
-            lipDnRef.current.scale.x += (1 - lipDnRef.current.scale.x) * 0.2
+            lipDnRef.current.scale.x += (expr.mouthWidth - lipDnRef.current.scale.x) * 0.2
           }
-          if (browLRef.current) browLRef.current.position.y += (0.24 - browLRef.current.position.y) * 0.15
-          if (browRRef.current) browRRef.current.position.y += (0.24 - browRRef.current.position.y) * 0.15
+          if (browLRef.current) browLRef.current.position.y += (0.24 + expr.browLift - browLRef.current.position.y) * 0.15
+          if (browRRef.current) browRRef.current.position.y += (0.24 + expr.browLift - browRRef.current.position.y) * 0.15
         }
+
+        // 놀람 표정 — 눈을 살짝 크게(스쿼시 반대 방향)
+        if (eyeGpLRef.current) eyeGpLRef.current.scale.x += (expr.eyeScale - eyeGpLRef.current.scale.x) * 0.15
+        if (eyeGpRRef.current) eyeGpRRef.current.scale.x += (expr.eyeScale - eyeGpRRef.current.scale.x) * 0.15
       }
 
       renderer.render(scene, camera)
