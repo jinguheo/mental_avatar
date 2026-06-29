@@ -191,11 +191,8 @@ def generate_script(slide: dict, total: int, style_block: str, prev_script: str,
     return script.strip().strip('"')
 
 
-def process_presentation(file_path: str, out_dir: str, progress_cb=None) -> list[dict]:
-    """PPTX/PDF 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환.
-
-    progress_cb(current, total)가 주어지면 슬라이드 추출 직후(current=0)와
-    슬라이드별 대본 생성 완료마다 호출 — 오래 걸리는 LLM 순차 호출 진행률 표시용."""
+def extract_and_export(file_path: str, out_dir: str) -> tuple[list[dict], list[str]]:
+    """슬라이드 텍스트 추출 + 이미지 내보내기만 수행(대본 생성 전). regenerate_slide에서 재사용."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".pdf":
         slides = extract_slides_pdf(file_path)
@@ -205,6 +202,15 @@ def process_presentation(file_path: str, out_dir: str, progress_cb=None) -> list
         images = export_slide_images(file_path, out_dir)
     else:
         raise ValueError(f"지원하지 않는 파일 형식: {ext}")
+    return slides, images
+
+
+def process_presentation(file_path: str, out_dir: str, progress_cb=None) -> list[dict]:
+    """PPTX/PDF 파일 하나를 받아 슬라이드별 {index, image, script} 리스트로 변환.
+
+    progress_cb(current, total)가 주어지면 슬라이드 추출 직후(current=0)와
+    슬라이드별 대본 생성 완료마다 호출 — 오래 걸리는 LLM 순차 호출 진행률 표시용."""
+    slides, images = extract_and_export(file_path, out_dir)
     style_block = _style_block()
     total = len(slides)
     if progress_cb:
@@ -226,3 +232,14 @@ def process_presentation(file_path: str, out_dir: str, progress_cb=None) -> list
         if progress_cb:
             progress_cb(slide["index"], total)
     return result
+
+
+def regenerate_slide(slide_index: int, raw_slides: list[dict], images: list[str], out_dir: str, prev_script: str) -> str:
+    """저장된 원본 슬라이드 텍스트/이미지를 그대로 사용해 해당 슬라이드의 대본만 새로 생성."""
+    slide = next((s for s in raw_slides if s["index"] == slide_index), None)
+    if slide is None:
+        raise ValueError(f"슬라이드 {slide_index}를 찾을 수 없습니다")
+    image_name = images[slide_index - 1] if slide_index - 1 < len(images) else None
+    image_path = os.path.join(out_dir, image_name) if image_name else None
+    style_block = _style_block()
+    return generate_script(slide, len(raw_slides), style_block, prev_script, image_path)

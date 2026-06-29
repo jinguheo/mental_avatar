@@ -2062,6 +2062,22 @@ def presenter_slide_image(session_id: str, filename: str):
     return send_file(str(path), mimetype="image/png")
 
 
+@app.route("/presenter/regenerate/<session_id>/<int:slide_index>", methods=["POST"])
+def presenter_regenerate(session_id: str, slide_index: int):
+    """해당 슬라이드 하나만 대본을 다시 생성 (원본 텍스트/이미지는 그대로, LLM 출력만 새로)"""
+    session_dir = PRESENTER_TMP / session_id
+    src_candidates = list(session_dir.glob("source.*"))
+    if not session_dir.exists() or not src_candidates:
+        return jsonify({"error": "세션을 찾을 수 없습니다"}), 404
+    prev_script = request.form.get("prev_script", "")
+    try:
+        raw_slides, images = ppt_present.extract_and_export(str(src_candidates[0]), str(session_dir))
+        script = ppt_present.regenerate_slide(slide_index, raw_slides, images, str(session_dir), prev_script)
+        return jsonify({"script": script})
+    except Exception as e:
+        return jsonify({"error": f"대본 재생성 실패: {e}"}), 500
+
+
 if __name__ == "__main__":
     init_db()
     print("=" * 50)

@@ -480,6 +480,25 @@ export default function PptPresenter() {
     setSlides(prev => prev.map(s => s.index === idx + 1 ? { ...s, script: text } : s))
   }, [])
 
+  const [regenerating, setRegenerating] = useState(false)
+  const regenerateScript = useCallback(async (idx: number) => {
+    const slide = slidesRef.current[idx]
+    if (!slide || !sessionId) return
+    setRegenerating(true)
+    try {
+      const prevScript = idx > 0 ? slidesRef.current[idx - 1].script : ''
+      const form = new FormData(); form.append('prev_script', prevScript)
+      const res = await fetch(`${API}/presenter/regenerate/${sessionId}/${slide.index}`, { method: 'POST', body: form })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      editScript(idx, data.script)
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : '대본 재생성 실패')
+    } finally {
+      setRegenerating(false)
+    }
+  }, [sessionId, editScript])
+
   const current = slides[currentIndex]
 
   return (
@@ -528,13 +547,23 @@ export default function PptPresenter() {
               <span className="text-gray-600 text-sm">이미지 없음</span>
             )}
           </div>
-          <textarea
-            value={current?.script || ''}
-            onChange={e => editScript(currentIndex, e.target.value)}
-            rows={3}
-            className="bg-gray-900 text-gray-200 text-sm rounded-xl p-3 outline-none border border-gray-800 focus:border-blue-700 resize-none"
-            placeholder="발표 대본 (수정 가능)"
-          />
+          <div className="relative">
+            <textarea
+              value={current?.script || ''}
+              onChange={e => editScript(currentIndex, e.target.value)}
+              rows={3}
+              className="w-full bg-gray-900 text-gray-200 text-sm rounded-xl p-3 pr-20 outline-none border border-gray-800 focus:border-blue-700 resize-none"
+              placeholder="발표 대본 (수정 가능)"
+            />
+            <button
+              onClick={() => regenerateScript(currentIndex)}
+              disabled={regenerating || !current}
+              className="absolute top-2 right-2 text-xs px-2 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300"
+              title="이 슬라이드 대본을 다시 생성"
+            >
+              {regenerating ? '⏳ 생성 중…' : '🔄 다시 생성'}
+            </button>
+          </div>
           <div className="flex items-center justify-between">
             <button onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0}
               className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
