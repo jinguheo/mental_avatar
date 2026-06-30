@@ -598,8 +598,10 @@ def preference_section_text() -> str:
     return "\n".join(lines)
 
 
-MBTI_AXIS_PAIRS = [("E", "I"), ("S", "N"), ("T", "F"), ("J", "P")]
-MBTI_AXIS_LABELS = ["E-I", "S-N", "T-F", "J-P"]
+# 첫 글자(pole_a)=바깥쪽(100), 둘째 글자(pole_b)=안쪽(0)
+# 바깥쪽: E·N·T·J / 안쪽: I·S·F·P
+MBTI_AXIS_PAIRS = [("E", "I"), ("N", "S"), ("T", "F"), ("J", "P")]
+MBTI_AXIS_LABELS = ["E-I", "N-S", "T-F", "J-P"]
 
 
 def _mbti_axis_scores(mbti: str) -> list[int | None]:
