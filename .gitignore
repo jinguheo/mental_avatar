@@ -40,9 +40,20 @@ graphify-out/
 
 # Claude session cache
 .claude_session_key
+.claude/
 models/
 .pipcache/
 tmp/
 data/
 avatar-studio-verify.png
 *.png
+
+# 라이브 데이터 DB (db/knowledge.db와 같은 성격 — 개인 데이터, git에 올리지 않음)
+db/avatar.db
+
+# graphify/요약 생성 산출물
+graphify-wiki/
+project-summaries/
+
+# 디버그용 임시 요청 덤프
+req.json
