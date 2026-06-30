@@ -400,11 +400,15 @@ MBTI_CRITERIA_TEXT = "\n".join(
 )
 
 PREFERENCE_PROMPT = """당신은 사용자의 성격과 선호도를 분석하는 전문가입니다.
-아래는 한 사용자가 자신의 디지털 아바타와 나눈 최근 대화(사용자가 직접 작성한 메시지)와,
-그 사용자의 지식 그래프에서 뽑은 최근 관심 토픽/트렌드입니다.
+아래는 한 사용자에 대해 수집된 여러 자료입니다 — 디지털 아바타/AI와 나눈 대화(사용자가 직접 작성한 메시지),
+사용자가 직접 쓴 노트, 그리고 지식 그래프에서 뽑은 관심 토픽/트렌드. 이 모두를 종합해서 판단하세요.
+(대화·노트의 실제 어휘와 글쓰기 방식이 성격을 가장 직접적으로 드러냅니다. 토픽/트렌드는 관심사 신호로 참고하세요.)
 
-## 최근 대화
+## 최근 대화 (아바타/AI 채팅에서 사용자가 직접 쓴 메시지)
 {messages}
+
+## 사용자가 직접 쓴 노트
+{notes}
 
 ## 최근 관심 토픽 (중요도 순)
 {interests}
@@ -415,7 +419,7 @@ PREFERENCE_PROMPT = """당신은 사용자의 성격과 선호도를 분석하�
 ## MBTI 4축 판별 기준 (이 기준에 근거해서만 판단할 것 — 임의로 추측하지 말 것)
 {mbti_criteria}
 
-위 판별 기준을 각 축마다 사용자의 대화 내용과 대조해서, 어느 쪽에 더 가까운지와 그 근거(대화에서 실제로
+위 판별 기준을 각 축마다 사용자의 대화·노트 내용과 대조해서, 어느 쪽에 더 가까운지와 그 근거(대화/노트에서 실제로
 드러난 표현이나 행동 패턴)를 구체적으로 쓰세요. 근거가 부족하면 confidence를 낮게(30 이하) 주세요.
 그 다음 성격, 선호도/가치관을 설명하고, Big Five 성향 5가지({trait_labels})를 각각 0~100점
 (낮을수록 그 성향이 약함, 50은 중간)으로도 추정하세요.
@@ -430,12 +434,20 @@ PREFERENCE_PROMPT = """당신은 사용자의 성격과 선호도를 분석하�
 
 
 def analyze_preference(limit: int = 60) -> dict:
-    """최근 대화 + 지식그래프 토픽을 분석해 MBTI/성격/선호도를 추정 — 자동측정(주기적 실행 대상)"""
+    """노트 + 모든 채널 대화 + 지식그래프 토픽을 종합해 MBTI/성격/선호도를 추정 — 자동측정(주기적 실행 대상).
+    대화는 view 구분 없이(멘탈아바타·AI 등 전부), 사용자가 직접 쓴 노트 원문까지 함께 분석한다."""
     convos = recent_conversations(limit=limit, role="user")
-    if len(convos) < 5:
-        return {"ready": False, "count": len(convos), "message": "분석하기엔 대화가 너무 적습니다 (5턴 이상 필요)"}
+    notes = graph.list_nodes(source_type="note", limit=30)
+    # 노트가 충분하면 대화가 적어도 분석 가능 (대화 5턴 OR 노트 3개 이상)
+    if len(convos) < 5 and len(notes) < 3:
+        return {"ready": False, "count": len(convos),
+                "message": "분석하기엔 자료가 너무 적습니다 (대화 5턴 또는 노트 3개 이상 필요)"}
 
-    messages = "\n".join(f"- {c['content'][:300]}" for c in reversed(convos))
+    messages = "\n".join(f"- {c['content'][:300]}" for c in reversed(convos)) or "(대화 없음)"
+    notes_text = "\n".join(
+        f"- {(n.get('title') or '').strip()}: {(n.get('content') or '').strip()[:400]}"
+        for n in notes if (n.get('content') or '').strip()
+    ) or "(노트 없음)"
     interests = pattern.core_interests(8)
     interests_text = "\n".join(
         f"- {i['topic']} (중요도 {i['importance']:.1f}, 문서 {i['doc_count']}개)" for i in interests
@@ -447,8 +459,8 @@ def analyze_preference(limit: int = 60) -> dict:
 
     trait_labels = ", ".join(f"{k}({TRAIT_LABELS[k]})" for k in TRAIT_KEYS)
     prompt = PREFERENCE_PROMPT.format(
-        messages=messages, interests=interests_text, trends=trends_text, trait_labels=trait_labels,
-        mbti_criteria=MBTI_CRITERIA_TEXT,
+        messages=messages, notes=notes_text, interests=interests_text, trends=trends_text,
+        trait_labels=trait_labels, mbti_criteria=MBTI_CRITERIA_TEXT,
     )
 
     raw = pattern._llm_call(prompt)
@@ -598,6 +610,57 @@ def preference_section_text() -> str:
     return "\n".join(lines)
 
 
+# Big Five 점수 → 구체적 "말하기 방식" 행동지침. LIWC 등 성격-언어 연구의 표지를 규칙화한 것.
+# 점수가 높으면(>=65) high, 낮으면(<=35) low 지침을 주고, 중간대(36~64)는 노이즈 방지로 생략.
+BIGFIVE_BEHAVIOR = {
+    "openness": {
+        "high": "추상적 개념·비유·새로운 아이디어를 적극 제시하고 다양한 관점을 탐색하며 답한다.",
+        "low":  "검증된 사실과 구체적·실용적인 답을 선호하고, 군더더기 없이 핵심만 말한다.",
+    },
+    "conscientiousness": {
+        "high": "체계적으로 단계를 나눠 계획적으로 답하고, 정확성과 완결성을 중시한다.",
+        "low":  "큰 틀 위주로 유연하게 답하고, 세부 절차에 얽매이지 않는다.",
+    },
+    "extraversion": {
+        "high": "먼저 말을 꺼내고 활기차고 긍정적인 표현을 자주 쓰며 적극적으로 제안한다.",
+        "low":  "차분하고 간결하게, 꼭 필요한 말만 신중하게 한다.",
+    },
+    "agreeableness": {
+        "high": "따뜻하고 공감적인 표현을 쓰고, 상대 입장을 배려하며 부드럽게 말한다.",
+        "low":  "솔직하고 직설적으로, 사실과 논리 위주로 말한다.",
+    },
+    "stability": {
+        "high": "침착하고 안정적인 어조를 유지하고, 불안·부정적 표현을 피한다.",
+        "low":  "감정을 솔직하게 드러내고, 우려나 신중함을 자연스럽게 표현한다.",
+    },
+}
+
+
+def bigfive_behavior_guidance() -> str:
+    """프로파일의 Big Five 점수(직접입력 우선, 없으면 자동측정)를 말하기 방식 지침으로 변환.
+    숫자만으로는 작은 모델이 행동으로 못 옮기므로, 점수→구체 행동지침 문장을 프롬프트에 직접 넣는다."""
+    profile = get_profile()
+
+    def pv(key: str) -> str:
+        return profile.get(key, {}).get("value", "") if profile else ""
+
+    lines = []
+    for t in TRAIT_KEYS:
+        raw = pv(f"trait_{t}_manual") or pv(f"trait_{t}_auto")
+        if not raw:
+            continue
+        try:
+            score = int(round(float(raw)))
+        except (TypeError, ValueError):
+            continue
+        band = "high" if score >= 65 else "low" if score <= 35 else ""
+        if not band:
+            continue
+        lines.append(f"- {TRAIT_LABELS[t]}({score}점): {BIGFIVE_BEHAVIOR[t][band]}")
+
+    return "\n".join(lines)
+
+
 # 첫 글자(pole_a)=바깥쪽(100), 둘째 글자(pole_b)=안쪽(0)
 # 바깥쪽: E·N·T·J / 안쪽: I·S·F·P
 MBTI_AXIS_PAIRS = [("E", "I"), ("N", "S"), ("T", "F"), ("J", "P")]
@@ -714,13 +777,16 @@ AVATAR_SYSTEM = """당신은 {name}의 디지털 아바타입니다.
 ## MBTI/성격/선호도 (직접입력 우선, 자동측정은 참고용)
 {preference_section}
 
+## 내 성격에 따른 말하기 방식 (아래 지침대로 어조·표현을 맞추세요)
+{behavior_section}
+
 규칙:
 - 항상 1인칭("나는", "내가", "제 생각에는")으로 답하세요
 - 모르는 것은 "내 지식 범위 밖이에요" 라고 솔직하게 말하세요
 - 내 전문 분야({expertise})에 대해서는 깊이 있게 답하세요
 - 짧고 명확하게, 내 스타일({work_style})로 답하세요
 - 위에 설정된 말투와 성격을 일관되게 유지하세요
-- 답변/추천을 할 때는 위 MBTI/성격/선호도를 반영해서 그 사람에게 맞는 방식으로 답하세요"""
+- 답변/추천을 할 때는 위 MBTI/성격/선호도와 "말하기 방식" 지침을 반영해서 그 사람에게 맞는 방식으로 답하세요"""
 
 
 def build_avatar_context(query: str = "") -> dict:
@@ -769,6 +835,7 @@ def build_avatar_context(query: str = "") -> dict:
     ]) or "(프로파일 미설정)"
 
     preference_section = preference_section_text() or "- (직접입력/자동측정 모두 없음)"
+    behavior_section = bigfive_behavior_guidance() or "- (Big Five 미설정 — 기본 어조 사용)"
 
     interests_section = "\n".join([
         f"- {i['topic']} (중요도 {i['importance']:.1f}, 문서 {i['doc_count']}개)"
@@ -788,6 +855,7 @@ def build_avatar_context(query: str = "") -> dict:
         work_style=work_style,
         style_section=style_section,
         preference_section=preference_section,
+        behavior_section=behavior_section,
     )
 
     # 관련 컨텍스트가 있으면 추가
