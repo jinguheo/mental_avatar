@@ -52,7 +52,8 @@ avatar-studio-verify.png
 db/avatar.db
 
 # graphify/요약 생성 산출물
-graphify-wiki/
+# 주의: graphify-wiki/는 Graphify의 스캔 대상 입력 디렉토리라 여기 넣으면 안 됨 —
+# graphify가 .gitignore 규칙을 그대로 따라서 스캔 자체가 0건으로 죽는다 (2026-07-02 발견)
 project-summaries/
 
 # 디버그용 임시 요청 덤프
