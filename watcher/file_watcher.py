@@ -1,5 +1,5 @@
 """docs/ 폴더 감시 — 새 파일 자동 ingest + DB/벡터/얼굴·목소리 주기 백업"""
-import sys, os, time, shutil, requests
+import sys, os, time, shutil, json, requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from watchdog.observers import Observer
@@ -9,6 +9,18 @@ ROOT_DIR   = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DOCS_DIR   = os.path.join(ROOT_DIR, "docs")
 API_BASE   = "http://127.0.0.1:8766"
 EXTENSIONS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".txt", ".md"}
+
+# 서버(8766)가 워처 생존 여부를 파일 mtime만으로 판단할 수 있도록 매 루프마다 갱신
+HEARTBEAT_PATH = os.path.join(ROOT_DIR, "tmp", "watcher_heartbeat.json")
+
+
+def _write_heartbeat():
+    try:
+        os.makedirs(os.path.dirname(HEARTBEAT_PATH), exist_ok=True)
+        with open(HEARTBEAT_PATH, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "pid": os.getpid()}, f)
+    except Exception:
+        pass
 
 # ── 백업 설정: db/knowledge.db + db/vectors/ + data/ 를 통째로 복사 ──
 BACKUP_DIR      = os.path.join(ROOT_DIR, "backups")
@@ -126,6 +138,7 @@ def start():
     observer.schedule(DocHandler(), DOCS_DIR, recursive=True)
     observer.start()
     print(f"[watcher] 감시 시작: {DOCS_DIR}")
+    _write_heartbeat()
     _run_backup()  # 시작 시 1회 즉시 백업(서버 재시작 직후에도 최신 상태 보존)
     tick = 0
     backup_tick = 0
@@ -133,6 +146,7 @@ def start():
     try:
         while True:
             time.sleep(2)
+            _write_heartbeat()
             tick += 2
             backup_tick += 2
             pref_tick += 2

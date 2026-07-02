@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import hashlib
-import uuid, subprocess
+import uuid, subprocess, time, json
 from pathlib import Path
 
 from db.init_db import init as init_db
@@ -1133,6 +1133,28 @@ def queue_reset_errors():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "port": 8766})
+
+
+# 워처(watcher/file_watcher.py)가 2초마다 갱신하는 하트비트 파일 — 90초(45회분) 이상
+# 안 갱신되면 죽은 것으로 판단(1~2회 지연은 큐/백업 처리 중일 수 있어 여유를 둠)
+WATCHER_HEARTBEAT = Path(__file__).parent.parent / "tmp" / "watcher_heartbeat.json"
+WATCHER_STALE_SEC = 90
+
+
+@app.route("/watcher/health", methods=["GET"])
+def watcher_health():
+    if not WATCHER_HEARTBEAT.exists():
+        return jsonify({"alive": False, "reason": "하트비트 파일 없음(워처 미실행 또는 구버전)"})
+    try:
+        info = json.loads(WATCHER_HEARTBEAT.read_text(encoding="utf-8"))
+        age = time.time() - info.get("ts", 0)
+    except Exception as e:
+        return jsonify({"alive": False, "reason": f"하트비트 읽기 실패: {e}"})
+    return jsonify({
+        "alive": age < WATCHER_STALE_SEC,
+        "seconds_ago": round(age, 1),
+        "pid": info.get("pid"),
+    })
 
 
 # ── 백업 / 복원 ──────────────────────────────────────────────
