@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
 const API = 'http://127.0.0.1:8766'
 const IDB_NAME = 'mental-avatar-glb'
@@ -113,6 +114,7 @@ export default function PptPresenter() {
   const clockRef = useRef(new THREE.Clock())
   const animFrameRef = useRef<number>(0)
   const objectUrlRef = useRef<string | null>(null)
+  const envTextureRef = useRef<THREE.Texture | null>(null)
   const morphMapRef = useRef<Record<string, MorphRef[]>>({})
   const morphGroupsRef = useRef<Record<string, string[]>>({})
   const morphValuesRef = useRef<Record<string, number>>({})
@@ -203,12 +205,30 @@ export default function PptPresenter() {
     const renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setSize(w, h); renderer.setPixelRatio(window.devicePixelRatio)
     renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.1
     container.appendChild(renderer.domElement); rendererRef.current = renderer
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x0d1b2a)
-    scene.add(new THREE.AmbientLight(0xffffff, 1.2))
-    const dir = new THREE.DirectionalLight(0xffffff, 2); dir.position.set(1, 3, 2); scene.add(dir)
+
+    // Avaturn GLB는 glTF PBR 재질이라 환경 반사가 없으면 피부·눈·머리카락이 플라스틱처럼 밋밋해 보임 —
+    // RealisticAvatar.tsx와 동일하게 절차적 환경(RoomEnvironment)으로 IBL 반사를 채움
+    if (envTextureRef.current) envTextureRef.current.dispose()
+    const pmrem = new THREE.PMREMGenerator(renderer)
+    const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    pmrem.dispose()
+    scene.environment = envTexture
+    envTextureRef.current = envTexture
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.35))
+    const dir = new THREE.DirectionalLight(0xfff4e8, 1.8); dir.position.set(1, 3, 2); scene.add(dir)
+    const fillLight = new THREE.DirectionalLight(0x8fa8d9, 0.5)
+    fillLight.position.set(-2, 1, -1)
+    scene.add(fillLight)
+    const rimLight = new THREE.DirectionalLight(0xffffff, 0.7)
+    rimLight.position.set(-1, 2, -3)
+    scene.add(rimLight)
 
     const preset = VIEW_PRESETS[viewModeRef.current]
     const camera = new THREE.PerspectiveCamera(preset.fov, w / h, 0.1, 100)
@@ -355,6 +375,7 @@ export default function PptPresenter() {
     return () => {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
       rendererRef.current?.dispose()
+      envTextureRef.current?.dispose()
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

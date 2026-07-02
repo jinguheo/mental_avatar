@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, useCallback, type Dispatch, type SetStateA
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
 import { streamChatOllama } from '@/services/ollama'
 import type { Settings } from '@/types'
@@ -133,6 +134,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const clockRef = useRef(new THREE.Clock())
   const animFrameRef = useRef<number>(0)
   const objectUrlRef = useRef<string | null>(null)
+  const envTextureRef = useRef<THREE.Texture | null>(null)
   const morphMapRef = useRef<Record<string, MorphRef[]>>({})
   const morphGroupsRef = useRef<Record<string, string[]>>({})
   const morphValuesRef = useRef<Record<string, number>>({})
@@ -371,15 +373,30 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     const renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setSize(w, h); renderer.setPixelRatio(window.devicePixelRatio)
     renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.shadowMap.enabled = true
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.1
     container.appendChild(renderer.domElement); rendererRef.current = renderer
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x0d1b2a)
-    scene.add(new THREE.AmbientLight(0xffffff, 1.2))
-    const dir = new THREE.DirectionalLight(0xffffff, 2); dir.position.set(1, 3, 2); scene.add(dir)
-    const fillLight = new THREE.DirectionalLight(0x8899cc, 0.6)
+
+    // Avaturn GLB는 glTF PBR(금속/거칠기) 재질이라 환경 반사가 없으면 피부·눈·머리카락이
+    // 밋밋한 플라스틱처럼 보인다 — 별도 HDRI 파일 없이 절차적 환경(RoomEnvironment)으로 IBL을 채움
+    if (envTextureRef.current) envTextureRef.current.dispose()
+    const pmrem = new THREE.PMREMGenerator(renderer)
+    const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    pmrem.dispose()
+    scene.environment = envTexture
+    envTextureRef.current = envTexture
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.35))
+    const dir = new THREE.DirectionalLight(0xfff4e8, 1.8); dir.position.set(1, 3, 2); scene.add(dir)
+    const fillLight = new THREE.DirectionalLight(0x8fa8d9, 0.5)
     fillLight.position.set(-2, 1, -1)
     scene.add(fillLight)
+    const rimLight = new THREE.DirectionalLight(0xffffff, 0.7)
+    rimLight.position.set(-1, 2, -3)
+    scene.add(rimLight)
 
     // 얼굴만/상반신/전체 보기 토글에 맞춰 초기 카메라 프레이밍 결정
     const preset = VIEW_PRESETS[viewModeRef.current]
@@ -559,6 +576,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   useEffect(() => () => {
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
     rendererRef.current?.dispose()
+    envTextureRef.current?.dispose()
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
   }, [])
 
