@@ -79,6 +79,19 @@ const MORPH_GROUPS: Record<string, RegExp[]> = {
   blink: [/eyeblink/i],
 }
 
+// Rhubarb Lip Sync 발음 구간(A~X, Preston Blair 계열)을 우리 모프타겟 그룹 가중치로 매핑.
+// A/X(무음·닫힘)는 값을 안 줘서 자연스럽게 0으로 수렴하도록 둔다.
+interface LipCue { start: number; end: number; value: string }
+const RHUBARB_SHAPE_TARGETS: Record<string, Partial<Record<string, number>>> = {
+  B: { consonant: 0.35, aa: 0.15 },
+  C: { aa: 0.55 },
+  D: { aa: 0.9 },
+  E: { oo: 0.5 },
+  F: { oo: 0.9 },
+  G: { consonant: 0.5 },
+  H: { ee: 0.4, consonant: 0.2 },
+}
+
 // 말하는 동안 기본으로 살짝 웃는 표정(neutral baseline) + 감정별 가중치(명확히 보이도록 값을 키움)
 const EMOTION_WEIGHTS: Record<Emotion, Partial<Record<string, number>>> = {
   neutral: { smile: 0.25 },
@@ -139,6 +152,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const morphGroupsRef = useRef<Record<string, string[]>>({})
   const morphValuesRef = useRef<Record<string, number>>({})
   const lipsyncAnalyserRef = useRef<AnalyserNode | null>(null)
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null)
+  const lipCuesRef = useRef<LipCue[]>([])
   const emotionRef = useRef<Emotion>('neutral')
   const blinkKeysRef = useRef<string[]>([])
   const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
@@ -273,9 +288,20 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
       const analyser = ctx.createAnalyser(); analyser.fftSize = 64
       src.connect(analyser); analyser.connect(ctx.destination)
       lipsyncAnalyserRef.current = analyser
-      const cleanup = () => { done(); lipsyncAnalyserRef.current = null; URL.revokeObjectURL(url) }
+      activeAudioRef.current = audio
+      lipCuesRef.current = []  // 발음 타이밍 큐 도착 전까지는 주파수 대역 근사로 폴백
+      const cleanup = () => {
+        done(); lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []
+        URL.revokeObjectURL(url)
+      }
       audio.onended = cleanup; audio.onerror = cleanup
       audio.play().catch(() => cleanup())
+      // 재생과 별개로 정확한 발음 타이밍 분석 요청 — 도착하면 주파수 근사 대신 이 큐를 사용
+      const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
+      fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
+        .then(r => r.json())
+        .then(data => { if (activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
+        .catch(() => {})
     } catch {
       const u = new SpeechSynthesisUtterance(text)
       u.lang = 'ko-KR'; u.rate = 0.95; u.onend = done; u.onerror = done
@@ -495,7 +521,28 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
           }
           const norm = (v: number) => Math.min(1, Math.max(0, (v - 8) / 50))
           const ew = EMOTION_WEIGHTS[emotionRef.current] || {}
-          const targets: Record<string, number> = {
+
+          // Rhubarb 발음 타이밍 큐가 도착했으면 그걸로 정확한 입모양을, 아직이면 주파수 대역 근사로 폴백
+          const cues = lipCuesRef.current
+          const audioEl = activeAudioRef.current
+          let mouthShape: Partial<Record<string, number>> | null = null
+          if (cues.length > 0 && audioEl && !audioEl.paused) {
+            const t = audioEl.currentTime
+            const cue = cues.find(c => t >= c.start && t < c.end) ?? null
+            mouthShape = cue ? (RHUBARB_SHAPE_TARGETS[cue.value] ?? {}) : {}
+          }
+
+          const targets: Record<string, number> = mouthShape ? {
+            aa: mouthShape.aa ?? 0,
+            oo: mouthShape.oo ?? 0,
+            ee: mouthShape.ee ?? 0,
+            consonant: mouthShape.consonant ?? 0,
+            smile: ew.smile ?? 0,
+            frown: ew.frown ?? 0,
+            browUp: ew.browUp ?? 0,
+            browDown: ew.browDown ?? 0,
+            squint: ew.squint ?? 0,
+          } : {
             aa: norm(low) * 0.9,
             oo: norm(mid) * 0.5,
             ee: norm(high) * 0.5,

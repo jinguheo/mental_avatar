@@ -9,7 +9,7 @@ import uuid, subprocess, time, json
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -1546,6 +1546,21 @@ tts.tts_to_file(
 
     job["stage"] = "done"
     job["mp4_path"] = str(mp4)
+
+
+@app.route("/avatar/lipsync_cues", methods=["POST"])
+def avatar_lipsync_cues():
+    """이미 생성된 TTS WAV를 Rhubarb Lip Sync로 분석해 발음 타이밍 기반 입모양 큐를 반환.
+    프론트가 tts_only로 받은 오디오를 그대로 재전송 — TTS 재생성 없이 분석만 추가로 돈다."""
+    audio_file = request.files.get("audio")
+    if not audio_file:
+        return jsonify({"error": "audio required"}), 400
+    job_dir = AVATAR_TMP / uuid.uuid4().hex
+    job_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = job_dir / "audio.wav"
+    audio_file.save(str(wav_path))
+    cues = lipsync.extract_visemes(str(wav_path))
+    return jsonify({"cues": cues})
 
 
 @app.route("/avatar/generate_async", methods=["POST"])

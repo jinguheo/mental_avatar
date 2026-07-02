@@ -97,6 +97,18 @@ const EMOTION_WEIGHTS: Record<Emotion, Partial<Record<string, number>>> = {
   surprised: { browUp: 1, smile: 0.1 },
 }
 
+// RealisticAvatar.tsx와 동일 — Rhubarb Lip Sync 발음 구간(A~X)을 모프타겟 그룹 가중치로 매핑
+interface LipCue { start: number; end: number; value: string }
+const RHUBARB_SHAPE_TARGETS: Record<string, Partial<Record<string, number>>> = {
+  B: { consonant: 0.35, aa: 0.15 },
+  C: { aa: 0.55 },
+  D: { aa: 0.9 },
+  E: { oo: 0.5 },
+  F: { oo: 0.9 },
+  G: { consonant: 0.5 },
+  H: { ee: 0.4, consonant: 0.2 },
+}
+
 function classifyEmotion(text: string): Emotion {
   if (/죄송|미안|사과|아쉽|어렵|힘들/.test(text)) return 'sorry'
   if (/축하|좋아요|좋습니다|감사|기쁘|행복|반갑|웃|즐거|최고|!{1,}/.test(text)) return 'happy'
@@ -119,6 +131,8 @@ export default function PptPresenter() {
   const morphGroupsRef = useRef<Record<string, string[]>>({})
   const morphValuesRef = useRef<Record<string, number>>({})
   const lipsyncAnalyserRef = useRef<AnalyserNode | null>(null)
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null)
+  const lipCuesRef = useRef<LipCue[]>([])
   const emotionRef = useRef<Emotion>('neutral')
   const blinkKeysRef = useRef<string[]>([])
   const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
@@ -320,7 +334,28 @@ export default function PptPresenter() {
           }
           const norm = (v: number) => Math.min(1, Math.max(0, (v - 8) / 50))
           const ew = EMOTION_WEIGHTS[emotionRef.current] || {}
-          const targets: Record<string, number> = {
+
+          // Rhubarb 발음 타이밍 큐가 도착했으면 그걸로 정확한 입모양을, 아직이면 주파수 대역 근사로 폴백
+          const cues = lipCuesRef.current
+          const audioEl = activeAudioRef.current
+          let mouthShape: Partial<Record<string, number>> | null = null
+          if (cues.length > 0 && audioEl && !audioEl.paused) {
+            const t = audioEl.currentTime
+            const cue = cues.find(c => t >= c.start && t < c.end) ?? null
+            mouthShape = cue ? (RHUBARB_SHAPE_TARGETS[cue.value] ?? {}) : {}
+          }
+
+          const targets: Record<string, number> = mouthShape ? {
+            aa: mouthShape.aa ?? 0,
+            oo: mouthShape.oo ?? 0,
+            ee: mouthShape.ee ?? 0,
+            consonant: mouthShape.consonant ?? 0,
+            smile: ew.smile ?? 0,
+            frown: ew.frown ?? 0,
+            browUp: ew.browUp ?? 0,
+            browDown: ew.browDown ?? 0,
+            squint: ew.squint ?? 0,
+          } : {
             aa: norm(low) * 0.9,
             oo: norm(mid) * 0.5,
             ee: norm(high) * 0.5,
@@ -516,7 +551,8 @@ export default function PptPresenter() {
     autoPlayRef.current = false; setAutoPlay(false)
     ttsSeqRef.current += 1
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
-    lipsyncAnalyserRef.current = null; emotionRef.current = 'neutral'
+    lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []
+    emotionRef.current = 'neutral'
     setSpeaking(false)
   }, [])
 
@@ -546,9 +582,17 @@ export default function PptPresenter() {
       const analyser = ctx.createAnalyser(); analyser.fftSize = 64
       src.connect(analyser); analyser.connect(ctx.destination)
       lipsyncAnalyserRef.current = analyser
+      activeAudioRef.current = audio
+      lipCuesRef.current = []
+      const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
+      fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
+        .then(r => r.json())
+        .then(data => { if (!stale() && activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
+        .catch(() => {})
       const cleanup = () => {
         URL.revokeObjectURL(url)
         lipsyncAnalyserRef.current = null
+        activeAudioRef.current = null; lipCuesRef.current = []
         emotionRef.current = 'neutral'
         if (stale()) return
         setSpeaking(false)
@@ -562,7 +606,8 @@ export default function PptPresenter() {
       audio.onended = cleanup; audio.onerror = cleanup
       audio.play().catch(cleanup)
     } catch {
-      lipsyncAnalyserRef.current = null; emotionRef.current = 'neutral'
+      lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []
+      emotionRef.current = 'neutral'
       if (!stale()) { setSpeaking(false); autoPlayRef.current = false; setAutoPlay(false) }
     }
   }, [])
