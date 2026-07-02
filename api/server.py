@@ -728,6 +728,28 @@ def sync_list():
     return jsonify({"items": avatar_core.list_synced(source, int(request.args.get("limit", 50)))})
 
 
+@app.route("/memory", methods=["GET"])
+def memory_list():
+    """핵심 기억(자유형식 사실) 목록 — 매 아바타 프롬프트에 항상 주입됨"""
+    return jsonify({"items": avatar_core.list_memory()})
+
+
+@app.route("/memory", methods=["POST"])
+def memory_add():
+    data = request.get_json(silent=True) or {}
+    content = (data.get("content") or "").strip()
+    if not content:
+        return jsonify({"error": "content required"}), 400
+    mid = avatar_core.add_memory(content)
+    return jsonify({"id": mid})
+
+
+@app.route("/memory/<mid>", methods=["DELETE"])
+def memory_delete(mid):
+    avatar_core.delete_memory(mid)
+    return jsonify({"success": True})
+
+
 @app.route("/avatar/context", methods=["GET"])
 def avatar_context():
     q = request.args.get("q", "")

@@ -190,6 +190,45 @@ def update_profile(updates: dict) -> dict:
     return get_profile()
 
 
+# ── 핵심 기억(core memory) ──────────────────────────────
+# PROFILE_KEYS처럼 정해진 필드가 아니라, 사용자가 그때그때 "꼭 기억해야 할 것"이라고
+# 알려주는 자유형식 사실 목록. 개수가 적어(수십 개 이내) 벡터검색 없이 매 프롬프트에
+# 그대로 전부 주입 — KG 전체를 뒤지는 embeddings.search()보다 항상 빠르고 확실하다.
+
+def add_memory(content: str) -> str:
+    import uuid as _uuid
+    content = (content or "").strip()
+    if not content:
+        raise ValueError("content required")
+    mid = _uuid.uuid4().hex
+    conn = get_conn()
+    conn.execute("INSERT INTO core_memory (id, content) VALUES (?,?)", (mid, content))
+    conn.commit()
+    conn.close()
+    return mid
+
+
+def list_memory() -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute("SELECT id, content, created_at FROM core_memory ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_memory(mid: str) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM core_memory WHERE id=?", (mid,))
+    conn.commit()
+    conn.close()
+
+
+def memory_section_text() -> str:
+    rows = list_memory()
+    if not rows:
+        return ""
+    return "\n".join(f"- {r['content']}" for r in rows)
+
+
 # ── Daily Sync ────────────────────────────────────────
 
 def sync_item(source: str, source_id: str, title: str, content: str) -> bool:
@@ -762,6 +801,9 @@ def preference_radar() -> dict:
 AVATAR_SYSTEM = """당신은 {name}의 디지털 아바타입니다.
 {name}을 완전히 대신하여 1인칭으로 답하세요.
 
+## 꼭 기억할 것 (최우선 — 아래 내용과 충돌하는 답변은 하지 마세요)
+{memory_section}
+
 ## 나는 누구인가
 {profile_section}
 
@@ -836,6 +878,7 @@ def build_avatar_context(query: str = "") -> dict:
 
     preference_section = preference_section_text() or "- (직접입력/자동측정 모두 없음)"
     behavior_section = bigfive_behavior_guidance() or "- (Big Five 미설정 — 기본 어조 사용)"
+    memory_section = memory_section_text() or "- (등록된 핵심 기억 없음)"
 
     interests_section = "\n".join([
         f"- {i['topic']} (중요도 {i['importance']:.1f}, 문서 {i['doc_count']}개)"
@@ -848,6 +891,7 @@ def build_avatar_context(query: str = "") -> dict:
 
     system = AVATAR_SYSTEM.format(
         name=name,
+        memory_section=memory_section,
         profile_section=profile_section,
         interests_section=interests_section,
         recent_section=recent_section,

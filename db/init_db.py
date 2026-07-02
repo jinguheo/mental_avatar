@@ -141,6 +141,12 @@ def init():
     CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations(created_at);
     CREATE INDEX IF NOT EXISTS idx_conv_role    ON conversations(role);
 
+    CREATE TABLE IF NOT EXISTS core_memory (
+        id          TEXT PRIMARY KEY,
+        content     TEXT NOT NULL,
+        created_at  DATETIME DEFAULT (datetime('now','localtime'))
+    );
+
     CREATE TABLE IF NOT EXISTS project_summaries (
         id          TEXT PRIMARY KEY,
         name        TEXT NOT NULL,

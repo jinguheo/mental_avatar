@@ -105,6 +105,32 @@ export default function SettingsView({ settings, onChange }: Props) {
   }
   useEffect(() => { fetchRadar() }, [])
 
+  // ── 핵심 기억(memory) — 매 아바타 프롬프트에 항상 주입되는 자유형식 사실 목록 ──
+  interface MemoryItem { id: string; content: string; created_at: string }
+  const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([])
+  const [memoryInput, setMemoryInput] = useState('')
+  const [memoryBusy, setMemoryBusy] = useState(false)
+  const fetchMemory = () => {
+    fetch(`${API}/memory`).then(r => r.json()).then(d => setMemoryItems(d.items || [])).catch(() => {})
+  }
+  useEffect(() => { fetchMemory() }, [])
+  const addMemory = async () => {
+    const content = memoryInput.trim()
+    if (!content || memoryBusy) return
+    setMemoryBusy(true)
+    try {
+      await fetch(`${API}/memory`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      })
+      setMemoryInput(''); fetchMemory()
+    } finally { setMemoryBusy(false) }
+  }
+  const deleteMemory = async (id: string) => {
+    await fetch(`${API}/memory/${id}`, { method: 'DELETE' }).catch(() => {})
+    fetchMemory()
+  }
+
   useEffect(() => {
     fetch(`${API}/profile/me`).then(r => r.json()).then(d => {
       const flat: Record<string, string> = {}
@@ -227,6 +253,33 @@ export default function SettingsView({ settings, onChange }: Props) {
   return (
     <div className="p-8 max-w-lg space-y-6 h-full overflow-y-auto">
       <h2 className="text-base font-semibold text-gray-900">설정</h2>
+
+      {/* 핵심 기억 — 매 아바타 대화마다 항상 최우선으로 주입되는 사실 목록 */}
+      <div className="space-y-2">
+        <label className={labelCls}>꼭 기억할 것 (memory)</label>
+        <p className="text-xs text-gray-400">아바타가 답할 때마다 항상 참고하는 핵심 사실. 예: "나는 허진구 아바타입니다"</p>
+        <div className="flex gap-2">
+          <input value={memoryInput} onChange={e => setMemoryInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addMemory()}
+            placeholder="예: 나는 허진구 아바타입니다"
+            className={inputCls} />
+          <button onClick={addMemory} disabled={!memoryInput.trim() || memoryBusy}
+            className="px-3 py-2 text-xs rounded-xl bg-gray-900 hover:bg-gray-700 text-white disabled:opacity-40 transition whitespace-nowrap">
+            추가
+          </button>
+        </div>
+        {memoryItems.length > 0 && (
+          <ul className="space-y-1">
+            {memoryItems.map(m => (
+              <li key={m.id} className="flex items-start gap-2 bg-gray-50 border border-gray-100 rounded-lg px-3 py-1.5 text-sm text-gray-700">
+                <span className="flex-1">{m.content}</span>
+                <button onClick={() => deleteMemory(m.id)}
+                  className="text-gray-400 hover:text-red-500 text-xs shrink-0">✕</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       <div className="space-y-1.5">
         <label className={labelCls}>AI 제공자</label>
