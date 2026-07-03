@@ -1331,6 +1331,25 @@ _avatar_jobs: dict = {}
 _avatar_gpu_lock = _threading.Lock()
 
 
+def _tts_script(text: str, speech_path, speaker_line: str) -> str:
+    """xtts 콘다 환경에서 subprocess로 실행할 XTTS v2 합성 스크립트 문자열.
+    speaker_line은 'speaker=...' 또는 'speaker_wav=...' 형태의 완성된 인자 라인."""
+    return f"""
+import sys, os
+os.environ["COQUI_TOS_AGREED"] = "1"
+os.environ["TTS_HOME"] = {repr(str(config.MODELS_DIR))}
+sys.stdout.reconfigure(encoding='utf-8')
+from TTS.api import TTS
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+tts.tts_to_file(
+    text={repr(text)},
+    {speaker_line},
+    language="ko",
+    file_path={repr(str(speech_path))}
+)
+"""
+
+
 @app.route("/avatar/register_voice", methods=["POST"])
 def avatar_register_voice():
     sample = request.files.get("sample")
@@ -1438,20 +1457,7 @@ def avatar_tts_only():
 
     speaker_arg = f"speaker={repr(template_speaker)}" if template_speaker \
         else f"speaker_wav={repr(str(VOICE_SAMPLE))}"
-    tts_script = f"""
-import sys, os
-os.environ["COQUI_TOS_AGREED"] = "1"
-os.environ["TTS_HOME"] = {repr(str(config.MODELS_DIR))}
-sys.stdout.reconfigure(encoding='utf-8')
-from TTS.api import TTS
-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
-tts.tts_to_file(
-    text={repr(text)},
-    {speaker_arg},
-    language="ko",
-    file_path={repr(str(speech_path))}
-)
-"""
+    tts_script = _tts_script(text, speech_path, speaker_arg)
     script_path = job_dir / "run_tts.py"
     script_path.write_text(tts_script, encoding="utf-8")
     try:
@@ -1480,20 +1486,7 @@ def _run_avatar_job_locked(job_id: str, face_path: Path, text: str, job_dir: Pat
 
     # 1) TTS
     job["stage"] = "tts"
-    tts_script = f"""
-import sys, os
-os.environ["COQUI_TOS_AGREED"] = "1"
-os.environ["TTS_HOME"] = {repr(str(config.MODELS_DIR))}
-sys.stdout.reconfigure(encoding='utf-8')
-from TTS.api import TTS
-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
-tts.tts_to_file(
-    text={repr(text)},
-    speaker_wav={repr(str(VOICE_SAMPLE))},
-    language="ko",
-    file_path={repr(str(speech_path))}
-)
-"""
+    tts_script = _tts_script(text, speech_path, f"speaker_wav={repr(str(VOICE_SAMPLE))}")
     tts_script_path = job_dir / "run_tts.py"
     tts_script_path.write_text(tts_script, encoding="utf-8")
     try:
@@ -2015,20 +2008,7 @@ def avatar_tts_generate():
     speech_path = job_dir / "speech.wav"
 
     # 1) XTTS v2 TTS (xtts 환경의 python으로 subprocess 실행)
-    tts_script = f"""
-import sys, os
-os.environ["COQUI_TOS_AGREED"] = "1"
-os.environ["TTS_HOME"] = {repr(str(config.MODELS_DIR))}
-sys.stdout.reconfigure(encoding='utf-8')
-from TTS.api import TTS
-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
-tts.tts_to_file(
-    text={repr(text)},
-    speaker_wav={repr(str(VOICE_SAMPLE))},
-    language="ko",
-    file_path={repr(str(speech_path))}
-)
-"""
+    tts_script = _tts_script(text, speech_path, f"speaker_wav={repr(str(VOICE_SAMPLE))}")
     tts_script_path = job_dir / "run_tts.py"
     tts_script_path.write_text(tts_script, encoding="utf-8")
 
