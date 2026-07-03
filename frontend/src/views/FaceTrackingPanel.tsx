@@ -5,8 +5,9 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
+import { API_BASE } from '@/config'
 
-const API      = 'http://127.0.0.1:8766'
+const API      = API_BASE
 const MP_WASM  = '/mediapipe/wasm'
 const MP_MODEL = '/mediapipe/models/face_landmarker.task'
 

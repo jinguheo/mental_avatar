@@ -8,8 +8,9 @@ import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
 import { streamChatOllama } from '@/services/ollama'
 import FaceTrackingPanel from './FaceTrackingPanel'
 import type { Settings } from '@/types'
+import { API_BASE } from '@/config'
 
-const API = 'http://127.0.0.1:8766'
+const API = API_BASE
 const CHAT_SINCE_KEY = 'mental-avatar-chat-since'
 
 // SQLite의 created_at(datetime('now','localtime'))과 동일한 'YYYY-MM-DD HH:MM:SS' 형식(로컬시간)

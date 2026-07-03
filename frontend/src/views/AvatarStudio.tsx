@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { API_BASE } from '@/config'
 
-const API = 'http://127.0.0.1:8766'
+const API = API_BASE
 
 interface YtHistory { job_id: string; title: string; url: string; video_path: string; duration: number; video_url: string }
 

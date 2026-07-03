@@ -10,8 +10,9 @@ import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
 import { streamChatOllama } from '@/services/ollama'
 import type { Settings } from '@/types'
 import type { ChatMsg } from './Avatar3DChat'
+import { API_BASE } from '@/config'
 
-const API = 'http://127.0.0.1:8766'
+const API = API_BASE
 const CHAT_SINCE_KEY = 'mental-avatar-realistic-chat-since'
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
 

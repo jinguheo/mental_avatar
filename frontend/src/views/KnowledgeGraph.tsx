@@ -4,8 +4,9 @@ import remarkGfm from 'remark-gfm'
 import mermaid from 'mermaid'
 import { streamClaudeWeb } from '@/services/claudeWeb'
 import type { Settings } from '@/types'
+import { API_BASE, MCP_ENDPOINT } from '@/config'
 
-const API = 'http://127.0.0.1:8766'
+const API = API_BASE
 
 // ── 타입 ──────────────────────────────────────────────
 interface SearchResult {
@@ -94,7 +95,7 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
   }, [query])
 
   const loadSummary = useCallback(async () => {
-    const mcpEndpoint = settings.mcpEndpoint || 'http://127.0.0.1:8765/mcp'
+    const mcpEndpoint = settings.mcpEndpoint || MCP_ENDPOINT
     const sessionKey = settings.claudeSessionKey || ''
     setSummaryLoading(true)
     setSummary(null)
@@ -859,7 +860,7 @@ function PreferenceTab({ settings }: { settings: Settings }) {
     setAnalyzing(true)
     setAnalysis('')
     try {
-      const mcpEndpoint = settings.mcpEndpoint || 'http://127.0.0.1:8765/mcp'
+      const mcpEndpoint = settings.mcpEndpoint || MCP_ENDPOINT
       const sessionKey  = settings.claudeSessionKey || ''
 
       if (sessionKey && mcpEndpoint) {
@@ -1113,7 +1114,7 @@ function WikiTab() {
       if (!data.running && data.html_ready && data.nodes > 0) {
         clearInterval(poll)
         await loadStatus()
-        window.open('http://127.0.0.1:8766/graphify/graph.html')
+        window.open(`${API}/graphify/graph.html`)
       }
     }, 3000)
   }
@@ -1212,7 +1213,7 @@ function WikiTab() {
               )}
               {gJob?.html_ready && (
                 <button
-                  onClick={() => window.open('http://127.0.0.1:8766/graphify/graph.html')}
+                  onClick={() => window.open(`${API}/graphify/graph.html`)}
                   className="w-full text-[11px] py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-700 transition font-medium">
                   🕸 결과 보기
                 </button>
@@ -1605,7 +1606,7 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
           setGMsg(`완료 — 노드 ${data.nodes} · 엣지 ${data.edges} · 커뮤니티 ${data.communities}`)
           await fetch(`${API}/project/${pid}/graphify_mark`, { method: 'POST' }).catch(() => {})
           await loadProjects(); await loadDetail(pid)
-          window.open('http://127.0.0.1:8766/graphify/graph.html')
+          window.open(`${API}/graphify/graph.html`)
         }
       }
     }, 3000)

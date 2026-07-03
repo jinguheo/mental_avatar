@@ -8,8 +8,9 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { API_BASE } from '@/config'
 
-const API = 'http://127.0.0.1:8766'
+const API = API_BASE
 const IDB_NAME = 'mental-avatar-glb'
 const IDB_STORE = 'glb-files'
 // RealisticAvatar.tsx와 동일한 키 — 거기서 선택/등록한 GLB를 그대로 공유해서 보여준다

@@ -1,8 +1,9 @@
 import type { Settings } from '@/types'
 import { claudeWebCaptureSession } from '@/services/claudeWeb'
 import { useState, useEffect } from 'react'
+import { API_BASE } from '@/config'
 
-const API = 'http://127.0.0.1:8766'
+const API = API_BASE
 
 const TRAIT_DEFS = [
   { key: 'openness',          label: '개방성' },
@@ -604,7 +605,7 @@ export default function SettingsView({ settings, onChange }: Props) {
       </div>
 
       <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-500 space-y-1">
-        <p>API 서버: <span className="text-gray-700 font-medium">http://127.0.0.1:8766</span></p>
+        <p>API 서버: <span className="text-gray-700 font-medium">{API}</span></p>
         <p>설정은 브라우저 localStorage에 저장됩니다.</p>
       </div>
     </div>
