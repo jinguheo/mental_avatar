@@ -2236,10 +2236,82 @@ def presenter_session_delete(session_id: str):
     return jsonify({"ok": True})
 
 
+# ── tmp 자동 정리 ────────────────────────────────────────────
+def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24) -> dict:
+    """누적되는 tmp 산출물을 정리한다.
+    - tmp/avatar: 최종 영상(result/**/*.mp4)이 없는 잡 폴더(tts_only speech.wav·실패 잡)만
+      나이 기준으로 삭제. 영상이 있는 폴더는 /avatar/history의 영구 저장소이므로 절대 건드리지 않는다.
+    - tmp/stt: STT 임시 파일(크래시로 finally를 못 탄 잔여물)을 나이 기준으로 삭제.
+    반환: {"avatar_removed", "avatar_freed_mb", "stt_removed"}"""
+    now = time.time()
+    removed_dirs = 0
+    freed = 0
+    if AVATAR_TMP.exists():
+        for job_dir in AVATAR_TMP.iterdir():
+            if not job_dir.is_dir():
+                continue
+            try:
+                if (now - job_dir.stat().st_mtime) / 3600 < avatar_job_max_age_h:
+                    continue
+                # 최종 영상이 하나라도 있으면 이력이므로 보존 (temp_/​_full.mp4는 중간 산출물이라 제외)
+                has_video = any(
+                    not f.name.startswith("temp_") and not f.name.endswith("_full.mp4")
+                    for f in job_dir.glob("result/**/*.mp4")
+                )
+                if has_video:
+                    continue
+                sz = sum(f.stat().st_size for f in job_dir.rglob("*") if f.is_file())
+                _shutil.rmtree(job_dir, ignore_errors=True)
+                removed_dirs += 1
+                freed += sz
+            except OSError:
+                continue
+    stt_removed = 0
+    if STT_TMP.exists():
+        for f in STT_TMP.iterdir():
+            try:
+                if f.is_file() and (now - f.stat().st_mtime) / 3600 >= stt_max_age_h:
+                    f.unlink(missing_ok=True)
+                    stt_removed += 1
+            except OSError:
+                continue
+    return {"avatar_removed": removed_dirs,
+            "avatar_freed_mb": round(freed / 1e6, 1),
+            "stt_removed": stt_removed}
+
+
+def _cleanup_tmp_loop(interval_h: float = 6):
+    """백그라운드에서 주기적으로 _cleanup_tmp 실행."""
+    while True:
+        try:
+            time.sleep(interval_h * 3600)
+            stats = _cleanup_tmp()
+            if stats["avatar_removed"] or stats["stt_removed"]:
+                print(f"[cleanup] avatar {stats['avatar_removed']}개"
+                      f"({stats['avatar_freed_mb']}MB) / stt {stats['stt_removed']}개 정리", flush=True)
+        except Exception as e:
+            print(f"[cleanup] 오류: {e}", flush=True)
+
+
+@app.route("/tmp/cleanup", methods=["POST"])
+def tmp_cleanup():
+    """수동 tmp 정리 (영상 이력은 보존)."""
+    return jsonify(_cleanup_tmp())
+
+
 if __name__ == "__main__":
     init_db()
     print("=" * 50)
     print("Mental Avatar API 서버")
     print("주소: http://127.0.0.1:8766")
     print("=" * 50)
+    # 시작 시 1회 정리 + 6시간마다 주기 정리 (영상 이력은 보존)
+    try:
+        _boot_stats = _cleanup_tmp()
+        if _boot_stats["avatar_removed"] or _boot_stats["stt_removed"]:
+            print(f"[cleanup] 시작 정리: avatar {_boot_stats['avatar_removed']}개"
+                  f"({_boot_stats['avatar_freed_mb']}MB) / stt {_boot_stats['stt_removed']}개", flush=True)
+    except Exception as _e:
+        print(f"[cleanup] 시작 정리 오류: {_e}", flush=True)
+    _threading.Thread(target=_cleanup_tmp_loop, daemon=True).start()
     app.run(host="127.0.0.1", port=8766, debug=False, threaded=True)
