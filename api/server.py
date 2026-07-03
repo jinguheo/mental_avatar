@@ -1411,7 +1411,7 @@ def avatar_tts_only():
     if template_speaker is None and not VOICE_SAMPLE.exists():
         return jsonify({"error": "voice sample not registered"}), 400
 
-    # ① 상주 XTTS 워커(8767)로 우선 시도 — 모델이 이미 떠 있어 2~3초
+    # ① 상주 XTTS 워커(8768)로 우선 시도 — 모델이 이미 떠 있어 2~3초
     try:
         import json, urllib.request
         payload = json.dumps({
