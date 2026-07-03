@@ -8,8 +8,12 @@ JSON POST /tts  {text, speaker?, speaker_wav?, language?}  → audio/wav 바이�
 GET /health → {"status":"ok","device":"cuda|cpu"}
 """
 import os, sys, json, uuid, tempfile, threading
+from pathlib import Path
 os.environ["COQUI_TOS_AGREED"] = "1"
-os.environ["TTS_HOME"] = r"D:\MyWork\mental-avatar\models"
+# xtts 콘다 환경에서 단독 실행되므로 core.config를 import하지 않고 경로를 상대계산.
+# .env/환경변수 MENTAL_AVATAR_MODELS로 override 가능(core/config.py와 동일 기본값).
+os.environ["TTS_HOME"] = os.environ.get(
+    "MENTAL_AVATAR_MODELS", str(Path(__file__).resolve().parent.parent / "models"))
 sys.stdout.reconfigure(encoding="utf-8")
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

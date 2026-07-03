@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from pathlib import Path
 
+from . import config
+
 MODEL_PATH = Path(__file__).parent.parent / "models" / "faceswap" / "inswapper_128.onnx"
 
 # onnxruntime의 CUDAExecutionProvider는 cudnn64_9.dll / cudart64_12.dll 등을 필요로 하는데,
@@ -78,7 +80,7 @@ def swap_faces_in_video(source_face_path: str, target_video_path: str, output_pa
 
     # 오디오 병합
     import subprocess
-    ffmpeg = str(Path("D:/MyWork/SadTalker/ffmpeg.exe"))
+    ffmpeg = str(config.SADTALKER_FFMPEG)
     try:
         subprocess.run([
             ffmpeg, "-y", "-i", tmp_path, "-i", target_video_path,

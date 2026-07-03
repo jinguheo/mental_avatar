@@ -9,7 +9,7 @@ import uuid, subprocess, time, json
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -1310,12 +1310,12 @@ def stt_transcribe():
 
 
 # ── Avatar Studio ────────────────────────────────────────────
-SADTALKER_DIR   = Path(r"D:\MyWork\SadTalker")
+SADTALKER_DIR   = config.SADTALKER_DIR
 AVATAR_TMP      = Path(__file__).parent.parent / "tmp" / "avatar"
 AVATAR_DATA     = Path(__file__).parent.parent / "data"
 VOICE_SAMPLE    = AVATAR_DATA / "voice_sample.wav"
-PYTHON_EXE      = r"C:\Users\oem\miniconda3\envs\avatar\python.exe"   # SadTalker (numpy 1.26 패치판)
-XTTS_PYTHON_EXE = r"C:\Users\oem\miniconda3\envs\xtts\python.exe"     # Coqui XTTS v2
+PYTHON_EXE      = config.AVATAR_PYTHON   # SadTalker (numpy 1.26 패치판)
+XTTS_PYTHON_EXE = config.XTTS_PYTHON     # Coqui XTTS v2
 
 # '내 목소리'가 아닌 템플릿 옵션 — XTTS v2 내장 스피커 중 선별 (speaker_wav 대신 speaker= 사용)
 VOICE_TEMPLATES = {
@@ -1441,7 +1441,7 @@ def avatar_tts_only():
     tts_script = f"""
 import sys, os
 os.environ["COQUI_TOS_AGREED"] = "1"
-os.environ["TTS_HOME"] = r"D:\\MyWork\\mental-avatar\\models"
+os.environ["TTS_HOME"] = {repr(str(config.MODELS_DIR))}
 sys.stdout.reconfigure(encoding='utf-8')
 from TTS.api import TTS
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
@@ -1483,7 +1483,7 @@ def _run_avatar_job_locked(job_id: str, face_path: Path, text: str, job_dir: Pat
     tts_script = f"""
 import sys, os
 os.environ["COQUI_TOS_AGREED"] = "1"
-os.environ["TTS_HOME"] = r"D:\\MyWork\\mental-avatar\\models"
+os.environ["TTS_HOME"] = {repr(str(config.MODELS_DIR))}
 sys.stdout.reconfigure(encoding='utf-8')
 from TTS.api import TTS
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
@@ -2018,7 +2018,7 @@ def avatar_tts_generate():
     tts_script = f"""
 import sys, os
 os.environ["COQUI_TOS_AGREED"] = "1"
-os.environ["TTS_HOME"] = r"D:\\MyWork\\mental-avatar\\models"
+os.environ["TTS_HOME"] = {repr(str(config.MODELS_DIR))}
 sys.stdout.reconfigure(encoding='utf-8')
 from TTS.api import TTS
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
