@@ -9,6 +9,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { API_BASE } from '@/config'
+import { type Emotion, type LipCue, MORPH_GROUPS, RHUBARB_SHAPE_TARGETS, EMOTION_WEIGHTS, classifyEmotion } from '@/avatarMorph'
 
 const API = API_BASE
 const IDB_NAME = 'mental-avatar-glb'
@@ -75,47 +76,7 @@ const VOICE_OPTIONS: VoiceOption[] = [
 ]
 
 interface MorphRef { mesh: THREE.Mesh; index: number }
-type Emotion = 'neutral' | 'happy' | 'sorry' | 'surprised'
-
-// 입싱크(viseme 근사) + 표정용 모프타겟 그룹 — Avaturn/ARKit/Oculus 명명 모두 대응 (RealisticAvatar.tsx와 동일)
-const MORPH_GROUPS: Record<string, RegExp[]> = {
-  aa: [/viseme_aa/i, /^mouthopen$/i, /jawopen/i],
-  oo: [/viseme_u/i, /viseme_o/i, /mouthpucker/i, /mouthfunnel/i],
-  ee: [/viseme_e/i, /viseme_i/i, /mouthstretch/i],
-  consonant: [/viseme_pp/i, /viseme_ff/i, /viseme_ss/i, /viseme_dd/i, /viseme_kk/i, /viseme_ch/i, /viseme_th/i, /viseme_rr/i, /viseme_nn/i],
-  smile: [/mouthsmile/i],
-  frown: [/mouthfrown/i],
-  browUp: [/browinnerup/i, /browouterup/i],
-  browDown: [/browdown/i],
-  squint: [/eyesquint/i],
-  blink: [/eyeblink/i],
-}
-
-const EMOTION_WEIGHTS: Record<Emotion, Partial<Record<string, number>>> = {
-  neutral: { smile: 0.25 },
-  happy: { smile: 1, browUp: 0.4 },
-  sorry: { frown: 0.7, browDown: 0.5, smile: 0 },
-  surprised: { browUp: 1, smile: 0.1 },
-}
-
-// RealisticAvatar.tsx와 동일 — Rhubarb Lip Sync 발음 구간(A~X)을 모프타겟 그룹 가중치로 매핑
-interface LipCue { start: number; end: number; value: string }
-const RHUBARB_SHAPE_TARGETS: Record<string, Partial<Record<string, number>>> = {
-  B: { consonant: 0.35, aa: 0.15 },
-  C: { aa: 0.55 },
-  D: { aa: 0.9 },
-  E: { oo: 0.5 },
-  F: { oo: 0.9 },
-  G: { consonant: 0.5 },
-  H: { ee: 0.4, consonant: 0.2 },
-}
-
-function classifyEmotion(text: string): Emotion {
-  if (/죄송|미안|사과|아쉽|어렵|힘들/.test(text)) return 'sorry'
-  if (/축하|좋아요|좋습니다|감사|기쁘|행복|반갑|웃|즐거|최고|!{1,}/.test(text)) return 'happy'
-  if (/\?|궁금|놀라|정말요|진짜요|신기/.test(text)) return 'surprised'
-  return 'neutral'
-}
+// 립싱크·표정 모프 상수/분류기는 @/avatarMorph 로 분리 (RealisticAvatar와 공용)
 
 export default function PptPresenter() {
   const containerRef = useRef<HTMLDivElement>(null)
