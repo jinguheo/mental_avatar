@@ -832,19 +832,17 @@ AVATAR_SYSTEM = """당신은 {name}의 디지털 아바타입니다.
 - 단, "개방성", "성실성", "MBTI", "INTJ" 같은 특성 이름·점수·소제목을 답변 본문에 절대 직접 언급하거나 노출하지 마세요 — 그 지침은 말투에 자연스럽게 녹아있어야 하며, 사용자에게는 보이지 않는 배경 설정입니다"""
 
 
-# 엣지에 붙는 relation 중 실제 "사실"로 읽을 수 있는 것만 (구조적 relation은 제외).
-# core/kg_ingest.py의 canonical_relation()이 만드는 것과 동일한 어휘 집합.
-_FACT_RELATIONS = {
-    "is_a", "part_of", "has_part", "uses", "implements", "applied_to",
-    "causes", "enables", "requires", "contradicts", "cites", "defines",
-    "precedes", "produces", "relates_to",
-}
-
-
 def _expand_graph_context(node_ids: list[str], max_facts: int = 6) -> list[str]:
     """벡터검색으로 찾은 문서(chunk)에 언급된 엔티티들의 관계(엣지)를 뽑아 답변 근거를 보강한다.
     문서 내용만으론 안 보이는 '이 개념이 저 개념과 어떻게 연결되는지'를 추가로 노출.
-    2-hop(문서→엔티티→다른엔티티)만, 개수 상한을 둬 프롬프트 비대화를 방지."""
+    2-hop(문서→엔티티→다른엔티티)만, 개수 상한을 둬 프롬프트 비대화를 방지.
+
+    엔티티↔엔티티 엣지는 type=='entity' 필터만으로 이미 구조적 관계(mentions 등, type이
+    'chunk'라 걸러짐)와 구분되므로 relation 문자열 자체는 화이트리스트로 거르지 않는다 —
+    대신 core.kg_ingest.canonical_relation()으로 표시 시점에 정규화한다. 이렇게 해야
+    이번 세션 kg_ingest 개선 이전에 저장된 레거시 relation(예: 'combines')도 그대로
+    묻히지 않고 canonical 어휘로 변환돼 노출된다(저장 데이터 자체는 안 건드림)."""
+    from . import kg_ingest
     facts: list[str] = []
     seen: set[tuple] = set()
     for nid in node_ids:
@@ -853,13 +851,14 @@ def _expand_graph_context(node_ids: list[str], max_facts: int = 6) -> list[str]:
                 continue
             entity_id, entity_title = nb["id"], nb["title"]
             for erel in graph.get_neighbors(entity_id):
-                if erel["relation"] not in _FACT_RELATIONS or erel["type"] != "entity":
+                if erel["type"] != "entity":
                     continue
-                key = tuple(sorted([entity_title, erel["title"]])) + (erel["relation"],)
+                relation = kg_ingest.canonical_relation(erel["relation"])
+                key = tuple(sorted([entity_title, erel["title"]])) + (relation,)
                 if key in seen:
                     continue
                 seen.add(key)
-                facts.append(f"- {entity_title} — {erel['relation']} → {erel['title']}")
+                facts.append(f"- {entity_title} — {relation} → {erel['title']}")
                 if len(facts) >= max_facts:
                     return facts
     return facts
@@ -897,9 +896,16 @@ def build_avatar_context(query: str = "") -> dict:
     graph_facts: list[str] = []
     community_labels = ""
     if query:
-        results = embeddings.search(query, n_results=5)
+        # 대화기록(conversation)이 문서(chunk)보다 압도적으로 많아(720 vs 52) 순수 top-N이면
+        # 문서 지식이 밀려나기 쉽다 — 문서 히트를 쿼터로 먼저 확보한 뒤 대화로 채워 균형을 맞춘다.
+        doc_hits  = embeddings.search(query, n_results=3, where={"source_type": {"$ne": "conversation"}})
+        conv_hits = embeddings.search(query, n_results=3, where={"source_type": "conversation"})
         matched_ids = []
-        for r in results:
+        seen_ids: set = set()
+        for r in doc_hits + conv_hits:
+            if r["id"] in seen_ids or len(matched_ids) >= 5:
+                continue
+            seen_ids.add(r["id"])
             node = graph.get_node(r["id"])
             if node and node.get("content"):
                 relevant.append(f"- [{node['title']}] {node['content'][:200]}")

@@ -102,11 +102,11 @@ def add_document(node_id: str, title: str, content: str, metadata: dict = None):
             print(f"[embeddings] 저장 실패 {node_id}: {e}")
 
 
-def search(query: str, n_results: int = 10) -> list[dict]:
-    """시맨틱 검색"""
+def search(query: str, n_results: int = 10, where: dict = None) -> list[dict]:
+    """시맨틱 검색. where로 메타데이터(source_type 등) 필터링 가능 — 청크/대화 분리 조회에 사용."""
     col = _get_collection()
     try:
-        results = col.query(query_texts=[query], n_results=n_results)
+        results = col.query(query_texts=[query], n_results=n_results, where=where)
         items = []
         for i, doc_id in enumerate(results["ids"][0]):
             items.append({
