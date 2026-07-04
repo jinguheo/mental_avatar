@@ -19,7 +19,7 @@ EXTRACT_PROMPT = """다음 문서에서 지식 그래프 구성 요소를 추출
     {{"name": "엔티티명", "type": "concept|person|tool|paper|organization|technology", "description": "간략 설명"}}
   ],
   "relations": [
-    {{"from": "엔티티A", "to": "엔티티B", "relation": "relates_to|part_of|cites|implements|contradicts|applied_to"}}
+    {{"from": "엔티티A", "to": "엔티티B", "relation": "is_a|part_of|has_part|uses|implements|applied_to|causes|enables|requires|contradicts|cites|defines|precedes|produces|relates_to"}}
   ],
   "topics": ["주제1", "주제2"],
   "key_insights": ["핵심 인사이트1"],

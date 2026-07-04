@@ -203,48 +203,10 @@ def process_next(subject_id: str = "", limit: int = 5) -> dict:
             if not chunks:
                 raise ValueError("파싱 실패 또는 지원하지 않는 형식")
 
-            # ── 2. KG 노드 + 벡터 저장 (커넥션은 graph/embeddings 내부에서 관리) ──
-            node_ids = []
-            for chunk in chunks:
-                title       = chunk.get("title", fname)
-                content     = chunk.get("content", "")
-                meta        = chunk.get("meta", {})
-                source_type = meta.get("source_type", "unknown")
-                chunk_idx   = meta.get("chunk_index", 0)
-                fhash       = hashlib.md5(content.encode()).hexdigest()[:12]
-
-                nid = graph.add_node(
-                    type="chunk", title=title, content=content,
-                    source_type=source_type, file_path=fpath,
-                    file_hash=fhash, chunk_index=chunk_idx
-                )
-                embeddings.add_document(nid, title, content, {
-                    "source_type": source_type,
-                    "file_path": fpath,
-                    "chunk_index": str(chunk_idx)
-                })
-                node_ids.append(nid)
-
-            # ── 3. 엔티티/토픽 추출 (Ollama → MCP → API key → keyword) ──
-            if node_ids and chunks[0].get("content", ""):
-                try:
-                    from . import extractor
-                    first_title   = chunks[0].get("title", fname)
-                    first_content = chunks[0].get("content", "")
-                    extracted = extractor.extract(first_title, first_content)
-                    nid0 = node_ids[0]
-                    for topic in extracted.get("topics", []):
-                        graph.link_node_topic(nid0, topic)
-                    for ent in extracted.get("entities", []):
-                        ename = ent.get("name", "").strip()
-                        if not ename:
-                            continue
-                        eid = graph.upsert_entity(ename, ent.get("type", "concept"), ent.get("description", ""))
-                        graph.add_edge(nid0, eid, "mentions", 1.0)
-                    importance = extracted.get("importance", 0.5)
-                    graph.update_importance(nid0, importance - 0.5)
-                except Exception as ex:
-                    print(f"[queue] 엔티티 추출 경고 (무시됨): {ex}")
+            # ── 2~3. KG 노드 + 벡터 + 엔티티/관계 추출 (공유 파이프라인) ──
+            # 모든 청크 처리 + LLM relations를 canonical 엣지로 반영 (core/kg_ingest).
+            from . import kg_ingest
+            node_ids = kg_ingest.process_chunks(chunks, fpath)
 
             # ── 4. Wiki 생성 (Ollama 사용, 실패해도 done 처리) ──
             wiki_status = "skipped"

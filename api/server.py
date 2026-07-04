@@ -9,7 +9,7 @@ import uuid, subprocess, time, json
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -97,80 +97,11 @@ def _pick_path(kind: str) -> str | None:
 
 
 def _process_chunks(chunks: list[dict], file_path: str = "") -> list[str]:
-    """청크 리스트를 KG에 저장, node_id 리스트 반환"""
-    node_ids = []
-    doc_node_id = None
+    """청크 리스트를 KG에 저장, node_id 리스트 반환.
 
-    for chunk in chunks:
-        title   = chunk.get("title", "")
-        content = chunk.get("content", "")
-        meta    = chunk.get("meta", {})
-        source_type = meta.get("source_type", "unknown")
-        chunk_idx   = meta.get("chunk_index", 0)
-        fpath       = meta.get("file_path", file_path)
-        fhash       = hashlib.md5(content.encode()).hexdigest()[:12]
-
-        # KG 노드 추가
-        node_id = graph.add_node(
-            type="chunk",
-            title=title,
-            content=content,
-            source_type=source_type,
-            file_path=fpath,
-            file_hash=fhash,
-            chunk_index=chunk_idx
-        )
-        node_ids.append(node_id)
-
-        # 벡터 저장
-        embeddings.add_document(node_id, title, content, {
-            "source_type": source_type,
-            "file_path": fpath,
-            "chunk_index": str(chunk_idx)
-        })
-
-        # 첫 청크를 대표 노드로 설정
-        if doc_node_id is None:
-            doc_node_id = node_id
-
-        # 청크 간 연결
-        if doc_node_id and node_id != doc_node_id:
-            graph.add_edge(doc_node_id, node_id, "part_of", 1.0)
-
-        # Claude 엔티티 추출 (내용이 있을 때만)
-        if content and len(content) > 100:
-            extracted = extractor.extract(title, content)
-
-            # 토픽 연결
-            for topic in extracted.get("topics", []):
-                graph.link_node_topic(node_id, topic)
-
-            # 엔티티 노드 추가 + 문서→엔티티 엣지
-            entity_id_map: dict[str, str] = {}
-            for ent in extracted.get("entities", []):
-                ename = ent.get("name", "").strip()
-                if not ename:
-                    continue
-                eid = graph.upsert_entity(ename, ent.get("type", "concept"), ent.get("description", ""))
-                entity_id_map[ename] = eid
-                graph.add_edge(node_id, eid, "mentions", 1.0)
-
-            # 엔티티 간 관계 엣지
-            for rel in extracted.get("relations", []):
-                a, b = rel.get("from", "").strip(), rel.get("to", "").strip()
-                relation = rel.get("relation", "relates_to")
-                aid = entity_id_map.get(a) or graph._entity_id_by_name(a)
-                bid = entity_id_map.get(b) or graph._entity_id_by_name(b)
-                if aid and bid:
-                    graph.add_edge(aid, bid, relation, 0.8)
-
-            # 중요도 반영
-            importance = extracted.get("importance", 0.5)
-            graph.update_importance(node_id, importance - 0.5)
-
-        graph.log_activity(node_id, "created", f"ingested from {source_type}")
-
-    return node_ids
+    실제 로직은 core/kg_ingest로 통일 — 워처(queue_mgr)와 동일 파이프라인 사용.
+    """
+    return kg_ingest.process_chunks(chunks, file_path)
 
 
 # ── 엔드포인트 ─────────────────────────────────────────

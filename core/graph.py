@@ -1,4 +1,5 @@
 """KG 관리 — SQLite CRUD + NetworkX 분석"""
+import re
 import uuid
 import sqlite3
 from datetime import datetime
@@ -10,6 +11,19 @@ from db.init_db import get_conn
 
 def _uid() -> str:
     return str(uuid.uuid4())
+
+
+def normalize_entity_name(name: str) -> str:
+    """엔티티명 표기를 정규화한다.
+
+    `한글(English)` / `한글 (English)` 처럼 괄호 앞뒤 공백·중복 공백 차이만으로
+    같은 개념이 별도 노드로 파편화되는 걸 막는다(표기 통일: 괄호 앞 공백 1칸).
+    """
+    n = (name or "").strip()
+    n = re.sub(r"\s*\(\s*", " (", n)   # "X(Y" / "X ( Y" → "X (Y"
+    n = re.sub(r"\s*\)", ")", n)        # "Y )" → "Y)"
+    n = re.sub(r"\s+", " ", n)          # 중복 공백 → 1칸
+    return n.strip()
 
 
 # ── 노드 ──────────────────────────────────────────────
@@ -156,26 +170,42 @@ def get_topics(limit: int = 20) -> list[dict]:
 
 # ── 엔티티 ────────────────────────────────────────────
 
+def _find_entity_id(conn, canon: str) -> str:
+    """정규화된 이름(canon)으로 기존 entity 노드를 찾는다.
+
+    1차: 정규화 표기 그대로 정확 매칭(신규 노드는 정규화돼 저장됨).
+    2차: 기존(정규화 전) 노드까지 커버하려 title을 정규화해 비교(스캔).
+    """
+    row = conn.execute(
+        "SELECT id FROM nodes WHERE type='entity' AND title=?", (canon,)
+    ).fetchone()
+    if row:
+        return row["id"]
+    for r in conn.execute("SELECT id, title FROM nodes WHERE type='entity'"):
+        if normalize_entity_name(r["title"] or "") == canon:
+            return r["id"]
+    return ""
+
+
 def _entity_id_by_name(name: str) -> str:
     conn = get_conn()
-    row = conn.execute("SELECT id FROM nodes WHERE type='entity' AND title=?", (name,)).fetchone()
+    eid = _find_entity_id(conn, normalize_entity_name(name))
     conn.close()
-    return row["id"] if row else ""
+    return eid
 
 
 def upsert_entity(name: str, entity_type: str = "concept", description: str = "") -> str:
-    """이름 기준으로 entity 노드를 upsert. 중복 방지."""
+    """이름 기준으로 entity 노드를 upsert. 표기 정규화 후 중복 방지."""
+    canon = normalize_entity_name(name)
     conn = get_conn()
-    row = conn.execute(
-        "SELECT id FROM nodes WHERE type='entity' AND title=?", (name,)
-    ).fetchone()
-    if row:
+    eid = _find_entity_id(conn, canon)
+    if eid:
         conn.close()
-        return row["id"]
+        return eid
     node_id = _uid()
     conn.execute(
         "INSERT INTO nodes (id,type,title,content,source_type,importance) VALUES (?,?,?,?,?,?)",
-        (node_id, "entity", name, description, entity_type, 0.5)
+        (node_id, "entity", canon, description, entity_type, 0.5)
     )
     conn.commit()
     conn.close()
