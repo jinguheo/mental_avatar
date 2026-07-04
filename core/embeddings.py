@@ -1,5 +1,6 @@
 """임베딩 생성 + Chroma 벡터 저장"""
 import os
+from typing import Optional
 import chromadb
 from chromadb.utils import embedding_functions
 
@@ -16,18 +17,71 @@ class _CPUEmbedFn(embedding_functions.ONNXMiniLM_L6_V2):
         return "default"
 
 _embed_fn = _CPUEmbedFn(preferred_providers=["CPUExecutionProvider"])
+_entity_collection = None
+
+# 엔티티명 의미유사 매칭 임계값(cosine distance). 실측 보정: 대소문자/사소한 표기차이
+# (camera vs Camera, computer vision vs Computer Vision)는 distance~0.0, 관련되지만
+# 다른 개념(Neural Network vs Deep Learning)은 0.33 → 그 사이인 0.08로 안전하게 설정.
+# 이 모델(MiniLM, 영어중심)은 한↔영 동의어/약어(CV vs Computer Vision)는 못 잡는다.
+ENTITY_SIMILARITY_THRESHOLD = 0.08
+
+
+def _get_client():
+    global _chroma_client
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(path=os.path.abspath(CHROMA_PATH))
+    return _chroma_client
 
 
 def _get_collection():
-    global _chroma_client, _collection
+    global _collection
     if _collection is None:
-        _chroma_client = chromadb.PersistentClient(path=os.path.abspath(CHROMA_PATH))
-        _collection = _chroma_client.get_or_create_collection(
+        _collection = _get_client().get_or_create_collection(
             name="mental_avatar",
             metadata={"hnsw:space": "cosine"},
             embedding_function=_embed_fn,
         )
     return _collection
+
+
+def _get_entity_collection():
+    """엔티티명 전용 컬렉션 — 문서 청크(mental_avatar)와 분리해 엔티티끼리만 비교."""
+    global _entity_collection
+    if _entity_collection is None:
+        _entity_collection = _get_client().get_or_create_collection(
+            name="mental_avatar_entities",
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=_embed_fn,
+        )
+    return _entity_collection
+
+
+def index_entity(entity_id: str, name: str) -> None:
+    """엔티티명을 임베딩 색인에 등록(신규 생성 시 호출). 실패해도 KG 자체엔 영향 없음."""
+    col = _get_entity_collection()
+    try:
+        col.upsert(documents=[name], ids=[entity_id])
+    except Exception as e:
+        print(f"[embeddings] 엔티티 색인 실패 {entity_id}: {e}")
+
+
+def find_similar_entity(name: str, threshold: float = ENTITY_SIMILARITY_THRESHOLD) -> Optional[dict]:
+    """이름과 의미상 같은(=표기만 다른) 기존 엔티티를 찾는다. 없으면 None."""
+    col = _get_entity_collection()
+    try:
+        if col.count() == 0:
+            return None
+        results = col.query(query_texts=[name], n_results=1)
+        ids = results["ids"][0]
+        if not ids:
+            return None
+        distance = results["distances"][0][0]
+        if distance < threshold:
+            return {"id": ids[0], "name": results["documents"][0][0], "distance": distance}
+        return None
+    except Exception as e:
+        print(f"[embeddings] 엔티티 유사도 검색 실패: {e}")
+        return None
 
 
 def add_document(node_id: str, title: str, content: str, metadata: dict = None):

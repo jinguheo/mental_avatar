@@ -194,11 +194,25 @@ def _entity_id_by_name(name: str) -> str:
     return eid
 
 
+def _find_similar_entity_id(canon: str) -> str:
+    """정규식으로 못 잡는 의미상 동일 엔티티(대소문자·사소한 표기차)를 임베딩 유사도로 찾는다.
+    실패해도(임베딩 미가용 등) 조용히 넘어가 신규 생성으로 폴백."""
+    try:
+        from . import embeddings
+        match = embeddings.find_similar_entity(canon)
+        return match["id"] if match else ""
+    except Exception:
+        return ""
+
+
 def upsert_entity(name: str, entity_type: str = "concept", description: str = "") -> str:
-    """이름 기준으로 entity 노드를 upsert. 표기 정규화 후 중복 방지."""
+    """이름 기준으로 entity 노드를 upsert.
+    1차: 표기 정규화 후 정확 매칭(regex). 2차: 임베딩 유사도 매칭(대소문자 등 정규식이 못 잡는 것)."""
     canon = normalize_entity_name(name)
     conn = get_conn()
     eid = _find_entity_id(conn, canon)
+    if not eid:
+        eid = _find_similar_entity_id(canon)
     if eid:
         conn.close()
         return eid
@@ -209,6 +223,11 @@ def upsert_entity(name: str, entity_type: str = "concept", description: str = ""
     )
     conn.commit()
     conn.close()
+    try:
+        from . import embeddings
+        embeddings.index_entity(node_id, canon)
+    except Exception:
+        pass
     return node_id
 
 

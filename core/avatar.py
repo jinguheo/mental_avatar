@@ -832,6 +832,60 @@ AVATAR_SYSTEM = """당신은 {name}의 디지털 아바타입니다.
 - 단, "개방성", "성실성", "MBTI", "INTJ" 같은 특성 이름·점수·소제목을 답변 본문에 절대 직접 언급하거나 노출하지 마세요 — 그 지침은 말투에 자연스럽게 녹아있어야 하며, 사용자에게는 보이지 않는 배경 설정입니다"""
 
 
+# 엣지에 붙는 relation 중 실제 "사실"로 읽을 수 있는 것만 (구조적 relation은 제외).
+# core/kg_ingest.py의 canonical_relation()이 만드는 것과 동일한 어휘 집합.
+_FACT_RELATIONS = {
+    "is_a", "part_of", "has_part", "uses", "implements", "applied_to",
+    "causes", "enables", "requires", "contradicts", "cites", "defines",
+    "precedes", "produces", "relates_to",
+}
+
+
+def _expand_graph_context(node_ids: list[str], max_facts: int = 6) -> list[str]:
+    """벡터검색으로 찾은 문서(chunk)에 언급된 엔티티들의 관계(엣지)를 뽑아 답변 근거를 보강한다.
+    문서 내용만으론 안 보이는 '이 개념이 저 개념과 어떻게 연결되는지'를 추가로 노출.
+    2-hop(문서→엔티티→다른엔티티)만, 개수 상한을 둬 프롬프트 비대화를 방지."""
+    facts: list[str] = []
+    seen: set[tuple] = set()
+    for nid in node_ids:
+        for nb in graph.get_neighbors(nid):
+            if nb["relation"] != "mentions" or nb["type"] != "entity":
+                continue
+            entity_id, entity_title = nb["id"], nb["title"]
+            for erel in graph.get_neighbors(entity_id):
+                if erel["relation"] not in _FACT_RELATIONS or erel["type"] != "entity":
+                    continue
+                key = tuple(sorted([entity_title, erel["title"]])) + (erel["relation"],)
+                if key in seen:
+                    continue
+                seen.add(key)
+                facts.append(f"- {entity_title} — {erel['relation']} → {erel['title']}")
+                if len(facts) >= max_facts:
+                    return facts
+    return facts
+
+
+def _graphify_community_context(query: str) -> str:
+    """Graphify가 분류한 지식 커뮤니티 중 쿼리와 맞는 게 있으면 주제 라벨을 짧게 반환한다.
+    graph.json 파일만 읽는 가벼운 조회(LLM 호출 없음) — 실패해도 조용히 빈 문자열.
+    matching_communities()는 커뮤니티 자체 라벨에 직접 매칭된 것을 먼저 넣어주므로(신뢰도 높음),
+    그 삽입 순서를 그대로 보존해야 함 — sorted()로 알파벳순 재정렬하면 이 우선순위가 깨진다."""
+    try:
+        from . import graphify_runner
+        matched = graphify_runner.matching_communities(query)
+        if not matched:
+            return ""
+        labels: list[str] = []
+        for label in matched.values():
+            if label not in labels:
+                labels.append(label)
+            if len(labels) >= 3:
+                break
+        return ", ".join(labels)
+    except Exception:
+        return ""
+
+
 def build_avatar_context(query: str = "") -> dict:
     """아바타 채팅용 시스템 프롬프트 + 검색 결과 조합"""
     profile = get_profile()
@@ -840,12 +894,18 @@ def build_avatar_context(query: str = "") -> dict:
 
     # 쿼리 관련 KG 검색
     relevant = []
+    graph_facts: list[str] = []
+    community_labels = ""
     if query:
         results = embeddings.search(query, n_results=5)
+        matched_ids = []
         for r in results:
             node = graph.get_node(r["id"])
             if node and node.get("content"):
                 relevant.append(f"- [{node['title']}] {node['content'][:200]}")
+                matched_ids.append(r["id"])
+        graph_facts = _expand_graph_context(matched_ids)
+        community_labels = _graphify_community_context(query)
 
     # 최근 sync 항목
     recent = list_synced(limit=10)
@@ -906,6 +966,13 @@ def build_avatar_context(query: str = "") -> dict:
     # 관련 컨텍스트가 있으면 추가
     if relevant:
         system += "\n\n## 질문과 관련된 내 지식\n" + "\n".join(relevant)
+    if graph_facts:
+        system += (
+            "\n\n## 관련 개념 간 연결 (지식그래프, 답변에 자연스럽게 참고)\n"
+            + "\n".join(graph_facts)
+        )
+    if community_labels:
+        system += f"\n\n## 관련 지식 커뮤니티 (Graphify, 참고용)\n- {community_labels}"
 
     # 실시간 MCP 데이터 (날씨/주식/뉴스)
     if query:

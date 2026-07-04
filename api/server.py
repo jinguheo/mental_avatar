@@ -135,44 +135,34 @@ def ingest():
 
 
 def _graphify_community_search(q: str) -> list[dict]:
-    """graph.json에서 쿼리와 관련된 커뮤니티 노드를 검색."""
+    """graph.json에서 쿼리와 관련된 커뮤니티 노드를 검색.
+    커뮤니티 매칭 자체는 core/graphify_runner.matching_communities로 통일(avatar.py와 공유)."""
     import json as _json
+    from core import graphify_runner
     graph_path = os.path.join(os.path.dirname(__file__), "..", "graphify-out", "graph.json")
-    labels_path = os.path.join(os.path.dirname(__file__), "..", "graphify-out", ".graphify_labels.json")
     if not os.path.exists(graph_path):
         return []
     try:
-        gdata  = _json.loads(open(graph_path, encoding="utf-8").read())
-        labels = _json.loads(open(labels_path, encoding="utf-8").read()) if os.path.exists(labels_path) else {}
-        q_low  = q.lower()
-        matched_communities: set[int] = set()
+        gdata = _json.loads(open(graph_path, encoding="utf-8").read())
+        matched_communities = graphify_runner.matching_communities(q)
+        if not matched_communities:
+            return []
         results = []
-        # 1단계: 쿼리와 레이블이 매칭되는 커뮤니티 찾기
-        for cid, label in labels.items():
-            if q_low in label.lower():
-                matched_communities.add(int(cid))
-        # 2단계: 노드 레이블에서 직접 매칭
-        for node in gdata.get("nodes", []):
-            label = node.get("label", "")
-            cid   = node.get("community")
-            if q_low in label.lower():
-                matched_communities.add(cid)
-        # 3단계: 매칭된 커뮤니티의 문서 노드 수집
         seen = set()
         for node in gdata.get("nodes", []):
-            if node.get("community") in matched_communities and node.get("file_type") == "document":
+            cid = node.get("community")
+            if cid in matched_communities and node.get("file_type") == "document":
                 nid = node["id"]
                 if nid in seen:
                     continue
                 seen.add(nid)
-                cid = node.get("community")
                 results.append({
                     "id": nid,
                     "title": node.get("label", nid),
                     "source_type": "graphify",
-                    "community": labels.get(str(cid), f"Community {cid}"),
+                    "community": matched_communities.get(cid, f"Community {cid}"),
                     "distance": 0.0,
-                    "document": f"[Graphify] 커뮤니티: {labels.get(str(cid), '')}",
+                    "document": f"[Graphify] 커뮤니티: {matched_communities.get(cid, '')}",
                     "_source": "graphify",
                 })
         return results[:5]

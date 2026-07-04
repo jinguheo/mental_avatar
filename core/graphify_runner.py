@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 from pathlib import Path
 
 WIKI_DIR    = Path(__file__).parent.parent / "graphify-wiki"
@@ -70,6 +71,37 @@ def _load_labels() -> dict[int, str]:
         except Exception:
             pass
     return {}
+
+
+def _tokenize(s: str) -> set[str]:
+    return {w for w in re.split(r"[^\w가-힣]+", (s or "").lower()) if len(w) >= 2}
+
+
+def matching_communities(query: str) -> dict[int, str]:
+    """쿼리와 레이블/노드 라벨이 겹치는 Graphify 커뮤니티를 찾는다. {community_id: label}.
+    검색 API(server.py)와 아바타 답변 컨텍스트(avatar.py) 둘 다 이 함수로 통일 — 매칭 로직 중복 방지.
+    파일 읽기만 하는 가벼운 조회(LLM 호출 없음)라 답변 생성 경로에서 호출해도 부담 없음.
+    토큰(단어) 단위 겹침으로 매칭 — 검색탭의 짧은 키워드뿐 아니라 아바타의 자연어 질문 전체와도
+    맞아떨어져야 하므로, "라벨이 쿼리 전체를 부분문자열로 포함"이 아니라 "단어 하나라도 겹치는지"로 판단."""
+    graph_path = OUT_DIR / "graph.json"
+    q_tokens = _tokenize(query)
+    if not q_tokens or not graph_path.exists():
+        return {}
+    try:
+        gdata  = json.loads(graph_path.read_text(encoding="utf-8"))
+        labels = _load_labels()
+        matched: dict[int, str] = {}
+        for cid, label in labels.items():
+            if q_tokens & _tokenize(label):
+                matched[cid] = label
+        for node in gdata.get("nodes", []):
+            label = node.get("label", "")
+            cid   = node.get("community")
+            if cid is not None and cid not in matched and q_tokens & _tokenize(label):
+                matched[cid] = labels.get(cid, f"Community {cid}")
+        return matched
+    except Exception:
+        return {}
 
 
 def run_graphify(job: dict) -> None:
