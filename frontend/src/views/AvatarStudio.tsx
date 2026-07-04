@@ -727,44 +727,48 @@ export default function AvatarStudio() {
 
       {/* 오른쪽: 이전 생성 목록 */}
       {history.length > 0 && (
-        <div className="w-48 shrink-0 flex flex-col gap-2 overflow-y-auto">
+        <div className="w-48 shrink-0 flex flex-col gap-2 overflow-hidden">
           <p className="text-xs font-semibold text-gray-600 shrink-0">이전 생성 목록</p>
           <p className="text-[10px] text-gray-400 shrink-0">클릭: 재생 · 길게 클릭: 이 얼굴로 설정</p>
-          {history.map(h => {
-            const isSelected = facePreview === `${API}${h.thumb_url}`
-            return (
-            <div key={h.job_id} className={`rounded-xl overflow-hidden border-2 transition cursor-pointer ${
-              videoUrl === `${API}${h.video_url}` ? 'border-gray-900' : isSelected ? 'border-indigo-500' : 'border-transparent hover:border-gray-300'
-            }`}>
-              <img src={`${API}${h.thumb_url}`} className="w-full aspect-square object-cover"
-                alt="thumb"
-                onClick={() => setVideoUrl(`${API}${h.video_url}`)}
-                onError={e => { (e.target as HTMLImageElement).src = '' }} />
-              <div className="flex gap-1 px-1 py-1 bg-white">
-                <button className="flex-1 text-[9px] text-gray-500 hover:text-gray-900 transition"
-                  onClick={() => setVideoUrl(`${API}${h.video_url}`)}>▶ 재생</button>
-                <button className="flex-1 text-[9px] text-indigo-500 hover:text-indigo-700 font-medium transition"
-                  onClick={async () => {
-                    const res = await fetch(`${API}${h.thumb_url}`)
-                    const blob = await res.blob()
-                    const url = URL.createObjectURL(blob)
-                    setFacePreview(url)
-                    setFaceFile(new File([blob], 'face.jpg', { type: 'image/jpeg' }))
-                  }}>👤 사용</button>
-                <button className="flex-1 text-[9px] text-red-400 hover:text-red-600 font-medium transition"
-                  onClick={async (e) => {
-                    e.stopPropagation()
-                    if (!confirm('이 영상을 삭제할까요?')) return
-                    try {
-                      await fetch(`${API}/avatar/history/${h.job_id}`, { method: 'DELETE' })
-                      if (videoUrl === `${API}${h.video_url}`) setVideoUrl(null)
-                      loadHistory()
-                    } catch { /* ignore */ }
-                  }}>🗑 삭제</button>
+          {/* 2열 그리드 — 항목이 컨테이너 높이에 맞춰 짜부라지지 않게(예전 flex-shrink 버그와 같은 종류) content-start만으론
+              부족해서 auto-rows-min(행 높이를 내용 최소크기로) + items-start(기본 stretch 해제)까지 함께 필요했음 */}
+          <div className="grid grid-cols-2 auto-rows-min gap-1.5 overflow-y-auto content-start items-start flex-1 min-h-0">
+            {history.map(h => {
+              const isSelected = facePreview === `${API}${h.thumb_url}`
+              return (
+              <div key={h.job_id} className={`rounded-lg overflow-hidden border-2 transition cursor-pointer ${
+                videoUrl === `${API}${h.video_url}` ? 'border-gray-900' : isSelected ? 'border-indigo-500' : 'border-transparent hover:border-gray-300'
+              }`}>
+                <img src={`${API}${h.thumb_url}`} className="w-full aspect-square object-cover"
+                  alt="thumb"
+                  onClick={() => setVideoUrl(`${API}${h.video_url}`)}
+                  onError={e => { (e.target as HTMLImageElement).src = '' }} />
+                <div className="flex gap-0.5 px-0.5 py-0.5 bg-white">
+                  <button className="flex-1 text-[9px] text-gray-500 hover:text-gray-900 transition" title="재생"
+                    onClick={() => setVideoUrl(`${API}${h.video_url}`)}>▶</button>
+                  <button className="flex-1 text-[9px] text-indigo-500 hover:text-indigo-700 font-medium transition" title="이 얼굴로 사용"
+                    onClick={async () => {
+                      const res = await fetch(`${API}${h.thumb_url}`)
+                      const blob = await res.blob()
+                      const url = URL.createObjectURL(blob)
+                      setFacePreview(url)
+                      setFaceFile(new File([blob], 'face.jpg', { type: 'image/jpeg' }))
+                    }}>👤</button>
+                  <button className="flex-1 text-[9px] text-red-400 hover:text-red-600 font-medium transition" title="삭제"
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      if (!confirm('이 영상을 삭제할까요?')) return
+                      try {
+                        await fetch(`${API}/avatar/history/${h.job_id}`, { method: 'DELETE' })
+                        if (videoUrl === `${API}${h.video_url}`) setVideoUrl(null)
+                        loadHistory()
+                      } catch { /* ignore */ }
+                    }}>🗑</button>
+                </div>
+                <div className="text-[8px] text-gray-400 px-1 pb-0.5 bg-white truncate">{h.created_at}</div>
               </div>
-              <div className="text-[9px] text-gray-400 px-1 pb-0.5 bg-white">{h.created_at}</div>
-            </div>
-          )})}
+            )})}
+          </div>
         </div>
       )}
     </div>

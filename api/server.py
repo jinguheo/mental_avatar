@@ -1238,6 +1238,69 @@ VOICE_SAMPLE    = AVATAR_DATA / "voice_sample.wav"
 PYTHON_EXE      = config.AVATAR_PYTHON   # SadTalker (numpy 1.26 패치판)
 XTTS_PYTHON_EXE = config.XTTS_PYTHON     # Coqui XTTS v2
 
+
+FACE_IMAGE_MAX_SIDE = 1024  # 이 이상이면 SadTalker 랜드마크 검출이 실패하는 게 실측 확인됨
+
+
+def _save_face_image(file_storage, dest_path) -> None:
+    """업로드된 얼굴 사진을 저장 + EXIF 방향 반영 + 과대 해상도 축소.
+    폰카메라 원본(수천만 화소, EXIF Orientation 태그만 있고 실제 픽셀은 안 돌아간 상태)을
+    그대로 넘기면 SadTalker에서 실패한다 — 실측(2026-07-04)으로 원인 2가지 모두 확인:
+      1) 고해상도(6.5MP 등) 자체만으로 초기 얼굴 랜드마크 검출(croper.py)이 통째로 실패
+         (실패 시 SadTalker가 문자열을 raise하는 버그 때문에 TypeError로 위장되어 나옴)
+      2) EXIF 회전 미반영 상태로는(리사이즈만 해도) 랜드마크는 찾아도 이후 합성 단계
+         (paste_pic.py의 cv2.seamlessClone)에서 크롭 좌표가 어긋나 별도로 크래시
+    두 처리를 모두 해야 안전해서 저장 시점에 함께 적용."""
+    file_storage.save(str(dest_path))
+    try:
+        from PIL import Image, ImageOps
+        img = Image.open(dest_path)
+        fixed = ImageOps.exif_transpose(img)
+        w, h = fixed.size
+        if max(w, h) > FACE_IMAGE_MAX_SIDE:
+            scale = FACE_IMAGE_MAX_SIDE / max(w, h)
+            fixed = fixed.resize((round(w * scale), round(h * scale)), Image.LANCZOS)
+        fixed.save(dest_path)
+    except Exception as e:
+        print(f"[avatar] 얼굴 사진 전처리(EXIF/리사이즈) 실패(무시하고 원본 사용): {e}")
+
+
+def _run_sadtalker(cmd: list, face_path, cwd: str, env: dict, timeout: int = 600):
+    """SadTalker 서브프로세스 실행 — 실패 시 얼굴 사진을 회전/축소해가며 재시도한다.
+
+    실측(2026-07-04) 확인된 실패 유형 2가지에 대응:
+      1) 얼굴을 못 찾음(회전된 사진 등) — stderr에 "landmark"가 섞여 나옴(SadTalker가
+         이 실패를 문자열 raise로 던져 실제로는 TypeError로 위장되어 나온다). 이 경우
+         소스 이미지를 90도씩 돌려가며 최대 4방향(0/90/180/270)까지 재시도.
+      2) 과대 해상도 — _save_face_image를 거치지 않은 호출 경로 대비, 실행 전 방어적으로
+         한 번 더 확인해 크면 축소한다.
+    끝까지 실패하면 마지막 시도의 CalledProcessError를 그대로 raise —
+    기존 호출부의 `except subprocess.CalledProcessError` 처리와 호환됨."""
+    from PIL import Image
+
+    try:
+        img = Image.open(face_path)
+        w, h = img.size
+        if max(w, h) > FACE_IMAGE_MAX_SIDE:
+            scale = FACE_IMAGE_MAX_SIDE / max(w, h)
+            img.resize((round(w * scale), round(h * scale)), Image.LANCZOS).save(face_path)
+    except Exception:
+        pass
+
+    last_exc = None
+    for attempt in range(4):
+        try:
+            return subprocess.run(cmd, check=True, cwd=cwd, capture_output=True, timeout=timeout, env=env)
+        except subprocess.CalledProcessError as e:
+            last_exc = e
+            stderr = e.stderr.decode(errors="replace") if e.stderr else ""
+            if "landmark" not in stderr.lower() or attempt == 3:
+                raise
+            print(f"[avatar] SadTalker 얼굴 미검출 — {attempt + 1}/4 시도, 이미지 90도 회전 후 재시도")
+            img = Image.open(face_path)
+            img.rotate(-90, expand=True).save(face_path)
+    raise last_exc
+
 # '내 목소리'가 아닌 템플릿 옵션 — XTTS v2 내장 스피커 중 선별 (speaker_wav 대신 speaker= 사용)
 VOICE_TEMPLATES = {
     "pretty": "Daisy Studious",   # 예쁜 목소리 (또랑또랑한 여성)
@@ -1335,7 +1398,7 @@ def avatar_register_face():
         return jsonify({"error": "face file required"}), 400
     AVATAR_DATA.mkdir(parents=True, exist_ok=True)
     dest = AVATAR_DATA / "face.jpg"
-    f.save(str(dest))
+    _save_face_image(f, dest)
     return jsonify({"status": "ok"})
 
 
@@ -1453,8 +1516,7 @@ def _run_avatar_job_locked(job_id: str, face_path: Path, text: str, job_dir: Pat
         return max(candidates, key=lambda f: f.stat().st_mtime)
 
     try:
-        subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
-                       capture_output=True, timeout=600, env=sad_env)
+        _run_sadtalker(cmd, face_path, cwd=str(SADTALKER_DIR), env=sad_env, timeout=600)
     except subprocess.CalledProcessError as e:
         mp4 = _final_mp4()
         if mp4:
@@ -1519,7 +1581,7 @@ def avatar_generate_async():
 
     face_ext  = Path(face_file.filename).suffix or ".jpg"
     face_path = job_dir / f"face{face_ext}"
-    face_file.save(str(face_path))
+    _save_face_image(face_file, face_path)
 
     ref_pose_path = None
     if ref_video and ref_video.filename:
@@ -1582,8 +1644,7 @@ def _run_record_job_locked(job_id: str, face_path: Path, audio_path: Path, job_d
         return max(candidates, key=lambda f: f.stat().st_mtime)
 
     try:
-        subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
-                       capture_output=True, timeout=600, env=sad_env)
+        _run_sadtalker(cmd, face_path, cwd=str(SADTALKER_DIR), env=sad_env, timeout=600)
     except subprocess.CalledProcessError as e:
         mp4 = _final_mp4()
         if mp4:
@@ -1622,7 +1683,7 @@ def avatar_record_generate():
 
     face_ext  = Path(face_file.filename or "face.jpg").suffix or ".jpg"
     face_path = job_dir / f"face{face_ext}"
-    face_file.save(str(face_path))
+    _save_face_image(face_file, face_path)
 
     audio_ext  = Path(audio_file.filename or "audio.webm").suffix or ".webm"
     audio_path = job_dir / f"audio{audio_ext}"
@@ -1865,7 +1926,7 @@ def avatar_faceswap():
 
     face_path   = job_dir / f"source{Path(source_face.filename).suffix or '.jpg'}"
     output_path = str(job_dir / "faceswap_result.mp4")
-    source_face.save(str(face_path))
+    _save_face_image(source_face, face_path)
 
     # 대상 영상: 직접 업로드 또는 YouTube 다운로드 결과 사용
     if yt_job_id and yt_job_id in _ytdl_jobs and _ytdl_jobs[yt_job_id]["stage"] == "done":
@@ -1924,7 +1985,7 @@ def avatar_tts_generate():
 
     face_ext  = Path(face_file.filename).suffix or ".jpg"
     face_path = job_dir / f"face{face_ext}"
-    face_file.save(str(face_path))
+    _save_face_image(face_file, face_path)
 
     speech_path = job_dir / "speech.wav"
 
@@ -1955,8 +2016,7 @@ def avatar_tts_generate():
     sad_env = dict(os.environ)
     sad_env["PATH"] = str(SADTALKER_DIR) + os.pathsep + sad_env.get("PATH", "")
     try:
-        subprocess.run(cmd, check=True, cwd=str(SADTALKER_DIR),
-                       capture_output=True, timeout=600, env=sad_env)
+        _run_sadtalker(cmd, face_path, cwd=str(SADTALKER_DIR), env=sad_env, timeout=600)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "SadTalker failed", "detail": e.stderr.decode(errors="replace")}), 500
     except subprocess.TimeoutExpired:
