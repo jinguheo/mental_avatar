@@ -27,21 +27,26 @@ def get_face(img, app):
     return sorted(faces, key=lambda f: f.bbox[0])[0]
 
 
-def swap_faces_in_video(source_face_path: str, target_video_path: str, output_path: str) -> bool:
+def swap_faces_in_video(source_face_path: str, target_video_path: str, output_path: str, use_gpu: bool = True) -> bool:
     """
     target_video의 모든 프레임에서 얼굴을 source_face로 교체.
+    use_gpu=True면 CUDAExecutionProvider 우선 시도(실측 10초/720p 기준 CPU 671초 → GPU 51초, 약 13배).
+    onnxruntime-gpu 설치 후에도 embeddings.py의 ChromaDB 임베딩은 별도로 CPU 강제돼 있어 서로 영향 없음.
     """
     import insightface
     from insightface.app import FaceAnalysis
 
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_gpu else ["CPUExecutionProvider"]
+    ctx_id = 0 if use_gpu else -1
+
     # 모델 초기화
-    app = FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-    app.prepare(ctx_id=0, det_size=(640, 640))
+    app = FaceAnalysis(name="buffalo_l", providers=providers)
+    app.prepare(ctx_id=ctx_id, det_size=(640, 640))
 
     swapper = insightface.model_zoo.get_model(
         str(MODEL_PATH),
         download=False,
-        providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+        providers=providers
     )
 
     # 소스 얼굴 추출

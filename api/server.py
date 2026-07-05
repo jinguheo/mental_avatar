@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 import hashlib
 import uuid, subprocess, time, json
 from pathlib import Path
@@ -1862,20 +1863,21 @@ def avatar_ytdl():
             raw_path = str(mp4_files[0])
             final_path = str(job_dir / "clip.mp4")
 
-            # 구간 자르기 (start/end 지정 또는 max_sec 초과 시 앞부분만)
+            # 구간 자르기 (start/end 지정 또는 max_sec 초과 시 앞부분만) + faststart 리먹싱
+            # (+faststart 없이 만들면 moov atom이 파일 끝에 남아 브라우저 <video>로 재생이 안 됨)
             ffmpeg = str(SADTALKER_DIR / "ffmpeg.exe")
             ss_args = ["-ss", start] if start else []
             to_args = ["-to", end] if end else (["-t", str(max_sec)] if duration > max_sec else [])
 
-            if ss_args or to_args:
+            try:
                 subprocess.run(
                     [ffmpeg, "-y"] + ss_args + ["-i", raw_path] + to_args +
-                    ["-c", "copy", final_path],
+                    ["-c", "copy", "-movflags", "+faststart", final_path],
                     check=True, capture_output=True, timeout=120
                 )
                 if not Path(final_path).exists():
                     final_path = raw_path
-            else:
+            except Exception:
                 final_path = raw_path
 
             _ytdl_jobs[job_id].update({"stage": "done", "video_path": final_path, "title": title,
@@ -1908,12 +1910,65 @@ def avatar_ytdl_video(job_id: str):
                      download_name=f"{job.get('title','video')[:40]}.mp4")
 
 
+_SADTALKER_REF_DIR   = SADTALKER_DIR / "examples" / "ref_video"
+_LOCAL_REF_SAMPLE_DIR = Path(__file__).parent.parent / "data" / "ref_pose_samples"
+_REF_POSE_CACHE = AVATAR_TMP / "ref_pose_cache"
+
+
+@app.route("/avatar/ref_pose/samples", methods=["GET"])
+def avatar_ref_pose_samples():
+    """번들된 예시 포즈 참조 영상 목록 — SadTalker 기본 예시(examples/ref_video/) +
+    data/ref_pose_samples/(직접 추가한 royalty-free 샘플, 남/여 다양화용)"""
+    samples = []
+    for d in (_SADTALKER_REF_DIR, _LOCAL_REF_SAMPLE_DIR):
+        if d.exists():
+            for f in sorted(d.glob("*.mp4")):
+                samples.append({"name": f.name, "video_url": f"/avatar/ref_pose/sample/{f.name}"})
+    return jsonify({"samples": samples})
+
+
+def _faststart_cached(src: Path) -> Path:
+    """브라우저 재생용 캐시본을 반환 (없으면 생성).
+    SadTalker 번들 예시 영상은 1) moov atom이 파일 끝에 있고(non-faststart)
+    2) 비디오 코덱이 브라우저가 디코딩 못 하는 구형 MPEG-4 Part 2(mp4v)라 <video> 태그로 재생이 안 됨.
+    그래서 단순 리먹싱(-c copy)이 아니라 H.264로 다시 인코딩해야 한다."""
+    _REF_POSE_CACHE.mkdir(parents=True, exist_ok=True)
+    cached = _REF_POSE_CACHE / src.name
+    if not cached.exists() or cached.stat().st_mtime < src.stat().st_mtime:
+        subprocess.run(
+            [str(config.SADTALKER_FFMPEG), "-y", "-i", str(src),
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+             "-movflags", "+faststart", str(cached)],
+            check=True, capture_output=True, timeout=120
+        )
+    return cached
+
+
+@app.route("/avatar/ref_pose/sample/<name>", methods=["GET"])
+def avatar_ref_pose_sample(name: str):
+    safe_name = secure_filename(name)
+    local_path = _LOCAL_REF_SAMPLE_DIR / safe_name
+    if local_path.exists():
+        # data/ref_pose_samples/ 파일은 이미 h264 + faststart로 정규화해 저장해둔 것이라 바로 서빙
+        return send_file(str(local_path), mimetype="video/mp4", as_attachment=False)
+
+    path = _SADTALKER_REF_DIR / safe_name
+    if not path.exists():
+        return jsonify({"error": "not found"}), 404
+    try:
+        serve_path = _faststart_cached(path)
+    except Exception:
+        serve_path = path
+    return send_file(str(serve_path), mimetype="video/mp4", as_attachment=False)
+
+
 @app.route("/avatar/faceswap", methods=["POST"])
 def avatar_faceswap():
     """얼굴 교체: source_face + (target_video 파일 또는 yt_job_id) → 내 얼굴로 교체된 영상"""
     source_face  = request.files.get("source_face")
     target_video = request.files.get("target_video")
     yt_job_id    = request.form.get("yt_job_id", "")
+    use_gpu      = request.form.get("use_gpu", "true").lower() not in ("false", "0", "")
 
     if not source_face:
         return jsonify({"error": "source_face 필요"}), 400
@@ -1940,7 +1995,7 @@ def avatar_faceswap():
     def _run():
         try:
             from core.faceswap import swap_faces_in_video
-            swap_faces_in_video(str(face_path), str(video_path), output_path)
+            swap_faces_in_video(str(face_path), str(video_path), output_path, use_gpu=use_gpu)
             _faceswap_jobs[job_id]["stage"] = "done"
             _faceswap_jobs[job_id]["mp4_path"] = output_path
         except Exception as e:
@@ -1962,9 +2017,56 @@ def avatar_faceswap_status(job_id: str):
 @app.route("/avatar/faceswap/<job_id>/video", methods=["GET"])
 def avatar_faceswap_video(job_id: str):
     job = _faceswap_jobs.get(job_id)
-    if not job or job["stage"] != "done":
-        return jsonify({"error": "not ready"}), 404
-    return send_file(job["mp4_path"], mimetype="video/mp4", as_attachment=False)
+    if job and job["stage"] == "done":
+        return send_file(job["mp4_path"], mimetype="video/mp4", as_attachment=False)
+    # 서버 재시작 등으로 메모리 job 정보가 없어도, 결과 파일이 남아있으면 저장 목록 재생을 위해 서빙
+    mp4_path = AVATAR_TMP / secure_filename(job_id) / "faceswap_result.mp4"
+    if mp4_path.exists():
+        return send_file(str(mp4_path), mimetype="video/mp4", as_attachment=False)
+    return jsonify({"error": "not ready"}), 404
+
+
+@app.route("/avatar/faceswap/history", methods=["GET"])
+def avatar_faceswap_history():
+    """저장된 얼굴교체 결과 목록 (파일시스템 기준 — 서버 재시작에도 유지됨)"""
+    results = []
+    if AVATAR_TMP.exists():
+        for job_dir in AVATAR_TMP.iterdir():
+            if not job_dir.is_dir():
+                continue
+            mp4 = job_dir / "faceswap_result.mp4"
+            if not mp4.exists():
+                continue
+            job_id = job_dir.name
+            results.append({
+                "job_id": job_id,
+                "created_at": mp4.stat().st_mtime,
+                "video_url": f"/avatar/faceswap/{job_id}/video",
+                "thumb_url": f"/avatar/faceswap/history/{job_id}/thumb",
+            })
+    results.sort(key=lambda x: x["created_at"], reverse=True)
+    for r in results:
+        r["created_at"] = _datetime.datetime.fromtimestamp(r["created_at"]).strftime("%Y-%m-%d %H:%M")
+    return jsonify({"history": results[:20]})
+
+
+@app.route("/avatar/faceswap/history/<job_id>/thumb", methods=["GET"])
+def avatar_faceswap_thumb(job_id: str):
+    job_dir = AVATAR_TMP / secure_filename(job_id)
+    for ext in ("jpg", "jpeg", "png"):
+        f = job_dir / f"source.{ext}"
+        if f.exists():
+            return send_file(str(f), mimetype=f"image/{ext}")
+    return jsonify({"error": "no thumb"}), 404
+
+
+@app.route("/avatar/faceswap/history/<job_id>", methods=["DELETE"])
+def avatar_faceswap_delete(job_id: str):
+    job_dir = AVATAR_TMP / secure_filename(job_id)
+    if job_dir.exists() and job_dir.is_dir():
+        _shutil.rmtree(job_dir, ignore_errors=True)
+    _faceswap_jobs.pop(job_id, None)
+    return jsonify({"success": True})
 
 
 @app.route("/avatar/tts_generate", methods=["POST"])
@@ -2200,8 +2302,8 @@ def presenter_session_delete(session_id: str):
 # ── tmp 자동 정리 ────────────────────────────────────────────
 def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24) -> dict:
     """누적되는 tmp 산출물을 정리한다.
-    - tmp/avatar: 최종 영상(result/**/*.mp4)이 없는 잡 폴더(tts_only speech.wav·실패 잡)만
-      나이 기준으로 삭제. 영상이 있는 폴더는 /avatar/history의 영구 저장소이므로 절대 건드리지 않는다.
+    - tmp/avatar: 최종 영상(result/**/*.mp4 또는 faceswap_result.mp4)이 없는 잡 폴더(tts_only speech.wav·실패 잡)만
+      나이 기준으로 삭제. 영상이 있는 폴더는 /avatar/history, /avatar/faceswap/history의 영구 저장소이므로 절대 건드리지 않는다.
     - tmp/stt: STT 임시 파일(크래시로 finally를 못 탄 잔여물)을 나이 기준으로 삭제.
     반환: {"avatar_removed", "avatar_freed_mb", "stt_removed"}"""
     now = time.time()
@@ -2215,7 +2317,7 @@ def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24) -> 
                 if (now - job_dir.stat().st_mtime) / 3600 < avatar_job_max_age_h:
                     continue
                 # 최종 영상이 하나라도 있으면 이력이므로 보존 (temp_/​_full.mp4는 중간 산출물이라 제외)
-                has_video = any(
+                has_video = (job_dir / "faceswap_result.mp4").exists() or any(
                     not f.name.startswith("temp_") and not f.name.endswith("_full.mp4")
                     for f in job_dir.glob("result/**/*.mp4")
                 )

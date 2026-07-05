@@ -3,6 +3,14 @@ import { API_BASE } from '@/config'
 
 const API = API_BASE
 
+const LAST_TEXT_KEY = 'mental-avatar-studio-last-text'
+const RECOMMENDED_TEXTS = [
+  '안녕하세요, 저는 저를 대신하는 디지털 아바타입니다. 만나서 반갑습니다.',
+  '오늘 날씨가 정말 좋네요. 산책하기 딱 좋은 날인 것 같아요.',
+  '이 프로젝트는 제 지식과 말투를 그대로 담아내는 것을 목표로 하고 있습니다.',
+  '와, 정말 놀라운 결과네요! 기대했던 것보다 훨씬 좋아요.',
+]
+
 interface YtHistory { job_id: string; title: string; url: string; video_path: string; duration: number; video_url: string }
 
 interface FaceSwapProps {
@@ -22,15 +30,37 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
   const [ytStart, setYtStart] = useState('')
   const [ytEnd, setYtEnd] = useState('')
   const [ytHistory, setYtHistory] = useState<YtHistory[]>([])
+  const [poseSamples, setPoseSamples] = useState<{name:string, video_url:string}[]>([])
+  const [useGpu, setUseGpu] = useState(true)
   const [stage, setStage] = useState('')
   const [resultUrl, setResultUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [faceswapHistory, setFaceswapHistory] = useState<{job_id:string, created_at:string, video_url:string, thumb_url:string}[]>([])
   const pollRef  = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const loadFaceswapHistory = useCallback(() => {
+    fetch(`${API}/avatar/faceswap/history`).then(r => r.json())
+      .then(d => setFaceswapHistory(d.history ?? [])).catch(() => {})
+  }, [])
 
   useEffect(() => {
     fetch(`${API}/avatar/ytdl/history`).then(r => r.json())
       .then(d => setYtHistory(d.history ?? [])).catch(() => {})
-  }, [])
+    // 모드 A(TTS+립싱크)의 "포즈 참조 영상" 후보를 여기서도 대상 영상으로 재활용
+    fetch(`${API}/avatar/ref_pose/samples`).then(r => r.json())
+      .then(d => setPoseSamples(d.samples ?? [])).catch(() => {})
+    loadFaceswapHistory()
+  }, [loadFaceswapHistory])
+
+  const selectPoseSampleAsTarget = async (videoUrl: string, name: string) => {
+    setError(null)
+    try {
+      const res = await fetch(`${API}${videoUrl}`)
+      const blob = await res.blob()
+      setTargetVideo(new File([blob], name, { type: 'video/mp4' }))
+      setYtJobId(null); setYtTitle('')
+    } catch (e) { setError(String(e)) }
+  }
 
   const selectAvatarFace = async (thumbUrl: string) => {
     const res = await fetch(`${API}${thumbUrl}`)
@@ -64,7 +94,7 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
   }
 
   const selectHistory = (h: YtHistory) => {
-    setYtJobId(h.job_id); setYtTitle(h.title); setYtUrl(h.url)
+    setYtJobId(h.job_id); setYtTitle(h.title); setYtUrl(h.url); setTargetVideo(null)
   }
 
   const startSwap = async () => {
@@ -84,6 +114,7 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
     } else {
       form.append('target_video', targetVideo!)
     }
+    form.append('use_gpu', String(useGpu))
     try {
       const res = await fetch(`${API}/avatar/faceswap`, { method: 'POST', body: form })
       const d = await res.json()
@@ -95,6 +126,7 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
         if (s.stage === 'done') {
           clearInterval(pollRef.current!); setStage('완료')
           setResultUrl(`${API}${s.video_url}`)
+          loadFaceswapHistory()
         } else if (s.stage === 'error') {
           clearInterval(pollRef.current!); setError(s.error); setStage('')
         }
@@ -196,6 +228,27 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
             </div>
           )}
 
+          {/* 포즈 참조 영상 후보 (TTS+립싱크 모드와 공유) */}
+          {poseSamples.length > 0 && (
+            <div className="mb-2">
+              <p className="text-[10px] text-gray-500 mb-1">포즈 참조 영상 후보에서 선택</p>
+              <div className="space-y-1 max-h-36 overflow-y-auto">
+                {poseSamples.map(s => {
+                  const label = s.name.replace(/\.mp4$/, '')
+                  const selected = targetVideo?.name === s.name
+                  return (
+                    <button key={s.name} onClick={() => selectPoseSampleAsTarget(s.video_url, s.name)}
+                      className={`w-full text-left px-2 py-1.5 rounded-lg border text-[10px] transition truncate ${
+                        selected ? 'border-indigo-400 bg-indigo-50 text-indigo-700 font-medium' : 'border-gray-200 hover:border-gray-400 text-gray-600'
+                      }`}>
+                      {selected ? '✓ ' : '🎬 '}{label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 mb-2">
             <div className="flex-1 h-px bg-gray-200" />
             <span className="text-[10px] text-gray-400">또는 파일 선택</span>
@@ -206,8 +259,23 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
           }`}>
             {targetVideo ? `🎬 ${targetVideo.name}` : '📂 영상 선택 (mp4, avi, mov…)'}
             <input type="file" accept="video/*" className="hidden"
-              onChange={e => setTargetVideo(e.target.files?.[0] ?? null)} />
+              onChange={e => {
+                const f = e.target.files?.[0] ?? null
+                setTargetVideo(f)
+                if (f) { setYtJobId(null); setYtTitle('') }
+              }} />
           </label>
+        </div>
+
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          {([[true,'⚡ GPU (빠름)'], [false,'CPU (느림)']] as [boolean, string][]).map(([gpu, label]) => (
+            <button key={String(gpu)} onClick={() => setUseGpu(gpu)}
+              className={`flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition ${
+                useGpu === gpu ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}>
+              {label}
+            </button>
+          ))}
         </div>
 
         <button onClick={startSwap} disabled={!canStart}
@@ -232,6 +300,40 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
               </div>
         }
       </div>
+
+      {/* 오른쪽: 저장 목록 */}
+      {faceswapHistory.length > 0 && (
+        <div className="w-48 shrink-0 flex flex-col gap-2 overflow-hidden">
+          <p className="text-xs font-semibold text-gray-600 shrink-0">저장 목록</p>
+          <p className="text-[10px] text-gray-400 shrink-0">클릭: 재생</p>
+          <div className="grid grid-cols-2 auto-rows-min gap-1.5 overflow-y-auto content-start items-start flex-1 min-h-0">
+            {faceswapHistory.map(h => (
+              <div key={h.job_id} className={`rounded-lg overflow-hidden border-2 transition ${
+                resultUrl === `${API}${h.video_url}` ? 'border-gray-900' : 'border-transparent hover:border-gray-300'
+              }`}>
+                <img src={`${API}${h.thumb_url}`} className="w-full aspect-square object-cover cursor-pointer bg-gray-100"
+                  alt="thumb"
+                  onClick={() => setResultUrl(`${API}${h.video_url}`)}
+                  onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                <div className="flex gap-0.5 px-0.5 py-0.5 bg-white">
+                  <button className="flex-1 text-[9px] text-gray-500 hover:text-gray-900 transition" title="재생"
+                    onClick={() => setResultUrl(`${API}${h.video_url}`)}>▶</button>
+                  <button className="flex-1 text-[9px] text-red-400 hover:text-red-600 font-medium transition" title="삭제"
+                    onClick={async () => {
+                      if (!confirm('이 영상을 삭제할까요?')) return
+                      try {
+                        await fetch(`${API}/avatar/faceswap/history/${h.job_id}`, { method: 'DELETE' })
+                        if (resultUrl === `${API}${h.video_url}`) setResultUrl(null)
+                        loadFaceswapHistory()
+                      } catch { /* ignore */ }
+                    }}>🗑</button>
+                </div>
+                <div className="text-[8px] text-gray-400 px-1 pb-0.5 bg-white truncate">{h.created_at}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -250,7 +352,7 @@ export default function AvatarStudio() {
   const [faceFile, setFaceFile]               = useState<File | null>(null)
   const [facePreview, setFacePreview]         = useState<string | null>(null)
   const [faceRegistered, setFaceRegistered]   = useState(false)
-  const [text, setText]                       = useState('')
+  const [text, setText]                       = useState(() => localStorage.getItem(LAST_TEXT_KEY) || '')
   const [voiceRegistered, setVoiceRegistered] = useState(false)
   // 모드 A/C 공유 얼굴 상태
   const [sharedFaceFile, setSharedFaceFile]   = useState<File | null>(null)
@@ -261,6 +363,11 @@ export default function AvatarStudio() {
   }
   const [refPoseFile, setRefPoseFile]         = useState<File | null>(null)
   const [refPoseName, setRefPoseName]         = useState<string | null>(null)
+  const [poseSamples, setPoseSamples]         = useState<{name:string, video_url:string}[]>([])
+  const [poseHistory, setPoseHistory]         = useState<YtHistory[]>([])
+  const [poseYtUrl, setPoseYtUrl]             = useState('')
+  const [poseYtBusy, setPoseYtBusy]           = useState(false)
+  const [poseYtError, setPoseYtError]         = useState<string | null>(null)
   const [speechStyle, setSpeechStyle]         = useState('')
   const [persona, setPersona]                 = useState('')
   const [styleOptions, setStyleOptions]       = useState<{speech_style:string[], persona:string[]}>({speech_style:[], persona:[]})
@@ -290,6 +397,54 @@ export default function AvatarStudio() {
     } catch { /* ignore */ }
   }, [])
 
+  const loadPoseSamples = useCallback(async () => {
+    try {
+      const d = await (await fetch(`${API}/avatar/ref_pose/samples`)).json()
+      setPoseSamples(d.samples ?? [])
+    } catch { /* ignore */ }
+  }, [])
+
+  const loadPoseHistory = useCallback(async () => {
+    try {
+      const d = await (await fetch(`${API}/avatar/ytdl/history`)).json()
+      setPoseHistory(d.history ?? [])
+    } catch { /* ignore */ }
+  }, [])
+
+  const selectPoseVideo = async (videoUrl: string, name: string) => {
+    setPoseYtError(null)
+    try {
+      const res = await fetch(`${API}${videoUrl}`)
+      const blob = await res.blob()
+      setRefPoseFile(new File([blob], name, { type: 'video/mp4' }))
+      setRefPoseName(name)
+    } catch (e) { setPoseYtError(String(e)) }
+  }
+
+  const downloadPoseFromYoutube = async () => {
+    if (!poseYtUrl.trim()) return
+    setPoseYtBusy(true); setPoseYtError(null)
+    try {
+      const res = await fetch(`${API}/avatar/ytdl`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: poseYtUrl, max_sec: 30 })
+      })
+      const d = await res.json()
+      if (!res.ok) throw new Error(d.error)
+      const poll = setInterval(async () => {
+        const r = await fetch(`${API}/avatar/ytdl/${d.job_id}`)
+        const s = await r.json()
+        if (s.stage === 'done') {
+          clearInterval(poll); setPoseYtBusy(false); setPoseYtUrl('')
+          await selectPoseVideo(s.video_url, s.title || 'pose.mp4')
+          loadPoseHistory()
+        } else if (s.stage === 'error') {
+          clearInterval(poll); setPoseYtBusy(false); setPoseYtError(s.error)
+        }
+      }, 2000)
+    } catch (e) { setPoseYtBusy(false); setPoseYtError(String(e)) }
+  }
+
   useEffect(() => {
     fetch(`${API}/avatar/voice_status`)
       .then(r => r.json())
@@ -299,6 +454,8 @@ export default function AvatarStudio() {
       })
       .catch(() => {})
     loadHistory()
+    loadPoseSamples()
+    loadPoseHistory()
     fetch(`${API}/profile/me`).then(r => r.json()).then(d => {
       setStyleOptions({ speech_style: d.options?.speech_style ?? [], persona: d.options?.persona ?? [] })
       setSpeechStyle(d.profile?.speech_style?.value ?? '')
@@ -492,7 +649,7 @@ export default function AvatarStudio() {
       </div>
     <div className="flex gap-6 flex-1 p-6 overflow-auto bg-white">
       {/* 왼쪽: 입력 */}
-      <div className="w-80 flex flex-col gap-4 shrink-0">
+      <div className="w-[28rem] flex flex-col gap-4 shrink-0">
         <h2 className="text-sm font-semibold text-gray-900">TTS + 립싱크</h2>
 
         {/* 얼굴 사진 */}
@@ -576,49 +733,105 @@ export default function AvatarStudio() {
         {/* 텍스트 */}
         <div>
           <p className="text-xs font-medium text-gray-600 mb-2">발화 텍스트</p>
-          <textarea value={text} onChange={e => setText(e.target.value)} rows={4}
+          <textarea value={text} onChange={e => {
+            setText(e.target.value)
+            localStorage.setItem(LAST_TEXT_KEY, e.target.value)
+          }} rows={4}
             placeholder="아바타가 말할 내용을 입력하세요"
             className="w-full border border-gray-200 rounded-xl p-3 text-sm text-gray-900 resize-none outline-none focus:border-gray-400 placeholder-gray-300 bg-white" />
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {RECOMMENDED_TEXTS.map((t, i) => (
+              <button key={i} onClick={() => { setText(t); localStorage.setItem(LAST_TEXT_KEY, t) }}
+                title={t}
+                className="px-2.5 py-1 text-[11px] rounded-full border border-gray-200 text-gray-500 hover:border-gray-400 hover:bg-gray-50 transition truncate max-w-[9rem]">
+                {t}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* 말투 & 성격 */}
+        <button onClick={handleGenerate} disabled={!canGenerate}
+          className="py-2.5 rounded-xl bg-gray-900 hover:bg-gray-700 disabled:opacity-40 text-white text-sm font-medium transition">
+          {loading ? '생성 중…' : '영상 생성'}
+        </button>
+
+        {loading && stage && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse shrink-0" />
+              <p className="text-xs text-gray-600">{stage}</p>
+            </div>
+            <div className="flex gap-1 mt-1">
+              {['tts', 'sadtalker'].map((s, i) => {
+                const currentIdx = stage.includes('1/2') ? 0 : stage.includes('2/2') ? 1 : -1
+                return (
+                  <div key={s} className={`h-1 flex-1 rounded-full transition-colors ${
+                    i < currentIdx ? 'bg-green-400' : i === currentIdx ? 'bg-blue-400' : 'bg-gray-200'
+                  }`} />
+                )
+              })}
+            </div>
+            {jobId && <p className="text-[10px] text-gray-300 mt-0.5">job: {jobId.slice(0, 8)}…</p>}
+          </div>
+        )}
+        {!loading && stage && !error && <p className="text-xs text-gray-500">{stage}</p>}
+        {error && <p className="text-xs text-red-500">{error}</p>}
+      </div>
+
+      {/* 가운데: 결과 영상 + 포즈 참조 영상 (왼쪽 패널이 너무 길어져서 여기로 이동) */}
+      <div className="flex-1 flex flex-col gap-4 min-w-0 min-h-0">
+        <div className="flex-1 flex items-center justify-center bg-gray-50 rounded-2xl border border-gray-100 min-h-0">
+          {videoUrl
+            ? <video src={videoUrl} controls autoPlay loop className="max-h-full rounded-2xl shadow-lg" />
+            : loading
+              ? (
+                <div className="text-center text-gray-400">
+                  <div className="text-5xl mb-4 animate-pulse">⏳</div>
+                  <p className="text-sm font-medium">{stage || '처리 중…'}</p>
+                  <p className="text-xs mt-1 text-gray-300">총 5~8분 소요 (3초마다 상태 확인)</p>
+                </div>
+              )
+              : (
+                <div className="text-center text-gray-300">
+                  <div className="text-6xl mb-4">🎬</div>
+                  <p className="text-sm">영상이 여기에 표시됩니다</p>
+                </div>
+              )
+          }
+        </div>
+
+        {/* 말투 & 성격 (왼쪽 패널이 너무 길어져서 여기로 이동) */}
         {(styleOptions.speech_style.length > 0 || styleOptions.persona.length > 0) && (
-          <div className="space-y-2">
+          <div className="shrink-0 space-y-2">
             <p className="text-xs font-medium text-gray-600">말투 & 성격</p>
-            {styleOptions.speech_style.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {styleOptions.speech_style.map(opt => (
-                  <button key={opt} onClick={() => setSpeechStyle(p => p === opt ? '' : opt)}
-                    className={`px-2.5 py-1 text-[11px] rounded-full border transition ${
-                      speechStyle === opt ? 'bg-gray-900 text-white border-gray-900' : 'border-gray-200 text-gray-500 hover:border-gray-400'
-                    }`}>{opt}</button>
-                ))}
-              </div>
-            )}
-            {styleOptions.persona.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {styleOptions.persona.map(opt => (
-                  <button key={opt} onClick={() => setPersona(p => p === opt ? '' : opt)}
-                    className={`px-2.5 py-1 text-[11px] rounded-full border transition ${
-                      persona === opt ? 'bg-indigo-600 text-white border-indigo-600' : 'border-gray-200 text-gray-500 hover:border-gray-400'
-                    }`}>{opt}</button>
-                ))}
-              </div>
-            )}
-            {(speechStyle || persona) && (
-              <button onClick={async () => {
-                await fetch(`${API}/profile/me`, { method: 'POST', headers: {'Content-Type':'application/json'},
-                  body: JSON.stringify({ speech_style: speechStyle, persona }) })
-              }} className="text-[10px] text-indigo-500 hover:text-indigo-700">저장</button>
-            )}
+            <div className="flex flex-wrap gap-1.5 items-center">
+              {styleOptions.speech_style.map(opt => (
+                <button key={opt} onClick={() => setSpeechStyle(p => p === opt ? '' : opt)}
+                  className={`px-2.5 py-1 text-[11px] rounded-full border transition ${
+                    speechStyle === opt ? 'bg-gray-900 text-white border-gray-900' : 'border-gray-200 text-gray-500 hover:border-gray-400'
+                  }`}>{opt}</button>
+              ))}
+              {styleOptions.persona.map(opt => (
+                <button key={opt} onClick={() => setPersona(p => p === opt ? '' : opt)}
+                  className={`px-2.5 py-1 text-[11px] rounded-full border transition ${
+                    persona === opt ? 'bg-indigo-600 text-white border-indigo-600' : 'border-gray-200 text-gray-500 hover:border-gray-400'
+                  }`}>{opt}</button>
+              ))}
+              {(speechStyle || persona) && (
+                <button onClick={async () => {
+                  await fetch(`${API}/profile/me`, { method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ speech_style: speechStyle, persona }) })
+                }} className="text-[10px] text-indigo-500 hover:text-indigo-700">저장</button>
+              )}
+            </div>
           </div>
         )}
 
-        {/* 얼굴 선택 (히스토리) */}
+        {/* 얼굴 선택 (히스토리, 왼쪽 패널이 너무 길어져서 여기로 이동) */}
         {history.length > 0 && (
-          <div>
+          <div className="shrink-0">
             <p className="text-xs font-medium text-gray-600 mb-2">얼굴 선택</p>
-            <div className="flex gap-2 overflow-x-auto pb-1">
+            <div className="flex gap-2 flex-wrap pb-1">
               {/* 현재 등록된 얼굴 */}
               {faceRegistered && (
                 <button
@@ -654,75 +867,74 @@ export default function AvatarStudio() {
         )}
 
         {/* 참조 포즈 영상 */}
-        <div>
-          <p className="text-xs font-medium text-gray-600 mb-1">
-            포즈 참조 영상 <span className="text-gray-400 font-normal">(선택 — 이 영상의 동작으로 내 얼굴이 움직임)</span>
-          </p>
-          <div className="flex gap-2 items-center">
+        <div className="shrink-0">
+          <div className="flex items-center gap-2 mb-1.5">
+            <p className="text-xs font-medium text-gray-600">
+              포즈 참조 영상 <span className="text-gray-400 font-normal">(선택 — 이 영상의 동작으로 내 얼굴이 움직임)</span>
+            </p>
             <button onClick={() => refPoseInputRef.current?.click()}
-              className="flex-1 py-2 text-xs rounded-xl border border-dashed border-gray-300 hover:border-gray-500 text-gray-500 hover:text-gray-700 transition">
-              {refPoseName ? `🎬 ${refPoseName}` : '📂 영상 파일 선택 (mp4, avi, mov…)'}
+              className="text-xs px-3 py-1 rounded-lg border border-dashed border-gray-300 hover:border-gray-500 text-gray-500 hover:text-gray-700 transition">
+              {refPoseName ? `🎬 ${refPoseName}` : '📂 영상 파일 선택'}
             </button>
             {refPoseFile && (
               <button onClick={() => { setRefPoseFile(null); setRefPoseName(null) }}
-                className="text-xs px-2 py-2 rounded-xl border border-gray-200 text-gray-400 hover:text-red-500 transition">✕</button>
+                className="text-xs px-2 py-1 rounded-lg border border-gray-200 text-gray-400 hover:text-red-500 transition">✕</button>
             )}
+            <input value={poseYtUrl} onChange={e => setPoseYtUrl(e.target.value)}
+              placeholder="유튜브 URL로 후보 추가 (30초만 사용)"
+              className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1 text-[11px] outline-none focus:border-gray-400 placeholder-gray-300 bg-white" />
+            <button onClick={downloadPoseFromYoutube} disabled={poseYtBusy || !poseYtUrl.trim()}
+              className="px-2.5 py-1 text-[11px] rounded-lg border border-gray-200 text-gray-500 hover:border-gray-400 disabled:opacity-40 transition shrink-0">
+              {poseYtBusy ? '받는 중…' : '추가'}
+            </button>
           </div>
           <input ref={refPoseInputRef} type="file" accept="video/*" className="hidden"
             onChange={e => {
               const f = e.target.files?.[0]
               if (f) { setRefPoseFile(f); setRefPoseName(f.name) }
             }} />
-          {refPoseFile && <p className="text-[10px] text-indigo-500 mt-1">✓ 이 영상의 포즈로 생성됩니다</p>}
-        </div>
+          {refPoseFile && <p className="text-[10px] text-indigo-500 mb-1">✓ 이 영상의 포즈로 생성됩니다</p>}
+          {poseYtError && <p className="text-[10px] text-red-500 mb-1">오류: {poseYtError}</p>}
 
-        <button onClick={handleGenerate} disabled={!canGenerate}
-          className="py-2.5 rounded-xl bg-gray-900 hover:bg-gray-700 disabled:opacity-40 text-white text-sm font-medium transition">
-          {loading ? '생성 중…' : '영상 생성'}
-        </button>
-
-        {loading && stage && (
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse shrink-0" />
-              <p className="text-xs text-gray-600">{stage}</p>
-            </div>
-            <div className="flex gap-1 mt-1">
-              {['tts', 'sadtalker'].map((s, i) => {
-                const currentIdx = stage.includes('1/2') ? 0 : stage.includes('2/2') ? 1 : -1
+          {/* 후보 영상 (번들 샘플 + 유튜브에서 받은 영상) — 재생 미리보기 + 선택, 넓은 공간이라 여러 열로 배치 */}
+          {(poseSamples.length > 0 || poseHistory.length > 0) && (
+            <div className="flex flex-wrap gap-2">
+              {poseSamples.map(s => {
+                const label = s.name.replace(/\.mp4$/, '')
+                const selected = refPoseName === s.name
                 return (
-                  <div key={s} className={`h-1 flex-1 rounded-full transition-colors ${
-                    i < currentIdx ? 'bg-green-400' : i === currentIdx ? 'bg-blue-400' : 'bg-gray-200'
-                  }`} />
+                  <div key={s.name}
+                    className={`flex items-center gap-2 p-1.5 rounded-xl border transition cursor-pointer w-48 ${
+                      selected ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-400'
+                    }`}
+                    onClick={() => { setVideoUrl(`${API}${s.video_url}`); selectPoseVideo(s.video_url, s.name) }}>
+                    <div className="w-12 h-12 rounded-lg bg-gray-900 shrink-0 flex items-center justify-center text-white text-lg">▶</div>
+                    <span className="flex-1 min-w-0 text-left text-[11px] text-gray-600 leading-snug truncate">
+                      {selected && <span className="text-indigo-600 font-medium">✓ </span>}
+                      {label}
+                    </span>
+                  </div>
+                )
+              })}
+              {poseHistory.map(h => {
+                const selected = refPoseName === h.title
+                return (
+                  <div key={h.job_id}
+                    className={`flex items-center gap-2 p-1.5 rounded-xl border transition cursor-pointer w-48 ${
+                      selected ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-400'
+                    }`}
+                    onClick={() => { setVideoUrl(`${API}${h.video_url}`); selectPoseVideo(h.video_url, h.title) }}>
+                    <div className="w-12 h-12 rounded-lg bg-gray-900 shrink-0 flex items-center justify-center text-white text-lg">▶</div>
+                    <span className="flex-1 min-w-0 text-left text-[11px] text-gray-600 leading-snug truncate">
+                      {selected && <span className="text-indigo-600 font-medium">✓ </span>}
+                      {h.title}
+                    </span>
+                  </div>
                 )
               })}
             </div>
-            {jobId && <p className="text-[10px] text-gray-300 mt-0.5">job: {jobId.slice(0, 8)}…</p>}
-          </div>
-        )}
-        {!loading && stage && !error && <p className="text-xs text-gray-500">{stage}</p>}
-        {error && <p className="text-xs text-red-500">{error}</p>}
-      </div>
-
-      {/* 가운데: 결과 영상 */}
-      <div className="flex-1 flex items-center justify-center bg-gray-50 rounded-2xl border border-gray-100 min-w-0">
-        {videoUrl
-          ? <video src={videoUrl} controls autoPlay loop className="max-h-full rounded-2xl shadow-lg" />
-          : loading
-            ? (
-              <div className="text-center text-gray-400">
-                <div className="text-5xl mb-4 animate-pulse">⏳</div>
-                <p className="text-sm font-medium">{stage || '처리 중…'}</p>
-                <p className="text-xs mt-1 text-gray-300">총 5~8분 소요 (3초마다 상태 확인)</p>
-              </div>
-            )
-            : (
-              <div className="text-center text-gray-300">
-                <div className="text-6xl mb-4">🎬</div>
-                <p className="text-sm">영상이 여기에 표시됩니다</p>
-              </div>
-            )
-        }
+          )}
+        </div>
       </div>
 
       {/* 오른쪽: 이전 생성 목록 */}
