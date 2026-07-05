@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import mermaid from 'mermaid'
@@ -20,12 +20,6 @@ interface AvatarSummary {
   trends: { topic: string; recent: number; total: number; growth: string }[]
   gaps: { topic: string; doc_count: number }[]
 }
-interface GraphNode {
-  id: string; title: string; type: string; source_type: string; importance: number
-  x: number; y: number; vx: number; vy: number
-}
-interface GraphEdge { from_id: string; to_id: string; relation: string; weight: number }
-interface GraphData { nodes: GraphNode[]; edges: GraphEdge[] }
 interface Stats { nodes: number; edges: number; topics: number; vector_count: number; by_source: Record<string, number> }
 
 // ── 헬퍼 ──────────────────────────────────────────────
@@ -290,116 +284,19 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
   )
 }
 
-// ── 탭 2: 그래프 시각화 ───────────────────────────────
-const NODE_RADIUS = 18
-const W = 900
-const H = 600
-
-function useForceLayout(nodes: GraphNode[], edges: GraphEdge[]) {
-  const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({})
-  const frameRef = useRef<number>(0)
-  const nodesRef = useRef<GraphNode[]>([])
-
-  useEffect(() => {
-    if (!nodes.length) return
-    cancelAnimationFrame(frameRef.current)
-
-    const ns = nodes.map((n, i) => ({
-      ...n,
-      x: W / 2 + Math.cos((i / nodes.length) * Math.PI * 2) * 200,
-      y: H / 2 + Math.sin((i / nodes.length) * Math.PI * 2) * 180,
-      vx: 0, vy: 0,
-    }))
-    nodesRef.current = ns
-
-    const edgeMap: Record<string, string[]> = {}
-    edges.forEach(e => {
-      ;(edgeMap[e.from_id] = edgeMap[e.from_id] || []).push(e.to_id)
-      ;(edgeMap[e.to_id]   = edgeMap[e.to_id]   || []).push(e.from_id)
-    })
-
-    let tick = 0
-    const step = () => {
-      const cur = nodesRef.current
-      for (let i = 0; i < cur.length; i++) {
-        let fx = 0, fy = 0
-        // 반발력
-        for (let j = 0; j < cur.length; j++) {
-          if (i === j) continue
-          const dx = cur[i].x - cur[j].x, dy = cur[i].y - cur[j].y
-          const d2 = dx * dx + dy * dy + 1
-          const f = 8000 / d2
-          fx += (dx / Math.sqrt(d2)) * f
-          fy += (dy / Math.sqrt(d2)) * f
-        }
-        // 인력 (엣지)
-        ;(edgeMap[cur[i].id] || []).forEach(nid => {
-          const nb = cur.find(n => n.id === nid)
-          if (!nb) return
-          const dx = nb.x - cur[i].x, dy = nb.y - cur[i].y
-          const d = Math.sqrt(dx * dx + dy * dy) + 1
-          fx += (dx / d) * (d - 120) * 0.05
-          fy += (dy / d) * (d - 120) * 0.05
-        })
-        // 중심 인력
-        fx += (W / 2 - cur[i].x) * 0.01
-        fy += (H / 2 - cur[i].y) * 0.01
-        cur[i].vx = (cur[i].vx + fx) * 0.7
-        cur[i].vy = (cur[i].vy + fy) * 0.7
-        cur[i].x = Math.max(NODE_RADIUS, Math.min(W - NODE_RADIUS, cur[i].x + cur[i].vx))
-        cur[i].y = Math.max(NODE_RADIUS, Math.min(H - NODE_RADIUS, cur[i].y + cur[i].vy))
-      }
-      nodesRef.current = [...cur]
-      if (tick % 3 === 0) {
-        setPositions(Object.fromEntries(cur.map(n => [n.id, { x: n.x, y: n.y }])))
-      }
-      tick++
-      if (tick < 200) frameRef.current = requestAnimationFrame(step)
-    }
-    frameRef.current = requestAnimationFrame(step)
-    return () => cancelAnimationFrame(frameRef.current)
-  }, [nodes.length, edges.length]) // eslint-disable-line
-
-  return positions
-}
-
-type GraphFilter = 'docs' | 'concepts' | 'all'
-
+// ── 탭 2: 그래프 (파일 목록으로 대체) ─────────────────
 function GraphTab() {
-  const [rawGraph, setRawGraph] = useState<GraphData>({ nodes: [], edges: [] })
-  const [filter, setFilter] = useState<GraphFilter>('docs')
+  const [files, setFiles] = useState<RawFile[]>([])
   const [loading, setLoading] = useState(false)
-  const [selected, setSelected] = useState<GraphNode | null>(null)
-  const [hoverId, setHoverId] = useState<string | null>(null)
-
-  // 필터 적용
-  const graph = useMemo(() => {
-    if (filter === 'all') return rawGraph
-    const DOC_TYPES = new Set(['pdf','pptx','docx','txt','md','note','file','data','chunk','voice'])
-    const isDoc = (n: GraphNode) => n.type === 'chunk' || DOC_TYPES.has(n.source_type ?? '')
-    const isConcept = (n: GraphNode) => !isDoc(n)
-    const keep = filter === 'docs'
-      ? rawGraph.nodes.filter(n => isDoc(n) || (selected && rawGraph.edges.some(
-          e => (e.from_id === selected.id && e.to_id === n.id) || (e.to_id === selected.id && e.from_id === n.id)
-        )))
-      : rawGraph.nodes.filter(isConcept)
-    const keepIds = new Set(keep.map(n => n.id))
-    return {
-      nodes: keep,
-      edges: rawGraph.edges.filter(e => keepIds.has(e.from_id) && keepIds.has(e.to_id))
-    }
-  }, [rawGraph, filter, selected])
-
-  const positions = useForceLayout(graph.nodes, graph.edges)
+  const [opening, setOpening] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await apiFetch('/graph/all?limit=200')
-      setRawGraph(data)
-      setSelected(null)
+      const d = await apiFetch('/files/list')
+      setFiles(d.files ?? [])
     } catch {
-      setRawGraph({ nodes: [], edges: [] })
+      setFiles([])
     } finally {
       setLoading(false)
     }
@@ -407,163 +304,62 @@ function GraphTab() {
 
   useEffect(() => { load() }, [load])
 
-  const selectedNeighbors = new Set(
-    selected
-      ? rawGraph.edges
-          .filter(e => e.from_id === selected.id || e.to_id === selected.id)
-          .flatMap(e => [e.from_id, e.to_id])
-      : []
-  )
+  const openFile = async (path: string) => {
+    setOpening(path)
+    await fetch(`${API}/files/open`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    }).finally(() => setTimeout(() => setOpening(null), 800))
+  }
 
   return (
-    <div className="flex gap-4 h-full min-h-0">
-      <div className="flex-1 flex flex-col min-h-0">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-3">
-            {/* 필터 */}
-            <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
-              {([['docs','문서'], ['concepts','개념'], ['all','전체']] as [GraphFilter, string][]).map(([id, label]) => (
-                <button key={id} onClick={() => { setFilter(id); setSelected(null) }}
-                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
-                    filter === id ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                  }`}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            {/* 범례 */}
-            <div className="flex gap-2 text-[10px] text-gray-400">
-              {(['pdf','note','pptx'] as const).map(src => (
-                <span key={src} className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full inline-block" style={{ background: SOURCE_COLOR[src] }} />
-                  {src}
-                </span>
-              ))}
-              <span className="flex items-center gap-1 pl-2 border-l border-gray-200">
-                <span className="w-2 h-2 inline-block rotate-45 bg-purple-400" />
-                개념
-              </span>
-            </div>
-          </div>
-          <button onClick={load} disabled={loading}
-            className="text-xs px-3 py-1 border border-surface-border rounded-lg hover:bg-gray-50 disabled:opacity-50">
-            {loading ? '로딩...' : '새로고침'}
-          </button>
-        </div>
-
-        {graph.nodes.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center text-gray-400 text-sm border border-surface-border rounded-2xl">
-            {loading ? '그래프 로딩 중...' : '노드가 없습니다. 문서를 추가해주세요.'}
-          </div>
-        ) : (
-          <div className="flex-1 border border-surface-border rounded-2xl overflow-hidden bg-gray-50">
-            <svg width="100%" height="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
-              {/* 엣지 */}
-              {graph.edges.map((e, i) => {
-                const a = positions[e.from_id], b = positions[e.to_id]
-                if (!a || !b) return null
-                const active = selected && (e.from_id === selected.id || e.to_id === selected.id)
-                return (
-                  <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                    stroke={active ? '#6b7280' : '#d1d5db'}
-                    strokeWidth={active ? 1.5 : 1}
-                    strokeOpacity={active ? 0.8 : 0.4}
-                  />
-                )
-              })}
-
-              {/* 노드 */}
-              {graph.nodes.map(n => {
-                const pos = positions[n.id]
-                if (!pos) return null
-                const isEntity = n.type === 'entity'
-                const color = isEntity
-                  ? (SOURCE_COLOR[n.source_type] ?? '#a855f7')
-                  : (SOURCE_COLOR[n.source_type] ?? '#9ca3af')
-                const isSelected = selected?.id === n.id
-                const isNeighbor = selectedNeighbors.has(n.id)
-                const isHover = hoverId === n.id
-                const dimmed = selected && !isSelected && !isNeighbor
-                const r = isEntity
-                  ? 10  // 개념 노드는 작고 일정
-                  : NODE_RADIUS * (0.7 + (n.importance ?? 0.5) * 0.6)
-                const boost = isSelected || isHover ? 3 : 0
-                // 다이아몬드 path (entity) vs 원 (document)
-                const diamond = `M 0 ${-(r+boost)} L ${r+boost} 0 L 0 ${r+boost} L ${-(r+boost)} 0 Z`
-                return (
-                  <g key={n.id} transform={`translate(${pos.x},${pos.y})`}
-                    style={{ cursor: 'pointer', opacity: dimmed ? 0.15 : 1 }}
-                    onClick={() => setSelected(isSelected ? null : n)}
-                    onMouseEnter={() => setHoverId(n.id)}
-                    onMouseLeave={() => setHoverId(null)}
-                  >
-                    {isEntity ? (
-                      <path d={diamond}
-                        fill={isSelected ? color : isHover ? color + 'dd' : color + '55'}
-                        stroke={color}
-                        strokeWidth={isSelected ? 2 : 1.5}
-                      />
-                    ) : (
-                      <circle r={r + boost}
-                        fill={isSelected ? color : isHover ? color + 'dd' : color + '99'}
-                        stroke={isSelected ? color : '#fff'}
-                        strokeWidth={isSelected ? 2.5 : 1.5}
-                      />
-                    )}
-                    <text textAnchor="middle" dy="0.35em"
-                      fontSize={isEntity ? 8 : 9}
-                      fill={isSelected ? (isEntity ? color : '#fff') : '#374151'}
-                      style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                      {isEntity ? '◆' : n.source_type === 'pdf' ? '📄' : n.source_type === 'note' ? '✎' : '◈'}
-                    </text>
-                    {(isSelected || isHover) && (
-                      <text textAnchor="middle" y={r + boost + 12}
-                        fontSize={9} fill={isEntity ? color : '#374151'}
-                        fontWeight={isEntity ? 'bold' : 'normal'}
-                        style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                        {n.title.length > 16 ? n.title.slice(0, 16) + '…' : n.title}
-                      </text>
-                    )}
-                  </g>
-                )
-              })}
-            </svg>
-          </div>
-        )}
+    <div className="flex flex-col h-full min-h-0 gap-3">
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="text-xs text-gray-500 flex-1">docs/ 전체 파일</span>
+        <button onClick={load} disabled={loading}
+          className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50 disabled:opacity-50">
+          {loading ? '로딩...' : '새로고침'}
+        </button>
       </div>
-
-      {/* 선택 노드 상세 */}
-      <div className="w-56 shrink-0 flex flex-col gap-3">
-        <div className="text-xs font-medium text-gray-500">
-          {selected ? '선택된 노드' : '노드를 클릭하세요'}
-        </div>
-        {selected ? (
-          <div className="border border-surface-border rounded-xl p-3 space-y-2">
-            <div className="font-medium text-sm text-gray-900">{selected.title}</div>
-            <div className="flex flex-wrap gap-1">
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
-                style={{ background: SOURCE_COLOR[selected.source_type] + '20', color: SOURCE_COLOR[selected.source_type] }}>
-                {selected.source_type}
-              </span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">
-                중요도 {((selected.importance ?? 0.5) * 100).toFixed(0)}%
-              </span>
-            </div>
-            <div className="text-xs text-gray-500">
-              연결: {selectedNeighbors.size - 1}개 노드
-            </div>
-          </div>
-        ) : (
-          <div className="text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl p-4 text-center">
-            노드 클릭 시<br />상세 정보 표시
-          </div>
-        )}
-
-        {/* 노드 수 요약 */}
-        <div className="mt-auto text-xs text-gray-400 space-y-1">
-          <div>표시 {graph.nodes.length} / 전체 {rawGraph.nodes.length}개 노드</div>
-          <div>엣지 {graph.edges.length}개</div>
-        </div>
+      <div className="flex-1 overflow-y-auto">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-white border-b border-surface-border">
+            <tr className="text-gray-400 text-left">
+              <th className="py-2 pr-3 font-medium">파일명</th>
+              <th className="py-2 pr-3 font-medium">형식</th>
+              <th className="py-2 pr-3 font-medium text-right">크기</th>
+              <th className="py-2 w-12" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-50">
+            {files.length === 0 && (
+              <tr><td colSpan={4} className="py-8 text-center text-gray-400">
+                {loading ? '로딩 중...' : '파일이 없습니다'}
+              </td></tr>
+            )}
+            {files.map(f => (
+              <tr key={f.path} className="hover:bg-gray-50 group transition-colors">
+                <td className="py-2 pr-3">
+                  <div className="font-medium text-gray-900 truncate max-w-xs">{f.name}</div>
+                  <div className="text-gray-400 text-[10px]">{f.rel.split('/').slice(0,-1).join('/')}</div>
+                </td>
+                <td className="py-2 pr-3">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium text-white"
+                    style={{ background: EXT_COLOR[f.ext] ?? '#9ca3af' }}>{f.ext}</span>
+                </td>
+                <td className="py-2 pr-3 text-right text-gray-500">
+                  {f.size < 1024*1024 ? `${(f.size/1024).toFixed(0)}KB` : `${(f.size/1024/1024).toFixed(1)}MB`}
+                </td>
+                <td className="py-2">
+                  <button onClick={() => openFile(f.path)} disabled={opening === f.path}
+                    className="opacity-0 group-hover:opacity-100 text-[10px] px-2 py-1 bg-gray-900 text-white rounded-lg disabled:opacity-50 transition-all">
+                    {opening === f.path ? '여는 중' : '열기'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )
@@ -604,7 +400,6 @@ function FilesTab() {
   const [queue, setQueue]           = useState<QueueItem[]>([])
   const [files, setFiles]           = useState<RawFile[]>([])
   const [view, setView]             = useState<'subjects' | 'queue' | 'files'>('subjects')
-  const [newName, setNewName]       = useState('')
   const [processing, setProcessing] = useState(false)
   const [opening, setOpening]       = useState<string | null>(null)
 
@@ -624,21 +419,6 @@ function FilesTab() {
   }, [])
 
   useEffect(() => { loadSubjects() }, [loadSubjects])
-
-  const discover = async () => {
-    await fetch(`${API}/subjects/discover`, { method: 'POST' })
-    await loadSubjects()
-  }
-
-  const createSubject = async () => {
-    if (!newName.trim()) return
-    await fetch(`${API}/subjects`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newName.trim() })
-    })
-    setNewName('')
-    await loadSubjects()
-  }
 
   const selectSubject = async (s: Subject) => {
     setSelected(s); setView('queue')
@@ -681,19 +461,14 @@ function FilesTab() {
   if (view === 'subjects') return (
     <div className="flex flex-col h-full min-h-0 gap-3">
       <div className="flex items-center gap-2 shrink-0">
-        <input value={newName} onChange={e => setNewName(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && createSubject()}
-          placeholder="새 주체 이름..."
-          className="flex-1 border border-surface-border rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:border-gray-400 bg-white" />
-        <button onClick={createSubject} className="text-xs px-3 py-1.5 bg-gray-900 text-white rounded-xl hover:bg-gray-700">추가</button>
-        <button onClick={discover} className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">폴더 자동감지</button>
+        <span className="text-xs text-gray-500 flex-1">폴더 목록</span>
         <button onClick={() => { setView('files'); loadFiles() }} className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">파일 목록</button>
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-2">
         {subjects.length === 0 && (
           <div className="text-center text-gray-400 text-sm mt-10">
-            "폴더 자동감지"로 docs/ 하위 폴더를 주체로 등록하세요
+            등록된 폴더가 없습니다
           </div>
         )}
         {subjects.map(s => (
