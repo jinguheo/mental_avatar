@@ -21,13 +21,15 @@ Write-Host "`n[1/4] conda 'avatar' 환경 생성 (python 3.11)..." -ForegroundCo
 conda create -y -n avatar python=3.11
 conda run -n avatar python -m pip install --upgrade pip
 
-# 2) Python 의존성 설치
-#    중요: chromadb 는 db/vectors 호환을 위해 1.5.9 로 고정
-Write-Host "`n[2/4] Python 패키지 설치 (chromadb==1.5.9 고정)..." -ForegroundColor Yellow
+# 2) Python 의존성 설치 (requirements.txt에 chromadb==1.5.9 등 이미 고정돼 있음)
+Write-Host "`n[2/4] Python 패키지 설치..." -ForegroundColor Yellow
 conda run -n avatar python -m pip install -r (Join-Path $ProjectRoot "requirements.txt")
-conda run -n avatar python -m pip install "chromadb==1.5.9"
-# torch(CUDA)는 GPU에 맞춰 별도 설치 필요 — 음성/영상 기능 쓸 때만:
-#   conda run -n avatar python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+# torch(CUDA)는 GPU 빌드라 requirements.txt에서 제외돼 있음 — 음성/영상(SadTalker·얼굴교체) 기능 쓸 때만 별도 설치:
+#   conda run -n avatar python -m pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# TTS(XTTS) 음성 기능은 별도 conda env 필요:
+#   conda create -y -n xtts python=3.11
+#   conda run -n xtts python -m pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+#   conda run -n xtts python -m pip install -r (Join-Path $ProjectRoot "requirements-xtts.txt")
 
 # 3) frontend 의존성 설치 (mental-avatar / my-dashboard 둘 다)
 Write-Host "`n[3/4] frontend npm install..." -ForegroundColor Yellow
@@ -42,7 +44,7 @@ Write-Host "`n[4/4] 데이터 복원 (restore_data.ps1)..." -ForegroundColor Yel
 
 Write-Host "`n==== 완료 ====" -ForegroundColor Green
 Write-Host "추가로 필요한 것:"
-Write-Host "  - Ollama 설치 + 모델 받기 (기본 LLM): ollama pull gemma2:2b  (또는 사용 중인 모델)"
+Write-Host "  - Ollama 설치 + 모델 받기 (기본 LLM): ollama pull gemma4:e2b  (또는 사용 중인 모델)"
 Write-Host "  - 서버 기동: conda run -n avatar python api\server.py   (포트 8766)"
 Write-Host "  - watcher 기동: conda run -n avatar python watcher\file_watcher.py"
 Write-Host "  - 프론트: cd frontend; npm run dev  (5174) / cd D:\MyWork\my-dashboard; npm run dev (5173)"
