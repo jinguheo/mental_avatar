@@ -190,6 +190,8 @@ Large model files are not committed to Git. Text chat, search, profile, and know
 | Rhubarb lip sync | `models\rhubarb\rhubarb.exe` | Download the Windows release and keep its `res` folder |
 | XTTS model cache | `models\tts\...` or Hugging Face cache | First XTTS run may download large files |
 
+Realistic Avatar `.glb` files are stored in the browser through IndexedDB/localStorage, not in the server data bundle. On a new PC or browser profile, register the `.glb` avatar again from the Mental Avatar UI.
+
 ## 10. Ollama Model
 
 Install and start Ollama, then pull the default local model used by this project:
@@ -216,6 +218,16 @@ powershell -ExecutionPolicy Bypass -File restore_data.ps1
 ```
 
 Existing data is backed up before restore.
+
+To create a fresh bundle on the old PC before moving machines:
+
+```powershell
+cd D:\MyWork\mental-avatar
+conda run -n avatar python migrate\make_bundle.py
+```
+
+This creates a `data_bundle_YYYYMMDD_HHMMSS.zip` file under `migrate`.
+Copy that zip file to the new PC before running `restore_data.ps1`.
 
 ## 12. Verify Installation
 
