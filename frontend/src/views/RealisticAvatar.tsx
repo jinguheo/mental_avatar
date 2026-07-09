@@ -711,6 +711,9 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
                 2. <a href="https://avaturn.me" target="_blank" rel="noreferrer" className="text-purple-300 underline">avaturn.me</a>에서
                 사진 업로드 → 아바타 커스터마이즈
               </p>
+              <p className="text-amber-300">
+                ⚠️ 얼굴 타입은 꼭 <b>T2</b> 선택 (T1은 얼굴 고정이라 입이 안 움직임)
+              </p>
               <p>3. Download → glTF Binary(.glb)로 저장</p>
               <p>4. 위 "GLB 파일 선택"으로 불러오기</p>
             </div>
