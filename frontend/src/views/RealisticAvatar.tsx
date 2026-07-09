@@ -125,6 +125,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const [serverOnline, setServerOnline] = useState(true)
   const [glbList, setGlbList] = useState<GlbEntry[]>([])
   const [showList, setShowList] = useState(false)
+  const [showGuide, setShowGuide] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>(() => viewModeRef.current)
 
   const setView = useCallback((mode: ViewMode) => {
@@ -681,7 +682,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         <div className="absolute top-3 left-3 z-20 flex flex-col gap-1">
           <div className="flex gap-1">
             <label className="flex items-center gap-2 bg-black/50 backdrop-blur text-xs text-gray-300 hover:text-white rounded-lg px-3 py-1.5 cursor-pointer border border-gray-700 hover:border-gray-500 transition-colors">
-              📁 {fileName || 'GLB 파일 선택'}
+              📁 GLB 파일 선택
               <input type="file" accept=".glb" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
             </label>
             {glbList.length > 0 && (
@@ -694,6 +695,26 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
               </button>
             )}
           </div>
+          {avatarLoaded && fileName && (
+            <p className="text-[10px] text-gray-400 px-1 truncate max-w-[220px]">현재: {fileName}</p>
+          )}
+          <button
+            onClick={() => setShowGuide(v => !v)}
+            className="self-start text-[10px] text-gray-400 hover:text-white px-1 text-left"
+          >
+            {showGuide ? '▲' : '❓'} GLB 만드는 법
+          </button>
+          {showGuide && (
+            <div className="bg-black/80 backdrop-blur border border-gray-700 rounded-xl p-3 max-w-[260px] text-[11px] text-gray-300 space-y-1.5 leading-relaxed">
+              <p>1. 본인 정면 얼굴 사진 준비</p>
+              <p>
+                2. <a href="https://avaturn.me" target="_blank" rel="noreferrer" className="text-purple-300 underline">avaturn.me</a>에서
+                사진 업로드 → 아바타 커스터마이즈
+              </p>
+              <p>3. Download → glTF Binary(.glb)로 저장</p>
+              <p>4. 위 "GLB 파일 선택"으로 불러오기</p>
+            </div>
+          )}
           {showList && (
             <div className="bg-black/80 backdrop-blur border border-gray-700 rounded-xl overflow-hidden min-w-[220px] max-h-64 overflow-y-auto">
               {glbList.map(entry => (
