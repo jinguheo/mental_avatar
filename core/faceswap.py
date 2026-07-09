@@ -27,27 +27,39 @@ def get_face(img, app):
     return sorted(faces, key=lambda f: f.bbox[0])[0]
 
 
+# use_gpu별로 하나씩 캐싱 — insightface 모델 초기화(디스크 로드+GPU 세션 생성)가 수 초~십수 초
+# 걸려 매 요청마다 새로 만들면 느리고 GPU 메모리 할당/해제가 반복돼 불안정 요인이 됨.
+# XTTS(8768 상주 워커)와 같은 이유로, 프로세스 생존 동안 재사용한다.
+_model_cache: dict = {}
+
+
+def _get_models(use_gpu: bool):
+    if use_gpu not in _model_cache:
+        import insightface
+        from insightface.app import FaceAnalysis
+
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_gpu else ["CPUExecutionProvider"]
+        ctx_id = 0 if use_gpu else -1
+
+        app = FaceAnalysis(name="buffalo_l", providers=providers)
+        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+
+        swapper = insightface.model_zoo.get_model(
+            str(MODEL_PATH),
+            download=False,
+            providers=providers
+        )
+        _model_cache[use_gpu] = (app, swapper)
+    return _model_cache[use_gpu]
+
+
 def swap_faces_in_video(source_face_path: str, target_video_path: str, output_path: str, use_gpu: bool = True) -> bool:
     """
     target_video의 모든 프레임에서 얼굴을 source_face로 교체.
     use_gpu=True면 CUDAExecutionProvider 우선 시도(실측 10초/720p 기준 CPU 671초 → GPU 51초, 약 13배).
     onnxruntime-gpu 설치 후에도 embeddings.py의 ChromaDB 임베딩은 별도로 CPU 강제돼 있어 서로 영향 없음.
     """
-    import insightface
-    from insightface.app import FaceAnalysis
-
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_gpu else ["CPUExecutionProvider"]
-    ctx_id = 0 if use_gpu else -1
-
-    # 모델 초기화
-    app = FaceAnalysis(name="buffalo_l", providers=providers)
-    app.prepare(ctx_id=ctx_id, det_size=(640, 640))
-
-    swapper = insightface.model_zoo.get_model(
-        str(MODEL_PATH),
-        download=False,
-        providers=providers
-    )
+    app, swapper = _get_models(use_gpu)
 
     # 소스 얼굴 추출
     src_img = cv2.imread(source_face_path)

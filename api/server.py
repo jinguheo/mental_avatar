@@ -2300,12 +2300,16 @@ def presenter_session_delete(session_id: str):
 
 
 # ── tmp 자동 정리 ────────────────────────────────────────────
-def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24) -> dict:
-    """누적되는 tmp 산출물을 정리한다.
+def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24,
+                  presenter_max_age_h: float = 6) -> dict:
+    """누적되는 tmp 산출물 + 죽은 job_id를 참조하는 메모리 잡 딕셔너리를 함께 정리한다.
     - tmp/avatar: 최종 영상(result/**/*.mp4 또는 faceswap_result.mp4)이 없는 잡 폴더(tts_only speech.wav·실패 잡)만
       나이 기준으로 삭제. 영상이 있는 폴더는 /avatar/history, /avatar/faceswap/history의 영구 저장소이므로 절대 건드리지 않는다.
     - tmp/stt: STT 임시 파일(크래시로 finally를 못 탄 잔여물)을 나이 기준으로 삭제.
-    반환: {"avatar_removed", "avatar_freed_mb", "stt_removed"}"""
+    - tmp/presenter: slides.json(저장 완료 표시)이 없는 세션(업로드만 하고 저장 전 이탈/실패)을 나이 기준으로 삭제.
+    - _avatar_jobs/_faceswap_jobs/_ytdl_jobs/_presenter_jobs: 위 정리로 폴더가 사라진 job_id는
+      메모리에서도 함께 제거(서버 수명 내내 무한 누적되는 것 방지).
+    반환: {"avatar_removed", "avatar_freed_mb", "stt_removed", "presenter_removed", "jobs_pruned"}"""
     now = time.time()
     removed_dirs = 0
     freed = 0
@@ -2338,9 +2342,34 @@ def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24) -> 
                     stt_removed += 1
             except OSError:
                 continue
+    presenter_removed = 0
+    if PRESENTER_TMP.exists():
+        for session_dir in PRESENTER_TMP.iterdir():
+            if not session_dir.is_dir():
+                continue
+            try:
+                if (session_dir / PRESENTER_META).exists():
+                    continue  # 저장 완료된 발표는 영구 보존
+                if (now - session_dir.stat().st_mtime) / 3600 < presenter_max_age_h:
+                    continue
+                _shutil.rmtree(session_dir, ignore_errors=True)
+                presenter_removed += 1
+            except OSError:
+                continue
+    jobs_pruned = 0
+    for jobs in (_avatar_jobs, _faceswap_jobs, _ytdl_jobs):
+        for job_id in [k for k in jobs if not (AVATAR_TMP / k).exists()]:
+            del jobs[job_id]
+            jobs_pruned += 1
+    for job_id in [k for k, v in _presenter_jobs.items()
+                   if not (PRESENTER_TMP / v.get("session_id", "")).exists()]:
+        del _presenter_jobs[job_id]
+        jobs_pruned += 1
     return {"avatar_removed": removed_dirs,
             "avatar_freed_mb": round(freed / 1e6, 1),
-            "stt_removed": stt_removed}
+            "stt_removed": stt_removed,
+            "presenter_removed": presenter_removed,
+            "jobs_pruned": jobs_pruned}
 
 
 def _cleanup_tmp_loop(interval_h: float = 6):
@@ -2349,9 +2378,10 @@ def _cleanup_tmp_loop(interval_h: float = 6):
         try:
             time.sleep(interval_h * 3600)
             stats = _cleanup_tmp()
-            if stats["avatar_removed"] or stats["stt_removed"]:
+            if stats["avatar_removed"] or stats["stt_removed"] or stats["presenter_removed"] or stats["jobs_pruned"]:
                 print(f"[cleanup] avatar {stats['avatar_removed']}개"
-                      f"({stats['avatar_freed_mb']}MB) / stt {stats['stt_removed']}개 정리", flush=True)
+                      f"({stats['avatar_freed_mb']}MB) / stt {stats['stt_removed']}개"
+                      f" / presenter {stats['presenter_removed']}개 / jobs {stats['jobs_pruned']}개 정리", flush=True)
         except Exception as e:
             print(f"[cleanup] 오류: {e}", flush=True)
 
@@ -2371,9 +2401,10 @@ if __name__ == "__main__":
     # 시작 시 1회 정리 + 6시간마다 주기 정리 (영상 이력은 보존)
     try:
         _boot_stats = _cleanup_tmp()
-        if _boot_stats["avatar_removed"] or _boot_stats["stt_removed"]:
+        if _boot_stats["avatar_removed"] or _boot_stats["stt_removed"] or _boot_stats["presenter_removed"] or _boot_stats["jobs_pruned"]:
             print(f"[cleanup] 시작 정리: avatar {_boot_stats['avatar_removed']}개"
-                  f"({_boot_stats['avatar_freed_mb']}MB) / stt {_boot_stats['stt_removed']}개", flush=True)
+                  f"({_boot_stats['avatar_freed_mb']}MB) / stt {_boot_stats['stt_removed']}개"
+                  f" / presenter {_boot_stats['presenter_removed']}개 / jobs {_boot_stats['jobs_pruned']}개", flush=True)
     except Exception as _e:
         print(f"[cleanup] 시작 정리 오류: {_e}", flush=True)
     _threading.Thread(target=_cleanup_tmp_loop, daemon=True).start()
