@@ -7,7 +7,7 @@ import * as THREE from 'three'
 import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
 import { streamChatOllama } from '@/services/ollama'
 import FaceTrackingPanel from './FaceTrackingPanel'
-import type { Settings } from '@/types'
+import type { ChatMsg, Settings } from '@/types'
 import { API_BASE } from '@/config'
 
 const API = API_BASE
@@ -46,7 +46,6 @@ const RECEPTION_NOTE = `## 지금 상황
 나는 지금 방문객을 맞이하는 리셉션 모드입니다. 따뜻하고 전문적으로 응대하고,
 답변은 2~3문장으로 간결하게 하세요.`
 
-export interface ChatMsg { role: 'user' | 'assistant'; content: string }
 interface Props {
   settings: Settings
   messages: ChatMsg[]

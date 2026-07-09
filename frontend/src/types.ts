@@ -9,6 +9,11 @@ export interface Settings {
   ollamaModel: string
 }
 
+export interface ChatMsg {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   claudeSessionKey: '',
   mcpEndpoint: MCP_ENDPOINT,

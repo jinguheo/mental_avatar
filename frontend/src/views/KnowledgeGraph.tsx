@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import mermaid from 'mermaid'
 import { streamClaudeWeb } from '@/services/claudeWeb'
 import type { Settings } from '@/types'
 import { API_BASE, MCP_ENDPOINT } from '@/config'
@@ -1248,16 +1247,17 @@ function MermaidDiagram({ code }: { code: string }) {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (!mermaidInited) {
-      mermaid.initialize({ startOnLoad: false, theme: 'neutral' })
-      mermaidInited = true
-    }
     let cancelled = false
     const id = `mermaid-${Math.random().toString(36).slice(2)}`
     // mermaid.render()는 문법 오류여도 reject 대신 "Syntax error..." 에러 그림을 그린 svg로
     // resolve해버려서(.catch가 못 잡음) — mermaid.parse()로 먼저 문법을 검증해 그 경우를 걸러낸다.
     ;(async () => {
       try {
+        const { default: mermaid } = await import('mermaid')
+        if (!mermaidInited) {
+          mermaid.initialize({ startOnLoad: false, theme: 'neutral' })
+          mermaidInited = true
+        }
         await mermaid.parse(code.trim())
         const { svg } = await mermaid.render(id, code.trim())
         if (!cancelled && ref.current) { ref.current.innerHTML = svg; setError('') }
