@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { streamClaudeWeb } from '@/services/claudeWeb'
+import { streamChatOllama } from '@/services/ollama'
 import type { Settings } from '@/types'
 import { API_BASE, MCP_ENDPOINT } from '@/config'
 
@@ -11,6 +12,7 @@ const API = API_BASE
 interface SearchResult {
   id: string; title: string; document: string
   source_type: string; distance: number
+  file_path?: string
   _source?: string; community?: string  // 백엔드 /search가 KG/graphify 결과 구분용으로 덧붙이는 필드
 }
 interface AvatarSummary {
@@ -43,23 +45,75 @@ const SOURCE_COLOR: Record<string, string> = {
   concept: '#a855f7', technology: '#06b6d4', organization: '#f97316',
   tool: '#84cc16', entity: '#a855f7',
   project: '#0ea5e9',
+  conversation: '#64748b',
+  graphify: '#14b8a6',
 }
 
-const AVATAR_PROMPT = (interests: string, trends: string, gaps: string) =>
-  `당신은 한 사람의 '정신적 아바타'입니다. 아래는 그 사람이 최근 모아온 지식의 패턴입니다.
+interface GraphNode {
+  id: string
+  title: string
+  content?: string
+  type?: string
+  source_type?: string
+  importance?: number
+  file_path?: string
+  updated_at?: string
+  created_at?: string
+}
 
-핵심 관심사 (중요도순):
-${interests}
+interface GraphEdge {
+  from_id: string
+  to_id: string
+  relation: string
+  weight?: number
+}
 
-토픽 트렌드 (최근 30일):
-${trends}
+const normalizeResultGroupKey = (r: SearchResult) => {
+  const title = (r.title || '').replace(/\s*\[\d+\]\s*$/, '').trim().toLowerCase()
+  const file = (r.file_path || '').replace(/\\/g, '/').split('/').pop()?.toLowerCase() || ''
+  return file || title || r.id
+}
 
-보강이 필요한 영역:
-${gaps}
+const compactSearchResults = (results: SearchResult[], limit = 5) => {
+  const grouped = new Map<string, SearchResult>()
+  for (const r of results) {
+    const key = normalizeResultGroupKey(r)
+    const prev = grouped.get(key)
+    if (!prev || r.distance < prev.distance) grouped.set(key, r)
+  }
+  return Array.from(grouped.values()).slice(0, limit)
+}
 
-이 데이터를 바탕으로, 그 사람의 1인칭 시점에서 자기 자신을 요약하세요.
-"나는 요즘 ~를 깊이 파고들고 있고, ~쪽으로 관심이 옮겨가고 있다. ~는 아직 부족하다" 같은 식으로.
-3~5문장. 한국어. 통찰력 있게.`
+const RESULT_SUMMARY_PROMPT = (query: string, results: SearchResult[]) => {
+  const topResults = compactSearchResults(results, 5)
+  const body = topResults.length > 0
+    ? topResults.map((r, idx) => [
+        `${idx + 1}. ${r.title || '(제목 없음)'}`,
+        `유형: ${r.source_type}`,
+        `원본: ${r.file_path || '(원본 없음)'}`,
+        `내용: ${(r.document || '').slice(0, 180)}`,
+      ].join('\n')).join('\n\n')
+    : '검색 결과가 없습니다.'
+
+  return `당신은 지식 그래프 검색 결과를 한국어로 간단명료하게 요약하는 도우미입니다.
+
+검색어:
+${query}
+
+검색 결과:
+${body}
+
+아래 형식으로만 답하세요.
+1. 한 줄 핵심 요약
+2. 핵심 결과 3개 정도만 짧게 정리
+3. 다음에 이어서 볼 만한 관점 1개
+
+중요:
+- 같은 문서의 청크가 여러 개 있으면 하나로 묶어서 요약하세요.
+- 반복되는 말이나 장황한 수식은 빼고, 결과 내용만 요약하세요.
+
+3~5문장, 한국어, 중복 없이.`
+}
 
 // ── 탭 1: 검색 + 아바타 요약 ──────────────────────────
 function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProject: (pid: string) => void }) {
@@ -68,6 +122,7 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
   const [loading, setLoading] = useState(false)
   const [summary, setSummary] = useState<AvatarSummary | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryMode, setSummaryMode] = useState<'result' | 'global'>('global')
   const [stats, setStats] = useState<Stats | null>(null)
 
   useEffect(() => {
@@ -87,43 +142,106 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
     }
   }, [query])
 
-  const loadSummary = useCallback(async () => {
-    const mcpEndpoint = settings.mcpEndpoint || MCP_ENDPOINT
-    const sessionKey = settings.claudeSessionKey || ''
-    setSummaryLoading(true)
-    setSummary(null)
-    try {
-      // 1. 8766에서 구조 데이터(관심사·트렌드·갭) 가져오기
-      const data = await apiFetch('/avatar/summary')
+  const normalizeDocumentTitle = (title: string) =>
+    (title || '').replace(/\s*\[\d+\]\s*$/, '').trim().toLowerCase()
 
-      // 2. Claude.ai 세션으로 요약 텍스트 직접 생성
-      if (sessionKey && mcpEndpoint) {
-        const prompt = AVATAR_PROMPT(
-          JSON.stringify(data.core_interests, null, 2),
-          JSON.stringify(data.trends?.slice(0, 8), null, 2),
-          JSON.stringify(data.gaps?.slice(0, 5), null, 2),
-        )
-        let summaryText = ''
-        setSummary({ ...data, summary: '' })
-        await streamClaudeWeb(sessionKey, mcpEndpoint,
-          [{ role: 'user', content: prompt }], '', (delta) => {
-            summaryText += delta
-            setSummary(prev => prev ? { ...prev, summary: summaryText } : null)
-          })
-      } else {
-        setSummary(data)
-      }
-    } catch {
-      setSummary(null)
+  const openResultSource = useCallback(async (r: SearchResult) => {
+    if (r.source_type === 'project' && r.id.startsWith('project_')) {
+      onOpenProject(r.id.slice('project_'.length))
+      return
+    }
+
+    const path = r.file_path || results.find(x =>
+      x.file_path &&
+      x.source_type === r.source_type &&
+      normalizeDocumentTitle(x.title) === normalizeDocumentTitle(r.title)
+    )?.file_path || ''
+    if (!path) return
+    if (path.startsWith('conversation://') || path.startsWith('sync://')) return
+    const fileUrl = `file:///${path.replace(/\\/g, '/')}`
+    const opened = window.open(fileUrl, '_blank', 'noopener,noreferrer')
+    if (opened) return
+    await fetch(`${API}/files/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }).catch(() => {})
+  }, [onOpenProject, results])
+
+  const hasOriginalSource = useCallback((r: SearchResult) => {
+    const path = r.file_path || results.find(x =>
+      x.file_path &&
+      x.source_type === r.source_type &&
+      normalizeDocumentTitle(x.title) === normalizeDocumentTitle(r.title)
+    )?.file_path || ''
+    return !!path && !path.startsWith('conversation://') && !path.startsWith('sync://')
+  }, [results])
+
+  const loadGlobalSummary = useCallback(async () => {
+    setSummaryLoading(true)
+    setSummaryMode('global')
+    try {
+      const data = await apiFetch('/avatar/summary')
+      setSummary(data)
+    } catch (err) {
+      console.warn('[KnowledgeGraph] avatar summary load failed:', err)
     } finally {
       setSummaryLoading(false)
     }
-  }, [settings])
+  }, [])
+
+  const loadResultSummary = useCallback(async () => {
+    setSummaryLoading(true)
+    setSummaryMode('result')
+    try {
+      if (!results.length) {
+        const emptySummary: AvatarSummary = {
+          summary: '현재 검색 결과가 없어 요약할 항목이 없습니다. 검색어를 먼저 입력해 주세요.',
+          core_interests: [],
+          trends: [],
+          gaps: [],
+        }
+        setSummary(emptySummary)
+        return
+      }
+
+      const prompt = RESULT_SUMMARY_PROMPT(query.trim(), results)
+      const emptySummary: AvatarSummary = {
+        summary: '',
+        core_interests: [],
+        trends: [],
+        gaps: [],
+      }
+      setSummary(emptySummary)
+      let summaryText = ''
+      await streamChatOllama(
+        settings.ollamaEndpoint,
+        settings.ollamaModel,
+        [{ role: 'user', content: prompt }],
+        '당신은 검색 결과를 짧고 명확한 한국어로 요약하는 도우미입니다.',
+        (delta) => {
+          summaryText += delta
+          setSummary(prev => prev ? { ...prev, summary: summaryText } : emptySummary)
+        },
+      )
+      setSummary(prev => prev ? { ...prev, summary: summaryText || prev.summary } : { ...emptySummary, summary: summaryText })
+    } catch (err) {
+      console.warn('[KnowledgeGraph] result summary load failed:', err)
+      setSummary({
+        summary: `검색어 "${query.trim() || '(없음)'}" 기준으로 ${results.length}개의 결과가 있습니다.`,
+        core_interests: [],
+        trends: [],
+        gaps: [],
+      })
+    } finally {
+      setSummaryLoading(false)
+    }
+  }, [settings.ollamaEndpoint, settings.ollamaModel, query, results])
 
   return (
     <div className="flex gap-5 h-full min-h-0">
       {/* 왼쪽: 검색 */}
-      <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex-[0.88] flex flex-col min-h-0">
         {/* 검색 입력 */}
         <div className="flex gap-2 mb-4">
           <input
@@ -191,7 +309,7 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
               className={`border rounded-xl p-3 hover:bg-gray-50 transition-colors cursor-pointer ${r._source === 'graphify' ? 'border-purple-200 bg-purple-50/30' : 'border-surface-border'}`}
               onClick={() => {
                 apiFetch('/activity/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ node_id: r.id, action: 'view', context: r.title || '' }) }).catch(() => {})
-                if (r.source_type === 'project' && r.id.startsWith('project_')) onOpenProject(r.id.slice('project_'.length))
+                openResultSource(r)
               }}>
               <div className="flex items-start justify-between gap-2 mb-1">
                 <span className="font-medium text-sm text-gray-900 truncate">{r.title || '(제목 없음)'}</span>
@@ -208,37 +326,59 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
                   }
                 </div>
               </div>
-              <p className="text-xs text-gray-500 line-clamp-2">{r.document}</p>
+              <p className="text-sm text-gray-500 line-clamp-2">{r.document}</p>
+              {hasOriginalSource(r) && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    openResultSource(r)
+                  }}
+                  className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 active:bg-gray-100"
+                >
+                  <span>원본 열기</span>
+                  <span className="text-gray-400">↗</span>
+                </button>
+              )}
             </div>
           ))}
         </div>
       </div>
 
       {/* 오른쪽: 아바타 요약 */}
-      <div className="w-72 shrink-0 flex flex-col gap-3 overflow-y-auto">
-        <div className="flex items-center justify-between">
+      <div className="w-96 shrink-0 flex flex-col gap-3 overflow-y-auto">
+        <div className="flex items-center justify-between gap-2">
           <h3 className="text-sm font-semibold text-gray-700">아바타 요약</h3>
-          <button
-            onClick={loadSummary}
-            disabled={summaryLoading}
-            className="text-xs px-3 py-1 border border-surface-border rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
-          >
-            {summaryLoading ? '생성 중...' : '생성'}
-          </button>
+          <div className="flex rounded-lg border border-surface-border overflow-hidden">
+            <button
+              onClick={loadResultSummary}
+              disabled={summaryLoading}
+              className={`text-xs px-3 py-1 transition-colors ${summaryMode === 'result' ? 'bg-gray-900 text-white' : 'bg-white hover:bg-gray-50 text-gray-600'} disabled:opacity-50`}
+            >
+              결과 요약
+            </button>
+            <button
+              onClick={loadGlobalSummary}
+              disabled={summaryLoading}
+              className={`text-xs px-3 py-1 transition-colors border-l border-surface-border ${summaryMode === 'global' ? 'bg-gray-900 text-white' : 'bg-white hover:bg-gray-50 text-gray-600'} disabled:opacity-50`}
+            >
+              전체 요약
+            </button>
+          </div>
         </div>
 
         {summary ? (
           <>
-            <div className="bg-gray-50 border border-surface-border rounded-xl p-3 text-xs text-gray-700 leading-relaxed">
+            <div className="bg-gray-50 border border-surface-border rounded-xl p-3 text-sm text-gray-700 leading-relaxed">
               {summary.summary}
             </div>
 
             {summary.core_interests.length > 0 && (
               <div>
-                <div className="text-xs font-medium text-gray-500 mb-1.5">핵심 관심사</div>
+                <div className="text-sm font-medium text-gray-500 mb-1.5">핵심 관심사</div>
                 <div className="space-y-1">
                   {summary.core_interests.slice(0, 6).map(i => (
-                    <div key={i.topic} className="flex items-center justify-between text-xs">
+                    <div key={i.topic} className="flex items-center justify-between text-sm">
                       <span className="text-gray-700 truncate">{i.topic}</span>
                       <span className="text-gray-400 shrink-0 ml-2">{i.doc_count}개</span>
                     </div>
@@ -249,10 +389,10 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
 
             {summary.trends.length > 0 && (
               <div>
-                <div className="text-xs font-medium text-gray-500 mb-1.5">토픽 트렌드</div>
+                <div className="text-sm font-medium text-gray-500 mb-1.5">토픽 트렌드</div>
                 <div className="flex flex-wrap gap-1">
                   {summary.trends.slice(0, 8).map(t => (
-                    <span key={t.topic} className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${GROWTH_COLOR[t.growth] ?? 'text-gray-500 bg-gray-50'}`}>
+                    <span key={t.topic} className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${GROWTH_COLOR[t.growth] ?? 'text-gray-500 bg-gray-50'}`}>
                       {t.topic} {t.growth}
                     </span>
                   ))}
@@ -262,10 +402,10 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
 
             {summary.gaps.length > 0 && (
               <div>
-                <div className="text-xs font-medium text-gray-500 mb-1.5">지식 갭</div>
+                <div className="text-sm font-medium text-gray-500 mb-1.5">지식 갭</div>
                 <div className="space-y-1">
                   {summary.gaps.map(g => (
-                    <div key={g.topic} className="text-xs text-orange-600 bg-orange-50 rounded-lg px-2 py-1">
+                    <div key={g.topic} className="text-sm text-orange-600 bg-orange-50 rounded-lg px-2 py-1">
                       {g.topic} <span className="text-orange-400">({g.doc_count}개)</span>
                     </div>
                   ))}
@@ -274,7 +414,7 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
             )}
           </>
         ) : (
-          <div className="text-xs text-gray-400 text-center mt-4">
+          <div className="text-sm text-gray-400 text-center mt-4">
             "생성" 버튼을 눌러<br />아바타 요약을 만드세요
           </div>
         )}
@@ -285,17 +425,24 @@ function SearchTab({ settings, onOpenProject }: { settings: Settings; onOpenProj
 
 // ── 탭 2: 그래프 (파일 목록으로 대체) ─────────────────
 function GraphTab() {
-  const [files, setFiles] = useState<RawFile[]>([])
+  const [nodes, setNodes] = useState<GraphNode[]>([])
+  const [edges, setEdges] = useState<GraphEdge[]>([])
   const [loading, setLoading] = useState(false)
-  const [opening, setOpening] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [error, setError] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError('')
     try {
-      const d = await apiFetch('/files/list')
-      setFiles(d.files ?? [])
+      const d = await apiFetch('/graph/all?limit=80')
+      setNodes(d.nodes ?? [])
+      setEdges(d.edges ?? [])
     } catch {
-      setFiles([])
+      setNodes([])
+      setEdges([])
+      setError('\uADF8\uB798\uD504 \uB370\uC774\uD130\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4')
     } finally {
       setLoading(false)
     }
@@ -303,68 +450,196 @@ function GraphTab() {
 
   useEffect(() => { load() }, [load])
 
-  const openFile = async (path: string) => {
-    setOpening(path)
-    await fetch(`${API}/files/open`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path })
-    }).finally(() => setTimeout(() => setOpening(null), 800))
-  }
+  const view = useMemo(() => {
+    const degree = new Map<string, number>()
+    for (const edge of edges) {
+      degree.set(edge.from_id, (degree.get(edge.from_id) ?? 0) + 1)
+      degree.set(edge.to_id, (degree.get(edge.to_id) ?? 0) + 1)
+    }
+
+    const nodeById = new Map(nodes.map(node => [node.id, node]))
+    const q = query.trim().toLowerCase()
+    let visibleNodes = nodes
+    if (q) {
+      const matched = new Set(
+        nodes
+          .filter(node => `${node.title} ${node.content ?? ''} ${node.source_type ?? ''}`.toLowerCase().includes(q))
+          .map(node => node.id)
+      )
+      for (const edge of edges) {
+        if (matched.has(edge.from_id)) matched.add(edge.to_id)
+        if (matched.has(edge.to_id)) matched.add(edge.from_id)
+      }
+      visibleNodes = nodes.filter(node => matched.has(node.id))
+    } else {
+      visibleNodes = [...nodes]
+        .sort((a, b) => ((degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0)) || ((b.importance ?? 0) - (a.importance ?? 0)))
+        .slice(0, 90)
+    }
+
+    const visibleIds = new Set(visibleNodes.map(node => node.id))
+    const visibleEdges = edges.filter(edge => visibleIds.has(edge.from_id) && visibleIds.has(edge.to_id)).slice(0, 450)
+    const connectedIds = new Set<string>()
+    for (const edge of visibleEdges) {
+      connectedIds.add(edge.from_id)
+      connectedIds.add(edge.to_id)
+    }
+    visibleNodes = visibleNodes.filter(node => connectedIds.has(node.id) || q)
+
+    const groups: Record<string, GraphNode[]> = { center: [], middle: [], outer: [] }
+    for (const node of visibleNodes) {
+      const source = node.source_type || node.type || 'unknown'
+      if (source === 'concept' || source === 'technology' || source === 'tool' || source === 'entity') groups.center.push(node)
+      else if (source === 'conversation' || source === 'sync') groups.outer.push(node)
+      else groups.middle.push(node)
+    }
+
+    const positions = new Map<string, { x: number; y: number }>()
+    const place = (group: GraphNode[], radius: number, offset = 0) => {
+      const count = Math.max(group.length, 1)
+      group.forEach((node, index) => {
+        const angle = offset + (Math.PI * 2 * index) / count
+        positions.set(node.id, { x: 500 + Math.cos(angle) * radius, y: 310 + Math.sin(angle) * radius })
+      })
+    }
+    place(groups.center.sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0)), 145, -Math.PI / 2)
+    place(groups.middle.sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0)), 245, -Math.PI / 3)
+    place(groups.outer.sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0)), 305, Math.PI / 8)
+
+    const sourceCounts = visibleNodes.reduce<Record<string, number>>((acc, node) => {
+      const source = node.source_type || node.type || 'unknown'
+      acc[source] = (acc[source] ?? 0) + 1
+      return acc
+    }, {})
+
+    return { nodeById, degree, visibleNodes, visibleEdges, positions, sourceCounts }
+  }, [nodes, edges, query])
+
+  const selected = (selectedId && view.nodeById.get(selectedId)) || view.visibleNodes[0] || null
+  const selectedLinks = selected
+    ? view.visibleEdges
+        .filter(edge => edge.from_id === selected.id || edge.to_id === selected.id)
+        .map(edge => ({ edge, node: view.nodeById.get(edge.from_id === selected.id ? edge.to_id : edge.from_id) }))
+        .filter((item): item is { edge: GraphEdge; node: GraphNode } => Boolean(item.node))
+        .slice(0, 18)
+    : []
+
+  const shortTitle = (title: string, max = 18) => title.length > max ? `${title.slice(0, max - 1)}?` : title
+  const colorFor = (node: GraphNode) => SOURCE_COLOR[node.source_type || node.type || 'unknown'] ?? SOURCE_COLOR.unknown
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-3">
       <div className="flex items-center gap-2 shrink-0">
-        <span className="text-xs text-gray-500 flex-1">docs/ 전체 파일</span>
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="KG 노드 검색"
+          className="w-56 border border-surface-border rounded-xl px-3 py-1.5 text-xs focus:outline-none focus:border-gray-400 bg-white"
+        />
+        <div className="flex-1 text-xs text-gray-500">
+          노드 {view.visibleNodes.length.toLocaleString()}개 ? 연결 {view.visibleEdges.length.toLocaleString()}개
+        </div>
         <button onClick={load} disabled={loading}
           className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50 disabled:opacity-50">
           {loading ? '로딩...' : '새로고침'}
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto">
-        <table className="w-full text-xs">
-          <thead className="sticky top-0 bg-white border-b border-surface-border">
-            <tr className="text-gray-400 text-left">
-              <th className="py-2 pr-3 font-medium">파일명</th>
-              <th className="py-2 pr-3 font-medium">형식</th>
-              <th className="py-2 pr-3 font-medium text-right">크기</th>
-              <th className="py-2 w-12" />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-50">
-            {files.length === 0 && (
-              <tr><td colSpan={4} className="py-8 text-center text-gray-400">
-                {loading ? '로딩 중...' : '파일이 없습니다'}
-              </td></tr>
-            )}
-            {files.map(f => (
-              <tr key={f.path} className="hover:bg-gray-50 group transition-colors">
-                <td className="py-2 pr-3">
-                  <div className="font-medium text-gray-900 truncate max-w-xs">{f.name}</div>
-                  <div className="text-gray-400 text-[10px]">{f.rel.split('/').slice(0,-1).join('/')}</div>
-                </td>
-                <td className="py-2 pr-3">
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium text-white"
-                    style={{ background: EXT_COLOR[f.ext] ?? '#9ca3af' }}>{f.ext}</span>
-                </td>
-                <td className="py-2 pr-3 text-right text-gray-500">
-                  {f.size < 1024*1024 ? `${(f.size/1024).toFixed(0)}KB` : `${(f.size/1024/1024).toFixed(1)}MB`}
-                </td>
-                <td className="py-2">
-                  <button onClick={() => openFile(f.path)} disabled={opening === f.path}
-                    className="opacity-0 group-hover:opacity-100 text-[10px] px-2 py-1 bg-gray-900 text-white rounded-lg disabled:opacity-50 transition-all">
-                    {opening === f.path ? '여는 중' : '열기'}
+
+      {error && <div className="text-xs text-red-500">{error}</div>}
+
+      <div className="grid grid-cols-[minmax(0,1fr)_18rem] gap-4 flex-1 min-h-0">
+        <div className="min-h-0 rounded-lg border border-surface-border bg-white overflow-hidden">
+          <svg viewBox="0 0 1000 620" className="h-full w-full bg-gray-50">
+            <g opacity="0.72">
+              {view.visibleEdges.map((edge, index) => {
+                const a = view.positions.get(edge.from_id)
+                const b = view.positions.get(edge.to_id)
+                if (!a || !b) return null
+                const active = selected && (edge.from_id === selected.id || edge.to_id === selected.id)
+                return (
+                  <line
+                    key={`${edge.from_id}-${edge.to_id}-${index}`}
+                    x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                    stroke={active ? '#111827' : '#cbd5e1'}
+                    strokeWidth={active ? 2.2 : Math.max(0.7, Math.min(2, edge.weight ?? 1))}
+                  />
+                )
+              })}
+            </g>
+            <g>
+              {view.visibleNodes.map(node => {
+                const pos = view.positions.get(node.id)
+                if (!pos) return null
+                const degree = view.degree.get(node.id) ?? 0
+                const active = selected?.id === node.id
+                const radius = Math.max(8, Math.min(18, 7 + degree * 0.7))
+                return (
+                  <g key={node.id} transform={`translate(${pos.x} ${pos.y})`} onClick={() => setSelectedId(node.id)} className="cursor-pointer">
+                    <circle r={radius + (active ? 4 : 0)} fill={active ? '#111827' : '#ffffff'} stroke={colorFor(node)} strokeWidth={active ? 4 : 2.5} />
+                    <circle r={Math.max(4, radius - 4)} fill={colorFor(node)} opacity={active ? 1 : 0.85} />
+                    <text y={radius + 14} textAnchor="middle" className="select-none fill-gray-700 text-[10px] font-medium">
+                      {shortTitle(node.title || '(제목 없음)')}
+                    </text>
+                    <title>{node.title}</title>
+                  </g>
+                )
+              })}
+            </g>
+          </svg>
+        </div>
+
+        <aside className="min-h-0 overflow-y-auto rounded-lg border border-surface-border bg-white p-3">
+          <div className="mb-3">
+            <div className="text-xs font-semibold text-gray-900">선택한 노드</div>
+            {selected ? (
+              <>
+                <div className="mt-2 text-sm font-semibold text-gray-900 leading-5">{selected.title}</div>
+                <div className="mt-1 flex items-center gap-2 text-[11px] text-gray-500">
+                  <span className="inline-flex h-2 w-2 rounded-full" style={{ background: colorFor(selected) }} />
+                  <span>{selected.source_type || selected.type || 'unknown'}</span>
+                  <span>연결 {view.degree.get(selected.id) ?? 0}</span>
+                </div>
+                {selected.content && <p className="mt-2 text-xs leading-5 text-gray-600 line-clamp-5">{selected.content}</p>}
+              </>
+            ) : <div className="mt-8 text-center text-sm text-gray-400">표시할 연결 정보가 없습니다</div>}
+          </div>
+
+          {selectedLinks.length > 0 && (
+            <div className="border-t border-surface-border pt-3">
+              <div className="mb-2 text-xs font-semibold text-gray-900">연결된 정보</div>
+              <div className="space-y-1.5">
+                {selectedLinks.map(({ edge, node }) => (
+                  <button key={`${edge.from_id}-${edge.to_id}-${node.id}`} onClick={() => setSelectedId(node.id)}
+                    className="w-full text-left rounded-lg border border-transparent px-2 py-1.5 hover:border-surface-border hover:bg-gray-50">
+                    <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                      <span className="inline-flex h-1.5 w-1.5 rounded-full" style={{ background: colorFor(node) }} />
+                      <span>{edge.relation || 'related'}</span>
+                      <span>{node.source_type || node.type || 'unknown'}</span>
+                    </div>
+                    <div className="mt-0.5 truncate text-xs font-medium text-gray-800">{node.title}</div>
                   </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-3 border-t border-surface-border pt-3">
+            <div className="mb-2 text-xs font-semibold text-gray-900">유형</div>
+            <div className="flex flex-wrap gap-1.5">
+              {Object.entries(view.sourceCounts).slice(0, 10).map(([source, count]) => (
+                <span key={source} className="inline-flex items-center gap-1 rounded-full bg-gray-50 px-2 py-1 text-[10px] text-gray-500">
+                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: SOURCE_COLOR[source] ?? SOURCE_COLOR.unknown }} />
+                  {source} {count}
+                </span>
+              ))}
+            </div>
+          </div>
+        </aside>
       </div>
     </div>
   )
 }
 
-// ── 탭 3: 파일 + 주체별 처리 큐 ──────────────────────
 interface RawFile { name: string; path: string; rel: string; ext: string; size: number; modified: number }
 interface Subject { id: string; name: string; folder_path: string; description: string; priority: number; total: number; pending: number; done: number; processing: number; error: number }
 interface QueueItem { id: string; subject_id: string; subject_name: string; file_name: string; file_path: string; status: string; stage: string; error: string; queued_at: string }
@@ -394,59 +669,21 @@ const STATUS_BADGE: Record<string, string> = {
 }
 
 function FilesTab() {
-  const [subjects, setSubjects]     = useState<Subject[]>([])
-  const [selected, setSelected]     = useState<Subject | null>(null)
-  const [queue, setQueue]           = useState<QueueItem[]>([])
-  const [files, setFiles]           = useState<RawFile[]>([])
-  const [view, setView]             = useState<'subjects' | 'queue' | 'files'>('subjects')
-  const [processing, setProcessing] = useState(false)
-  const [opening, setOpening]       = useState<string | null>(null)
-
-  const loadSubjects = useCallback(async () => {
-    const d = await apiFetch('/subjects').catch(() => ({ subjects: [] }))
-    setSubjects(d.subjects ?? [])
-  }, [])
-
-  const loadQueue = useCallback(async (sid: string) => {
-    const d = await apiFetch(`/queue?subject_id=${sid}`).catch(() => ({ items: [] }))
-    setQueue(d.items ?? [])
-  }, [])
+  const [files, setFiles] = useState<RawFile[]>([])
+  const [loading, setLoading] = useState(false)
+  const [opening, setOpening] = useState<string | null>(null)
 
   const loadFiles = useCallback(async () => {
-    const d = await apiFetch('/files/list').catch(() => ({ files: [] }))
-    setFiles(d.files ?? [])
+    setLoading(true)
+    try {
+      const d = await apiFetch('/files/list').catch(() => ({ files: [] }))
+      setFiles(d.files ?? [])
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  useEffect(() => { loadSubjects() }, [loadSubjects])
-
-  const selectSubject = async (s: Subject) => {
-    setSelected(s); setView('queue')
-    await loadQueue(s.id)
-  }
-
-  const scan = async (sid: string) => {
-    await fetch(`${API}/subjects/${sid}/scan`, { method: 'POST' })
-    await loadQueue(sid); await loadSubjects()
-  }
-
-  const processNext = async (sid: string, limit = 3) => {
-    setProcessing(true)
-    try {
-      await fetch(`${API}/queue/process`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject_id: sid, limit })
-      })
-      await loadQueue(sid); await loadSubjects()
-    } finally { setProcessing(false) }
-  }
-
-  const resetErrors = async (sid: string) => {
-    await fetch(`${API}/queue/reset_errors`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subject_id: sid })
-    })
-    await loadQueue(sid); await loadSubjects()
-  }
+  useEffect(() => { loadFiles() }, [loadFiles])
 
   const openFile = async (path: string) => {
     setOpening(path)
@@ -456,52 +693,14 @@ function FilesTab() {
     }).finally(() => setTimeout(() => setOpening(null), 800))
   }
 
-  // ── 주체 목록 뷰 ──
-  if (view === 'subjects') return (
+  return (
     <div className="flex flex-col h-full min-h-0 gap-3">
       <div className="flex items-center gap-2 shrink-0">
-        <span className="text-xs text-gray-500 flex-1">폴더 목록</span>
-        <button onClick={() => { setView('files'); loadFiles() }} className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">파일 목록</button>
-      </div>
-
-      <div className="flex-1 overflow-y-auto space-y-2">
-        {subjects.length === 0 && (
-          <div className="text-center text-gray-400 text-sm mt-10">
-            등록된 폴더가 없습니다
-          </div>
-        )}
-        {subjects.map(s => (
-          <div key={s.id} onClick={() => selectSubject(s)}
-            className="border border-surface-border rounded-xl p-3 hover:bg-gray-50 cursor-pointer transition-colors">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="font-medium text-sm text-gray-900">{s.name}</span>
-              <span className="text-[10px] text-gray-400">우선순위 {s.priority}</span>
-            </div>
-            <div className="flex gap-2 text-[10px]">
-              <span className="text-gray-400">전체 {s.total ?? 0}</span>
-              <span className="text-gray-500">대기 {s.pending ?? 0}</span>
-              <span className="text-green-600">완료 {s.done ?? 0}</span>
-              {(s.error ?? 0) > 0 && <span className="text-red-500">오류 {s.error}</span>}
-            </div>
-            {s.total > 0 && (
-              <div className="mt-2 h-1 bg-gray-100 rounded-full overflow-hidden">
-                <div className="h-full bg-green-400 rounded-full transition-all"
-                  style={{ width: `${Math.round(((s.done ?? 0) / s.total) * 100)}%` }} />
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-
-  // ── 파일 목록 뷰 ──
-  if (view === 'files') return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
-      <div className="flex items-center gap-2 shrink-0">
-        <button onClick={() => setView('subjects')} className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">← 주체</button>
         <span className="text-xs text-gray-500 flex-1">docs/ 전체 파일</span>
-        <button onClick={loadFiles} className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">새로고침</button>
+        <button onClick={loadFiles} disabled={loading}
+          className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50 disabled:opacity-50">
+          {loading ? '로딩...' : '새로고침'}
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto">
         <table className="w-full text-xs">
@@ -514,6 +713,9 @@ function FilesTab() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
+            {files.length === 0 && (
+              <tr><td colSpan={4} className="py-8 text-center text-gray-400">{loading ? '로딩 중...' : '파일이 없습니다'}</td></tr>
+            )}
             {files.map(f => (
               <tr key={f.path} className="hover:bg-gray-50 group transition-colors">
                 <td className="py-2 pr-3">
@@ -540,70 +742,8 @@ function FilesTab() {
       </div>
     </div>
   )
-
-  // ── 큐 뷰 ──
-  const pending = queue.filter(q => q.status === 'pending').length
-  const errors  = queue.filter(q => q.status === 'error').length
-  return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
-      <div className="flex items-center gap-2 shrink-0">
-        <button onClick={() => setView('subjects')} className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">← 주체</button>
-        <span className="font-medium text-sm text-gray-900 flex-1">{selected?.name}</span>
-        <button onClick={() => selected && scan(selected.id)} className="text-xs px-3 py-1.5 border border-surface-border rounded-xl hover:bg-gray-50">스캔</button>
-        {errors > 0 && (
-          <button onClick={() => selected && resetErrors(selected.id)} className="text-xs px-3 py-1.5 border border-red-200 text-red-500 rounded-xl hover:bg-red-50">오류 재시도</button>
-        )}
-        {pending > 0 && (
-          <button onClick={() => selected && processNext(selected.id, 5)} disabled={processing}
-            className="text-xs px-3 py-1.5 bg-gray-900 text-white rounded-xl hover:bg-gray-700 disabled:opacity-50">
-            {processing ? '처리 중...' : `처리 (${pending}개 대기)`}
-          </button>
-        )}
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        <table className="w-full text-xs">
-          <thead className="sticky top-0 bg-white border-b border-surface-border">
-            <tr className="text-gray-400 text-left">
-              <th className="py-2 pr-3 font-medium">파일명</th>
-              <th className="py-2 pr-3 font-medium w-20">상태</th>
-              <th className="py-2 w-12" />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-50">
-            {queue.length === 0 && (
-              <tr><td colSpan={3} className="py-8 text-center text-gray-400">큐가 비어있습니다. "스캔"을 눌러 파일을 추가하세요.</td></tr>
-            )}
-            {queue.map(q => (
-              <tr key={q.id} className="hover:bg-gray-50 group transition-colors">
-                <td className="py-2 pr-3">
-                  <div className="font-medium text-gray-900 truncate max-w-sm">{q.file_name}</div>
-                  {q.error && <div className="text-[10px] text-red-400 truncate">{q.error}</div>}
-                </td>
-                <td className="py-2 pr-3">
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${STATUS_BADGE[q.status] ?? 'bg-gray-50 text-gray-400'}`}>
-                    {q.status}
-                  </span>
-                </td>
-                <td className="py-2">
-                  <button onClick={() => openFile(q.file_path)} disabled={opening === q.file_path}
-                    className="opacity-0 group-hover:opacity-100 text-[10px] px-2 py-1 bg-gray-900 text-white rounded-lg disabled:opacity-50 transition-all">
-                    {opening === q.file_path ? '여는 중' : '열기'}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="text-[10px] text-gray-400 shrink-0">
-        전체 {queue.length} · 대기 {pending} · 완료 {queue.filter(q=>q.status==='done').length} · 오류 {errors}
-      </div>
-    </div>
-  )
 }
 
-// ── 탭 4: Preference ─────────────────────────────────
 interface BehaviorData {
   days: number
   file_opens: { path: string; cnt: number; last_open: string }[]
@@ -666,7 +806,7 @@ ${b.topic_access.slice(0,8).map(t => `- ${t.name} (${t.access_cnt}회)`).join('\
 데이터에서 보이는 것만 기반으로, 구체적이고 통찰력 있게 작성하세요.`
 
         await streamClaudeWeb(sessionKey, mcpEndpoint,
-          [{ role: 'user', content: prompt }], '', (delta) => {
+          [{ role: 'user', content: prompt }], '', (delta: string) => {
             setAnalysis(prev => prev + delta)
           })
       } else {
@@ -1603,3 +1743,4 @@ export default function KnowledgeGraph({ settings }: { settings: Settings }) {
     </div>
   )
 }
+

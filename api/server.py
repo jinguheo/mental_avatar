@@ -176,32 +176,127 @@ def search():
     q = request.args.get("q", "")
     mode = request.args.get("mode", "semantic")  # semantic | keyword
     limit = int(request.args.get("limit", 10))
+    source = request.args.get("source", "").strip()
+    include_conversation = request.args.get("include_conversation", "0").lower() in ("1", "true", "yes", "on")
+    include_graphify = request.args.get("include_graphify", "0").lower() in ("1", "true", "yes", "on")
+    include_entities = request.args.get("include_entities", "0").lower() in ("1", "true", "yes", "on")
     if q:
         graph.log_activity(None, "search", q)
 
     if not q:
         return jsonify({"error": "q 파라미터 필요"}), 400
 
+    entity_types = {"concept", "technology", "organization", "tool", "entity", "field", "algorithm"}
+    default_hidden_types = {"todo"}
+
+    def result_source(item: dict) -> str:
+        return item.get("source_type") or item.get("metadata", {}).get("source_type", "")
+
+    def allow_result(item: dict) -> bool:
+        st = result_source(item)
+        if source:
+            return st == source
+        if not include_conversation and st == "conversation":
+            return False
+        if not include_entities and st in entity_types:
+            return False
+        if st in default_hidden_types:
+            return False
+        return True
+
+    def keyword_distance(item: dict) -> float:
+        title = (item.get("title") or "").strip().lower()
+        content = (item.get("content") or item.get("document") or "").strip().lower()
+        query = q.strip().lower()
+        if title == query:
+            return 0.05
+        if query and query in title:
+            return 0.12
+        if query and query in content:
+            return 0.2
+        return 0.35
+
+    def keyword_rank(item: dict) -> tuple:
+        st = result_source(item)
+        source_priority = {
+            "project": 0,
+            "note": 1,
+            "pdf": 2,
+            "pptx": 3,
+            "docx": 3,
+            "md": 3,
+            "txt": 3,
+            "text": 3,
+            "file": 3,
+            "todo": 5,
+        }.get(st, 4)
+        return (keyword_distance(item), source_priority, -(item.get("importance") or 0))
+
+    def complete_result(item: dict) -> dict:
+        node = graph.get_node(item["id"])
+        if node:
+            item["title"] = node["title"]
+            item["source_type"] = node["source_type"]
+            if node.get("file_path"):
+                item["file_path"] = node["file_path"]
+            elif node.get("file_hash"):
+                row = graph.get_conn().execute(
+                    "SELECT file_path FROM nodes WHERE file_hash=? AND file_path IS NOT NULL AND file_path != '' LIMIT 1",
+                    (node["file_hash"],)
+                ).fetchone()
+                if row and row["file_path"]:
+                    item["file_path"] = row["file_path"]
+        else:
+            metadata = item.get("metadata") or {}
+            item["source_type"] = item.get("source_type") or metadata.get("source_type", "unknown")
+            if metadata.get("file_path"):
+                item["file_path"] = metadata["file_path"]
+        if not item.get("title"):
+            item["title"] = (item.get("document") or item.get("content") or "").strip().splitlines()[0][:80]
+        item["_source"] = "kg"
+        return item
+
     if mode == "semantic":
-        results = embeddings.search(q, n_results=limit)
-        for r in results:
-            node = graph.get_node(r["id"])
-            if node:
-                r["title"] = node["title"]
-                r["source_type"] = node["source_type"]
-            r["_source"] = "kg"
+        keyword_results = []
+        for r in graph.search_nodes(q, limit=limit * 2):
+            if allow_result(r):
+                r["distance"] = keyword_distance(r)
+                keyword_results.append(complete_result(r))
+        keyword_results.sort(key=keyword_rank)
+
+        where = None
+        if source:
+            where = {"source_type": source}
+        elif not include_conversation:
+            where = {"source_type": {"$ne": "conversation"}}
+        semantic_results = []
+        max_semantic_distance = 0.5 if keyword_results else 0.62
+        for r in embeddings.search(q, n_results=limit, where=where):
+            if r.get("distance", 1.0) > max_semantic_distance:
+                continue
+            if allow_result(r):
+                semantic_results.append(complete_result(r))
+
+        results = []
+        seen_ids = set()
+        for r in [*keyword_results, *semantic_results]:
+            if r["id"] in seen_ids:
+                continue
+            seen_ids.add(r["id"])
+            results.append(r)
     else:
         results = graph.search_nodes(q, limit=limit)
-        for r in results:
-            r["_source"] = "kg"
+        results = [complete_result(r) for r in results if allow_result(r)]
 
-    # Graphify 커뮤니티 결과 병합 (중복 제거)
-    kg_titles = {r.get("title", "").lower() for r in results}
-    gf_results = _graphify_community_search(q)
-    for gf in gf_results:
-        if gf["title"].lower() not in kg_titles:
-            results.append(gf)
+    # Graphify 커뮤니티는 보조 검색이므로 명시 요청 시에만 병합한다.
+    if include_graphify:
+        kg_titles = {r.get("title", "").lower() for r in results}
+        gf_results = _graphify_community_search(q)
+        for gf in gf_results:
+            if gf["title"].lower() not in kg_titles:
+                results.append(gf)
 
+    results = results[:limit]
     return jsonify({"results": results, "count": len(results)})
 
 
