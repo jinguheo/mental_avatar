@@ -16,13 +16,13 @@ const STORAGE_KEY = 'mental-avatar-settings'
 const CHAT_STORAGE_KEY = 'mental-avatar-chat'
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'home', label: 'Home', navLabel: 'Home', icon: 'home', description: 'Module overview' },
-  { id: 'kg', label: 'Knowledge', navLabel: 'Graph', icon: 'kg', description: 'Memory and graph search' },
-  { id: 'mode-c', label: 'AI Avatar', navLabel: 'Avatar', icon: 'mode-c', description: 'Lightweight 3D chat' },
-  { id: 'mode-r', label: 'Realistic', navLabel: '3D', icon: 'mode-r', description: 'Full avatar scene' },
-  { id: 'mode-a', label: 'Video', navLabel: 'Video', icon: 'mode-a', description: 'Video avatar tools' },
-  { id: 'presenter', label: 'Presenter', navLabel: 'PPT', icon: 'presenter', description: 'Narrated slide flow' },
-  { id: 'settings', label: 'Settings', navLabel: 'Setup', icon: 'settings', description: 'Providers and profile' },
+  { id: 'home', label: '홈', navLabel: '홈', icon: 'home', description: '시작 화면' },
+  { id: 'kg', label: '기억 검색', navLabel: '기억', icon: 'kg', description: '지식 그래프와 기록 검색' },
+  { id: 'mode-c', label: 'AI 대화', navLabel: '대화', icon: 'mode-c', description: '가벼운 3D 아바타 채팅' },
+  { id: 'mode-r', label: '실사 아바타', navLabel: '3D', icon: 'mode-r', description: '전체 아바타 장면' },
+  { id: 'mode-a', label: '영상 도구', navLabel: '영상', icon: 'mode-a', description: '아바타 영상 생성' },
+  { id: 'presenter', label: '발표', navLabel: '발표', icon: 'presenter', description: '슬라이드와 내레이션' },
+  { id: 'settings', label: '설정', navLabel: '설정', icon: 'settings', description: '연결과 프로필' },
 ]
 
 function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
@@ -144,114 +144,74 @@ function LoadingView() {
 function HomeView({ onOpen }: { onOpen: (tab: Tab) => void }) {
   const items = NAV_ITEMS.filter(item => item.id !== 'home')
   const featured = [
-    { id: 'mode-c' as Tab, label: 'Start AI chat', meta: 'Light 3D avatar' },
-    { id: 'kg' as Tab, label: 'Search memory', meta: 'Knowledge graph' },
-    { id: 'presenter' as Tab, label: 'Open presenter', meta: 'Slides and narration' },
+    { id: 'mode-c' as Tab, label: '대화 시작', meta: 'AI 대화' },
+    { id: 'kg' as Tab, label: '기억 검색', meta: '지식 그래프' },
+    { id: 'settings' as Tab, label: '설정', meta: '연결 상태' },
   ]
 
   return (
     <div className="view-canvas h-full overflow-y-auto">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-5 sm:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-5 sm:px-6 lg:px-8">
         <header className="view-header -mx-4 -mt-5 border-x-0 px-4 py-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-          <div className="flex flex-col gap-1">
-            <p className="dashboard-kicker">Mental workspace</p>
-            <h1 className="text-xl font-semibold text-gray-950">Mental Avatar</h1>
-            <p className="max-w-2xl text-sm leading-6 text-gray-500">
-              A focused control room for avatar chat, personal memory, video tools, and narrated presentations.
-            </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="dashboard-kicker">개인 작업실</p>
+              <h1 className="mt-1 text-xl font-semibold text-gray-950">멘탈 아바타</h1>
+            </div>
+            <span className="inline-flex w-fit items-center gap-2 rounded-lg border border-surface-border bg-white px-3 py-1.5 text-xs font-medium text-gray-600">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
+              로컬 연결
+            </span>
           </div>
         </header>
 
-        <div className="grid gap-4 lg:grid-cols-[1.35fr_0.65fr]">
-          <section className="dashboard-card overflow-hidden">
-            <div className="grid gap-0 md:grid-cols-[1fr_240px]">
-              <div className="flex min-h-[250px] flex-col justify-between p-5 sm:p-6">
-                <div>
-                  <p className="dashboard-kicker">Ready now</p>
-                  <h2 className="mt-2 max-w-xl text-2xl font-semibold tracking-tight text-gray-950 sm:text-3xl">
-                    Choose a module and keep the heavy tools quiet until you need them.
-                  </h2>
-                  <p className="mt-3 max-w-2xl text-sm leading-6 text-gray-500">
-                    The home screen now follows the same calm dashboard layout as my-dashboard: clear navigation, compact status, and fast entry points.
-                  </p>
-                </div>
-
-                <div className="mt-5 grid gap-2 sm:grid-cols-3">
-                  {featured.map(action => (
-                    <button
-                      key={action.id}
-                      type="button"
-                      onClick={() => onOpen(action.id)}
-                      className="rounded-xl border border-surface-border bg-gray-50 px-3 py-3 text-left transition hover:border-gray-300 hover:bg-white hover:shadow-sm"
-                    >
-                      <span className="block text-sm font-semibold text-gray-950">{action.label}</span>
-                      <span className="mt-1 block text-[11px] text-gray-500">{action.meta}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="relative flex min-h-[220px] items-center justify-center border-t border-surface-border bg-[#eef1f5] p-6 md:border-l md:border-t-0">
-                <div className="absolute left-5 top-5 rounded-full border border-white/80 bg-white/75 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500 shadow-sm">
-                  Avatar Core
-                </div>
-                <div className="relative h-36 w-36">
-                  <div className="absolute inset-0 rounded-full bg-gray-950 shadow-card" />
-                  <div className="absolute bottom-2 left-1/2 z-10 h-20 w-28 -translate-x-1/2 rounded-t-[42px] bg-white" />
-                  <div className="absolute bottom-6 left-1/2 z-20 h-10 w-16 -translate-x-1/2 rounded-t-3xl bg-gray-800" />
-                  <div className="absolute left-1/2 top-5 z-30 h-20 w-20 -translate-x-1/2 rounded-full bg-[#f1c8a8]" />
-                  <div className="absolute left-1/2 top-2 z-40 h-14 w-24 -translate-x-1/2 rounded-t-full bg-[#2c211b]" />
-                  <div className="absolute left-[50px] top-[54px] z-50 h-2 w-2 rounded-full bg-gray-950" />
-                  <div className="absolute right-[50px] top-[54px] z-50 h-2 w-2 rounded-full bg-gray-950" />
-                  <div className="absolute left-1/2 top-[78px] z-50 h-1.5 w-8 -translate-x-1/2 rounded-full bg-[#b7655c]" />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <aside className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
-            {[
-              ['6', 'Active modules', 'Lazy-loaded tools'],
-              ['Local', 'Memory base', 'MCP and profile data'],
-              ['Light', 'Startup mode', 'Fast first render'],
-            ].map(([value, label, sub]) => (
-              <div key={label} className="dashboard-card px-4 py-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-lg font-semibold text-gray-950">{value}</div>
-                    <div className="dashboard-kicker mt-1">{label}</div>
-                  </div>
-                  <span className="mt-1 h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.12)]" />
-                </div>
-                <p className="mt-2 text-xs leading-5 text-gray-500">{sub}</p>
-              </div>
+        <section className="view-panel p-4 sm:p-5">
+          <div className="grid gap-2 sm:grid-cols-3">
+            {featured.map(action => (
+              <button
+                key={action.id}
+                type="button"
+                onClick={() => onOpen(action.id)}
+                className="flex min-h-16 items-center justify-between rounded-lg border border-surface-border bg-gray-50 px-4 py-3 text-left transition hover:border-gray-300 hover:bg-white"
+              >
+                <span>
+                  <span className="block text-sm font-semibold text-gray-950">{action.label}</span>
+                  <span className="mt-1 block text-xs text-gray-500">{action.meta}</span>
+                </span>
+                <span className="text-gray-400" aria-hidden="true">{'>'}</span>
+              </button>
             ))}
-          </aside>
-        </div>
+          </div>
+        </section>
 
-        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {items.map(item => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onOpen(item.id)}
-              className="dashboard-card-interactive group flex min-h-[126px] flex-col justify-between p-4 text-left"
-            >
-              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-950 text-[11px] font-bold text-white shadow-sm transition group-hover:scale-[1.03]">
-                <NavIcon icon={item.icon} className="h-4 w-4" />
-              </span>
-              <span>
-                <span className="block text-sm font-semibold text-gray-950">{item.label}</span>
-                <span className="mt-1 block text-xs leading-5 text-gray-500">{item.description}</span>
-              </span>
-            </button>
-          ))}
+        <section className="view-panel overflow-hidden">
+          <div className="border-b border-surface-border px-4 py-3 sm:px-5">
+            <h2 className="text-sm font-semibold text-gray-950">도구</h2>
+          </div>
+          <div className="divide-y divide-surface-border">
+            {items.map(item => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onOpen(item.id)}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-gray-50 sm:px-5"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-700">
+                  <NavIcon icon={item.icon} className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium text-gray-950">{item.label}</span>
+                  <span className="mt-0.5 block truncate text-xs text-gray-500">{item.description}</span>
+                </span>
+                <span className="text-gray-300" aria-hidden="true">{'>'}</span>
+              </button>
+            ))}
+          </div>
         </section>
       </div>
     </div>
   )
 }
-
 function Sidebar({ current, onNavigate }: { current: Tab; onNavigate: (tab: Tab) => void }) {
   return (
     <aside className="fixed inset-x-0 bottom-0 z-40 h-16 border-t border-surface-border bg-white/95 backdrop-blur-xl md:static md:z-auto md:flex md:h-auto md:w-20 md:shrink-0 md:flex-col md:border-r md:border-t-0 md:bg-white/80">
@@ -326,3 +286,4 @@ export default function App() {
     </div>
   )
 }
+
