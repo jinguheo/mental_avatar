@@ -22,6 +22,85 @@ function localTimestamp(): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
+
+// TTS로 읽을 텍스트를 만든다 — 답변이 길면(XTTS 한국어 95자 제한 근처) 첫 문장만 읽고
+// 나머지는 채팅창의 전체 텍스트를 참고하도록 안내한다. 길게 읽으려다 느려지거나
+// 실패하는 것보다, 짧게라도 확실히 들리는 쪽을 우선한다.
+const SPOKEN_TEXT_LIMIT = 92
+const SPOKEN_FALLBACK_PHRASES = [
+  '핵심만요.',
+  '짧게 읽을게요.',
+  '요점만 말씀드릴게요.',
+  '핵심만 말씀드릴게요.',
+  '나머지는 화면에서 볼게요.',
+  '중요한 부분만 읽을게요.',
+  '길이를 줄여서 말할게요.',
+  '이어지는 내용은 채팅에 남길게요.',
+  '자세한 맥락은 화면에서 확인해 주세요.',
+  '자세한 내용은 채팅을 봐 주세요.',
+  '더 궁금하시면 이어서 말씀해 주세요.',
+  '또 궁금한 점 있으세요?',
+  '혹시 다른 질문도 있으세요?',
+  '이어서 물어보셔도 좋아요.',
+  '궁금한 점 있으면 바로 말씀해 주세요.',
+  '다음 질문도 편하게 해 주세요.',
+  '원하시면 더 이어서 답할게요.',
+  '할 일이 있으면 바로 말씀해 주세요.',
+]
+
+function pickFallbackPhrase(seed: string, room: number): string {
+  const candidates = SPOKEN_FALLBACK_PHRASES.filter(phrase => phrase.length <= room)
+  if (!candidates.length) return ''
+  let hash = 0
+  for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0
+  return candidates[hash % candidates.length]
+}
+
+function stripParentheticalText(text: string): string {
+  let result = text
+  const patterns = [
+    /\([^()]*\)/g,
+    /（[^（）]*）/g,
+    /\[[^\[\]]*\]/g,
+    /【[^【】]*】/g,
+    /\{[^{}]*\}/g,
+    /<[^<>]*>/g,
+  ]
+
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const pattern of patterns) {
+      const next = result.replace(pattern, ' ')
+      if (next !== result) changed = true
+      result = next
+    }
+  }
+
+  return result
+    .replace(/^\s*[·•\-–—*]+\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function buildSpokenText(text: string): string {
+  const trimmed = stripParentheticalText(text)
+  if (trimmed.length <= SPOKEN_TEXT_LIMIT) return trimmed
+  const match = trimmed.match(/^[\s\S]*?[.!?](?=\s|$)/)
+  let firstSentence = (match ? match[0] : trimmed).trim()
+  if (!firstSentence) return trimmed.slice(0, SPOKEN_TEXT_LIMIT).trim()
+
+  const room = SPOKEN_TEXT_LIMIT - firstSentence.length - 1
+  const fallback = pickFallbackPhrase(trimmed, room)
+  if (fallback) return `${firstSentence} ${fallback}`
+
+  if (firstSentence.length > SPOKEN_TEXT_LIMIT) {
+    firstSentence = firstSentence.slice(0, SPOKEN_TEXT_LIMIT).trim()
+  }
+  return firstSentence.endsWith('.') || firstSentence.endsWith('!') || firstSentence.endsWith('?')
+    ? firstSentence
+    : `${firstSentence}...`
+}
 const IDB_NAME = 'mental-avatar-glb'
 const IDB_STORE = 'glb-files'
 
@@ -71,7 +150,8 @@ const SYSTEM = `당신은 사용자를 맞이하는 AI 아바타입니다.
 따뜻하고 전문적으로 한국어로 응대하세요.
 답변은 2~3문장으로 간결하게 하고, 항상 친절한 어조를 유지하세요.`
 
-interface VoiceOption { id: string; label: string; kind: 'clone' | 'template' | 'system'; voiceURI?: string }
+// 브라우저 내장 Microsoft TTS 목소리는 사용하지 않아 목록에서 제외
+interface VoiceOption { id: string; label: string; kind: 'clone' | 'template'; voiceURI?: string }
 const MY_VOICE: VoiceOption = { id: 'mine', label: '내 목소리', kind: 'clone' }
 const TEMPLATE_VOICES: VoiceOption[] = [
   { id: 'pretty', label: '예쁜 목소리', kind: 'template' },
@@ -113,6 +193,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const lipsyncAnalyserRef = useRef<AnalyserNode | null>(null)
   const activeAudioRef = useRef<HTMLAudioElement | null>(null)
   const lipCuesRef = useRef<LipCue[]>([])
+  // 응답이 연달아 오면 이전 TTS 재생을 즉시 중단하고 최신 응답의 음성만 재생한다.
+  const ttsGenRef = useRef(0)
   const emotionRef = useRef<Emotion>('neutral')
   const blinkKeysRef = useRef<string[]>([])
   const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
@@ -160,21 +242,12 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
 
   useEffect(() => { checkServer() }, [])
 
-  // 음성 옵션
-  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([])
-  useEffect(() => {
-    const load = () => {
-      const voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('ko') || v.lang.startsWith('en'))
-      if (voices.length) setSystemVoices(voices.slice(0, 6))
-    }
-    load()
-    speechSynthesis.onvoiceschanged = load
-    return () => { speechSynthesis.onvoiceschanged = null }
-  }, [])
-  const voiceOptions: VoiceOption[] = [MY_VOICE, ...TEMPLATE_VOICES,
-    ...systemVoices.map(v => ({ id: `sys:${v.voiceURI}`, label: v.name, kind: 'system' as const, voiceURI: v.voiceURI })),
-  ]
-  const [voiceOptionId, setVoiceOptionId] = useState(() => localStorage.getItem(VOICE_OPTION_KEY) || MY_VOICE.id)
+  // 음성 옵션 — '내 목소리'(XTTS 클로닝) + 서버 제공 템플릿 목소리만 사용
+  const voiceOptions: VoiceOption[] = [MY_VOICE, ...TEMPLATE_VOICES]
+  const [voiceOptionId, setVoiceOptionId] = useState(() => {
+    try { localStorage.setItem(VOICE_OPTION_KEY, MY_VOICE.id) } catch { /**/ }
+    return MY_VOICE.id
+  })
   const selectedVoice = voiceOptions.find(v => v.id === voiceOptionId) || MY_VOICE
 
   // 채팅
@@ -182,6 +255,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const [chatLoading, setChatLoading] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const speakingRef = useRef(false)
+  // 자동재생이 브라우저 정책에 막히면, 사용자가 직접 눌러서 재생할 수 있는 버튼을 띄운다.
+  const [blockedAudio, setBlockedAudio] = useState<HTMLAudioElement | null>(null)
   const sttBusyRef = useRef(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
   const sendMessageRef = useRef<(t?: string) => void>(() => {})
@@ -215,47 +290,67 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
 
   // ── TTS ──
   const playTTS = useCallback(async (text: string) => {
+    // 응답이 연달아 오면(스트리밍 지연 등으로) 이전 호출의 오디오가 뒤늦게 재생되어
+    // 화면에 보이는 최신 답변과 다른 내용을 읽는 문제를 막는다 — 이전 재생을 즉시 끊고,
+    // 이 호출 이후에 더 새로운 호출이 시작되면 이 호출은 재생하지 않고 조용히 종료한다.
+    const myGen = ++ttsGenRef.current
+    if (activeAudioRef.current) { activeAudioRef.current.pause(); activeAudioRef.current = null }
+    try { speechSynthesis.cancel() } catch { /**/ }
+    setBlockedAudio(null)
+
     setSpeaking(true); speakingRef.current = true
     emotionRef.current = classifyEmotion(text)
+    // 답변이 길면 첫 문장만 읽고 나머지는 채팅창을 보라고 안내 — TTS로 실제 재생되는
+    // 텍스트는 이 짧은 버전이다 (긴 텍스트는 XTTS가 느려지거나 실패하기 쉽다).
+    const spoken = buildSpokenText(text)
     let finished = false
-    const failsafe = setTimeout(() => done(), 2000 + text.length * 200)
+    const failsafe = setTimeout(() => done(), 2000 + spoken.length * 200)
     const done = () => {
       if (finished) return; finished = true
-      clearTimeout(failsafe); setSpeaking(false); speakingRef.current = false
+      clearTimeout(failsafe)
+      if (myGen !== ttsGenRef.current) return // 이미 더 새로운 응답으로 대체됨
+      setSpeaking(false); speakingRef.current = false
       emotionRef.current = 'neutral'
     }
-    if (selectedVoice.kind === 'system') {
-      const u = new SpeechSynthesisUtterance(text)
-      const matched = systemVoices.find(v => v.voiceURI === selectedVoice.voiceURI)
-      if (matched) u.voice = matched
-      u.lang = matched?.lang || 'ko-KR'; u.rate = 0.95
-      u.onend = done; u.onerror = done
-      try { speechSynthesis.cancel() } catch { /**/ }
-      speechSynthesis.speak(u); return
-    }
     try {
-      const form = new FormData(); form.append('text', text)
+      const form = new FormData(); form.append('text', spoken)
       form.append('voice', selectedVoice.kind === 'template' ? selectedVoice.id : 'mine')
       const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
       if (!res.ok) throw new Error()
       const blob = await res.blob()
+      if (myGen !== ttsGenRef.current) return // 대기하는 동안 더 새로운 응답이 시작됨
       const url = URL.createObjectURL(blob)
       const audio = new Audio(url)
+      activeAudioRef.current = audio
       if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
       const ctx = audioCtxRef.current
       if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
-      const src = ctx.createMediaElementSource(audio)
-      const analyser = ctx.createAnalyser(); analyser.fftSize = 64
-      src.connect(analyser); analyser.connect(ctx.destination)
-      lipsyncAnalyserRef.current = analyser
-      activeAudioRef.current = audio
+      if (myGen !== ttsGenRef.current) { URL.revokeObjectURL(url); return }
+      // AudioContext가 running이 아니면 립싱크 분석용 그래프에 태우지 않는다 — 그 상태로
+      // createMediaElementSource에 연결하면 오디오가 먼 채널로 재생될 수 있다.
+      // 립싱크 없이 원본 경로로 재생하더라도 "소리가 나는 것"이 항상 우선이다.
+      if (ctx.state === 'running') {
+        const src = ctx.createMediaElementSource(audio)
+        const analyser = ctx.createAnalyser(); analyser.fftSize = 64
+        src.connect(analyser); analyser.connect(ctx.destination)
+        lipsyncAnalyserRef.current = analyser
+      } else {
+        console.warn('[TTS] AudioContext가 running이 아니어서(', ctx.state, ') 립싱크 없이 원본 경로로 재생합니다')
+      }
       lipCuesRef.current = []  // 발음 타이밍 큐 도착 전까지는 주파수 대역 근사로 폴백
       const cleanup = () => {
-        done(); lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []
+        done()
+        if (activeAudioRef.current === audio) activeAudioRef.current = null
+        if (myGen === ttsGenRef.current) { lipsyncAnalyserRef.current = null; lipCuesRef.current = [] }
         URL.revokeObjectURL(url)
       }
       audio.onended = cleanup; audio.onerror = cleanup
-      audio.play().catch(() => cleanup())
+      audio.play().catch(e => {
+        console.error('[TTS] audio.play() 거부됨 — 자동재생 정책일 가능성 높음', e?.name, e?.message)
+        // 자동재생 차단 시 지금 바로 정리하지 않고, 사용자가 직접 눌러서 재생할 수 있게 남겨둔다.
+        if (myGen === ttsGenRef.current) setBlockedAudio(audio)
+        else cleanup()
+      })
       // 재생과 별개로 정확한 발음 타이밍 분석 요청 — 도착하면 주파수 근사 대신 이 큐를 사용
       const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
       fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
@@ -263,12 +358,12 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         .then(data => { if (activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
         .catch(() => {})
     } catch {
-      const u = new SpeechSynthesisUtterance(text)
+      if (myGen !== ttsGenRef.current) return
+      const u = new SpeechSynthesisUtterance(spoken)
       u.lang = 'ko-KR'; u.rate = 0.95; u.onend = done; u.onerror = done
-      try { speechSynthesis.cancel() } catch { /**/ }
       speechSynthesis.speak(u)
     }
-  }, [selectedVoice, systemVoices])
+  }, [selectedVoice])
 
   // ── STT ──
   const THRESHOLD = 20
@@ -301,6 +396,20 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     sttStreamRef.current?.getTracks().forEach(t => t.stop()); sttStreamRef.current = null
     setRecording(false); setVadActive(false)
   }, [])
+
+  // 지금 재생 중인(또는 대기 중인) 음성을 즉시 멈춘다. 듣기 모드가 켜져 있으면 함께 끈다 —
+  // 아바타 목소리를 마이크가 다시 알아듣고 응답→재생을 반복하는 피드백 루프를 끊기 위함이기도 하다.
+  const stopSpeaking = useCallback(() => {
+    ttsGenRef.current++ // 아직 도착하지 않은 이전 TTS 응답은 이제 재생되지 않는다
+    if (activeAudioRef.current) { activeAudioRef.current.pause(); activeAudioRef.current = null }
+    try { speechSynthesis.cancel() } catch { /* ignore */ }
+    lipsyncAnalyserRef.current = null
+    lipCuesRef.current = []
+    setBlockedAudio(null)
+    setSpeaking(false); speakingRef.current = false
+    emotionRef.current = 'neutral'
+    if (recording) stopStt()
+  }, [recording, stopStt])
 
   const startStt = useCallback(async () => {
     if (recording) { stopStt(); return }
@@ -338,9 +447,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     tick()
   }, [recording, stopStt, transcribeChunk])
 
-  // 진입 시 자동 듣기 모드
+  // 마이크 접근은 사용자가 마이크 버튼을 눌렀을 때만 시작한다.
   useEffect(() => {
-    startStt()
     return () => stopStt()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -663,6 +771,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     localStorage.setItem(CHAT_SINCE_KEY, localTimestamp())
     setMessages([{ role: 'assistant', content: GREETING }])
     playTTS(GREETING)
+    // XTTS 워커가 죽어있으면(예: 재부팅 후) 여기서도 확인해서 다시 띄운다. 이미 떠 있으면 서버가 아무 것도 안 함.
+    fetch(`${API}/avatar/xtts/ensure`, { method: 'POST' }).catch(() => {})
   }, [setMessages, playTTS])
 
   const isConnected = settings.aiProvider === 'ollama' || !!(settings.claudeSessionKey || settings.anthropicApiKey)
@@ -782,7 +892,18 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
               ))}
             </div>
             <span className="text-xs text-blue-300">말하는 중</span>
+            <button onClick={stopSpeaking}
+              className="ml-1 text-xs px-2 py-0.5 rounded-full border border-red-500 bg-red-900/70 text-red-300 hover:bg-red-800 transition">
+              ■ 중단
+            </button>
           </div>
+        )}
+        {blockedAudio && (
+          <button
+            onClick={() => { blockedAudio.play().then(() => setBlockedAudio(null)).catch(() => {}) }}
+            className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-yellow-900/80 border border-yellow-500 backdrop-blur px-4 py-2 rounded-full text-xs text-yellow-200 hover:bg-yellow-800 transition animate-pulse">
+            🔇 자동재생이 차단됨 — 눌러서 재생
+          </button>
         )}
         {error && <div className="absolute bottom-4 left-4 right-4 bg-red-900/80 text-red-200 text-xs p-2 rounded">{error}</div>}
       </div>

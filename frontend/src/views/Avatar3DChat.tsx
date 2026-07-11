@@ -29,6 +29,48 @@ function classifyEmotion(text: string): Emotion {
   if (/\?|궁금|놀라|정말요|진짜요|신기/.test(text)) return 'surprised'
   return 'neutral'
 }
+
+// TTS로 읽을 텍스트를 만든다 — 답변이 길면(XTTS 한국어 95자 제한 근처) 첫 문장만 읽고
+// 나머지는 채팅창의 전체 텍스트를 참고하도록 안내한다. 길게 읽으려다 느려지거나
+// 실패하는 것보다, 짧게라도 확실히 들리는 쪽을 우선한다.
+const SPOKEN_TEXT_LIMIT = 80
+
+function stripParentheticalText(text: string): string {
+  let result = text
+  const patterns = [
+    /\([^()]*\)/g,
+    /（[^（）]*）/g,
+    /\[[^\[\]]*\]/g,
+    /【[^【】]*】/g,
+    /\{[^{}]*\}/g,
+    /<[^<>]*>/g,
+  ]
+
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const pattern of patterns) {
+      const next = result.replace(pattern, ' ')
+      if (next !== result) changed = true
+      result = next
+    }
+  }
+
+  return result
+    .replace(/^\s*[·•\-–—*]+\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function buildSpokenText(text: string): string {
+  const trimmed = stripParentheticalText(text)
+  if (trimmed.length <= SPOKEN_TEXT_LIMIT) return trimmed
+  const match = trimmed.match(/^[\s\S]*?[.!?](?=\s|$)/)
+  let firstSentence = (match ? match[0] : trimmed).trim()
+  if (firstSentence.length > SPOKEN_TEXT_LIMIT) firstSentence = firstSentence.slice(0, SPOKEN_TEXT_LIMIT).trim() + '...'
+  if (firstSentence.length >= trimmed.length) return firstSentence // 사실상 전체를 다 읽은 경우
+  return `${firstSentence} 자세한 내용은 채팅 내용을 참고해주세요.`
+}
 // 눈썹 높이 오프셋 + 입 너비 배율(>1 옆으로 늘어남=미소, <1 오므림) + 눈 확대(놀람)
 const EMOTION_EXPR: Record<Emotion, { browLift: number; mouthWidth: number; eyeScale: number }> = {
   neutral:   { browLift: 0,     mouthWidth: 1,    eyeScale: 1 },
@@ -70,8 +112,9 @@ const AVATAR_STYLES: AvatarStyle[] = [
 ]
 const AVATAR_STYLE_KEY = 'mental-avatar-3d-style'
 
-// ── 목소리 후보군: '내 목소리'(XTTS 클로닝) + 서버 제공 템플릿(예쁜/어린이 등) + 브라우저 내장 TTS 목소리들 ──
-interface VoiceOption { id: string; label: string; kind: 'clone' | 'template' | 'system'; voiceURI?: string }
+// ── 목소리 후보군: '내 목소리'(XTTS 클로닝) + 서버 제공 템플릿(예쁜/어린이 등) ──
+// (브라우저 내장 Microsoft TTS 목소리는 사용하지 않아 목록에서 제외)
+interface VoiceOption { id: string; label: string; kind: 'clone' | 'template'; voiceURI?: string }
 const MY_VOICE: VoiceOption = { id: 'mine', label: '내 목소리', kind: 'clone' }
 // 백엔드 VOICE_TEMPLATES와 id를 맞춰야 함 (api/server.py)
 const TEMPLATE_VOICES: VoiceOption[] = [
@@ -92,24 +135,14 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     try { localStorage.setItem(AVATAR_STYLE_KEY, id) } catch { /* ignore */ }
   }
 
-  // 목소리 선택 — '내 목소리'(XTTS 클로닝) 또는 브라우저 내장 TTS의 다른 목소리들 중 선택
-  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([])
-  useEffect(() => {
-    const load = () => {
-      const voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('ko') || v.lang.startsWith('en'))
-      if (voices.length) setSystemVoices(voices.slice(0, 6))
-    }
-    load()
-    speechSynthesis.onvoiceschanged = load
-    return () => { speechSynthesis.onvoiceschanged = null }
-  }, [])
+  // 목소리 선택 — '내 목소리'(XTTS 클로닝) 또는 서버 제공 템플릿 목소리 중 선택
   const voiceOptions: VoiceOption[] = [
     MY_VOICE,
     ...TEMPLATE_VOICES,
-    ...systemVoices.map(v => ({ id: `sys:${v.voiceURI}`, label: v.name, kind: 'system' as const, voiceURI: v.voiceURI })),
   ]
   const [voiceOptionId, setVoiceOptionId] = useState<string>(() => {
-    try { return localStorage.getItem(VOICE_OPTION_KEY) || MY_VOICE.id } catch { return MY_VOICE.id }
+    try { localStorage.setItem(VOICE_OPTION_KEY, MY_VOICE.id) } catch { /* ignore */ }
+    return MY_VOICE.id
   })
   const selectedVoice = voiceOptions.find(v => v.id === voiceOptionId) || MY_VOICE
   const selectVoiceOption = (id: string) => {
@@ -139,6 +172,15 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const emotionRef = useRef<Emotion>('neutral')
+  // 응답이 연달아 오면 이전 TTS 재생을 즉시 중단하고 최신 응답의 음성만 재생한다.
+  // (아니면 늦게 도착한 이전 응답의 오디오가 화면엔 이미 최신 답변이 보이는 상태에서 뒤늦게 재생될 수 있음)
+  const ttsGenRef = useRef(0)
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null)
+  // 자동재생이 브라우저 정책에 막히면, 사용자가 직접 눌러서 재생할 수 있는 버튼을 띄운다.
+  // (사용자의 실제 클릭 안에서 호출하는 play()는 브라우저가 절대 막지 않는다)
+  const [blockedAudio, setBlockedAudio] = useState<HTMLAudioElement | null>(null)
+  // 콘솔 없이도 화면에서 바로 확인할 수 있는 마지막 TTS 상태 (항상 화면 하단에 표시)
+  const [ttsDebug, setTtsDebug] = useState('')
 
   // 웹캠 얼굴 추적 — FaceTrackingPanel이 매 프레임 전달하는 표정(블렌드셰이프) 점수.
   // 값이 들어오면(웹캠 ON) 3D 아바타 표정을 사용자 얼굴에 맞춰 구동한다.
@@ -147,7 +189,10 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     faceBlendRef.current = scores
   }, [])
   const headPoseRef = useRef<{ pitch: number; yaw: number; roll: number } | null>(null)
+  const headPoseNeutralRef = useRef<{ pitch: number; yaw: number; roll: number } | null>(null)
   const handleHeadPose = useCallback((pose: { pitch: number; yaw: number; roll: number } | null) => {
+    if (!pose) headPoseNeutralRef.current = null
+    else if (!headPoseNeutralRef.current) headPoseNeutralRef.current = pose
     headPoseRef.current = pose
   }, [])
 
@@ -193,65 +238,93 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
 
   // ── TTS ────────────────────────────────────────────────
   const playTTS = useCallback(async (text: string) => {
+    // 응답이 연달아 오면(스트리밍 지연 등으로) 이전 호출의 오디오가 뒤늦게 재생되어
+    // 화면에 보이는 최신 답변과 다른 내용을 읽는 문제를 막는다 — 이전 재생을 즉시 끊고,
+    // 이 호출 이후에 더 새로운 호출이 시작되면 이 호출은 재생하지 않고 조용히 종료한다.
+    const myGen = ++ttsGenRef.current
+    if (activeAudioRef.current) { activeAudioRef.current.pause(); activeAudioRef.current = null }
+    try { speechSynthesis.cancel() } catch { /* ignore */ }
+    setBlockedAudio(null)
+    setTtsDebug(`[${new Date().toLocaleTimeString('ko-KR')}] 목소리=${voiceOptionId} 시작`)
+
     setSpeaking(true); speakingRef.current = true
     emotionRef.current = classifyEmotion(text)
     const voice = selectedVoice
+    // 답변이 길면 첫 문장만 읽고 나머지는 채팅창을 보라고 안내 — TTS로 실제 재생되는
+    // 텍스트는 이 짧은 버전이다 (긴 텍스트는 XTTS가 느려지거나 실패하기 쉽다).
+    const spoken = buildSpokenText(text)
     // done은 한 번만 실행 + failsafe 타이머 해제. TTS가 어떤 경로로 실패하든 speaking 플래그가
     // 영구히 박혀 마이크가 막히는 일을 막는다.
     let finished = false
-    const failsafe = setTimeout(() => done(), 2000 + text.length * 200)
+    const failsafe = setTimeout(() => done(), 2000 + spoken.length * 200)
     const done = () => {
       if (finished) return
       finished = true
       clearTimeout(failsafe)
+      if (myGen !== ttsGenRef.current) return // 이미 더 새로운 응답으로 대체됨 — speaking 상태는 그 쪽이 관리
       setSpeaking(false); speakingRef.current = false
       emotionRef.current = 'neutral'
     }
 
-    // 시스템 목소리 선택 시 — 브라우저 내장 TTS로 직접 재생 (XTTS 호출 생략)
-    if (voice.kind === 'system') {
-      const u = new SpeechSynthesisUtterance(text)
-      const matched = systemVoices.find(v => v.voiceURI === voice.voiceURI)
-      if (matched) u.voice = matched
-      u.lang = matched?.lang || 'ko-KR'
-      u.rate = 0.95
-      u.onend = done
-      u.onerror = done
-      try { speechSynthesis.cancel() } catch { /* ignore */ }
-      speechSynthesis.speak(u)
-      return
-    }
-
     try {
-      const form = new FormData(); form.append('text', text)
+      const form = new FormData(); form.append('text', spoken)
       form.append('voice', voice.kind === 'template' ? voice.id : 'mine')
+      setTtsDebug('요청 중…')
       const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
-      if (!res.ok) throw new Error()
+      if (!res.ok) { setTtsDebug(`tts_only 실패 (HTTP ${res.status})`); throw new Error() }
       const blob = await res.blob()
+      setTtsDebug(`오디오 수신 ${blob.size}B`)
+      if (myGen !== ttsGenRef.current) return // 대기하는 동안 더 새로운 응답이 시작됨 — 이 응답은 재생하지 않음
       const url  = URL.createObjectURL(blob)
       const audio = new Audio(url)
+      activeAudioRef.current = audio
       if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
       const ctx = audioCtxRef.current
-      if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /* ignore */ } }
-      const analyser = ctx.createAnalyser(); analyser.fftSize = 64
-      analyserRef.current = analyser
-      const src = ctx.createMediaElementSource(audio)
-      src.connect(analyser); analyser.connect(ctx.destination)
-      const cleanup = () => { done(); analyserRef.current = null; URL.revokeObjectURL(url) }
-      audio.onended = cleanup
-      audio.onerror = cleanup
-      // play()가 자동재생 정책에 막혀 reject되면 onended가 안 불려 speaking 상태가 영구히 박힘 → 반드시 풀어준다
-      audio.play().catch(() => cleanup())
-    } catch {
+      setTtsDebug(d => `${d} · ctx=${ctx.state}`)
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume(); setTtsDebug(d => `${d} → resume후=${ctx.state}`) }
+        catch (e) { setTtsDebug(d => `${d} · resume 실패: ${e}`) }
+      }
+      if (myGen !== ttsGenRef.current) { URL.revokeObjectURL(url); return }
+      // AudioContext가 running이 아니면 립싱크 분석용 그래프에 태우지 않는다.
+      // createMediaElementSource로 연결하면 오디오 요소의 소리가 그 그래프로만 나가는데,
+      // 이 순간 컨텍스트가 완전히 켜져 있지 않으면 소리가 전혀 안 들리는 채로 재생될 수 있다.
+      // 립싱크(입모양) 없이 원본 경로로 재생하더라도 "소리가 나는 것"을 항상 우선한다.
+      if (ctx.state === 'running') {
+        const analyser = ctx.createAnalyser(); analyser.fftSize = 64
+        analyserRef.current = analyser
+        const src = ctx.createMediaElementSource(audio)
+        src.connect(analyser); analyser.connect(ctx.destination)
+      } else {
+        setTtsDebug(d => `${d} · running 아님 → 립싱크 없이 원본 재생`)
+      }
+      const cleanup = () => {
+        done()
+        if (activeAudioRef.current === audio) activeAudioRef.current = null
+        if (myGen === ttsGenRef.current) analyserRef.current = null
+        URL.revokeObjectURL(url)
+      }
+      audio.onended = () => { setTtsDebug(d => `${d} · 재생 끝남(onended)`); cleanup() }
+      audio.onerror = (e) => { setTtsDebug(d => `${d} · audio 오류: ${e}`); cleanup() }
+      audio.play().then(() => setTtsDebug(d => `${d} · play()성공, ctx=${ctx.state}`))
+        .catch(e => {
+          setTtsDebug(d => `${d} · play() 거부됨: ${e.name} ${e.message}`)
+          // 자동재생 차단 — 지금 바로 정리하지 않고, 사용자가 직접 눌러서 재생할 수 있게 남겨둔다.
+          // (사용자의 클릭 안에서 호출하는 play()는 브라우저가 절대 막지 않는다)
+          if (myGen === ttsGenRef.current) setBlockedAudio(audio)
+          else cleanup()
+        })
+    } catch (e) {
+      if (myGen !== ttsGenRef.current) return
+      setTtsDebug(d => `${d} · XTTS 실패, 브라우저 TTS로 대체: ${e}`)
       // fallback: 브라우저 내장 TTS
-      const u = new SpeechSynthesisUtterance(text)
+      const u = new SpeechSynthesisUtterance(spoken)
       u.lang = 'ko-KR'; u.rate = 0.95
       u.onend = done
       u.onerror = done
-      try { speechSynthesis.cancel() } catch { /* ignore */ }
       speechSynthesis.speak(u)
     }
-  }, [selectedVoice, systemVoices])
+  }, [selectedVoice])
 
   const respond = useCallback((text: string) => { playTTS(text) }, [playTTS])
 
@@ -295,6 +368,19 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     sttStreamRef.current = null
     setRecording(false); setVadActive(false)
   }, [])
+
+  // 지금 재생 중인(또는 대기 중인) 음성을 즉시 멈춘다. 듣기 모드가 켜져 있으면 함께 끈다 —
+  // 아바타 목소리를 마이크가 다시 알아듣고 응답→재생을 반복하는 피드백 루프를 끊기 위함이기도 하다.
+  const stopSpeaking = useCallback(() => {
+    ttsGenRef.current++ // 아직 도착하지 않은 이전 TTS 응답은 이제 재생되지 않는다
+    if (activeAudioRef.current) { activeAudioRef.current.pause(); activeAudioRef.current = null }
+    try { speechSynthesis.cancel() } catch { /* ignore */ }
+    analyserRef.current = null
+    setBlockedAudio(null)
+    setSpeaking(false); speakingRef.current = false
+    emotionRef.current = 'neutral'
+    if (recording) stopStt()
+  }, [recording, stopStt])
 
   const startStt = useCallback(async () => {
     if (recording) { stopStt(); return }
@@ -353,9 +439,8 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     tick()
   }, [recording, stopStt, transcribeChunk])
 
-  // 페이지 진입 시 자동으로 듣기 모드 시작 — 클릭 없이 바로 대화 가능
+  // 장치 접근은 사용자가 마이크 버튼을 눌렀을 때만 시작한다.
   useEffect(() => {
-    startStt()
     return () => stopStt()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -601,10 +686,18 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
       // 고개 방향 — 추적 중이면 사용자 머리 회전(pitch/yaw/roll)을 그대로 따라가고,
       // 추적 안 할 때는 기존 미세한 아이들 흔들림을 사용
       if (pose) {
-        // MediaPipe 좌표계는 카메라 기준이라 좌우(yaw)·상하(pitch)가 아바타와 반대로 느껴져 부호 반전
-        group.rotation.y += (-pose.yaw   * 0.8 - group.rotation.y) * 0.25
-        group.rotation.x += (-pose.pitch * 0.8 - group.rotation.x) * 0.25
-        group.rotation.z += ( pose.roll  * 0.6 - group.rotation.z) * 0.25
+        const neutral = headPoseNeutralRef.current || pose
+        const clamp = (v: number, limit: number) => Math.max(-limit, Math.min(limit, v))
+        const deadzone = (v: number, zone = 0.035) => Math.abs(v) < zone ? 0 : v
+        const yaw = deadzone(pose.yaw - neutral.yaw)
+        const pitch = deadzone(pose.pitch - neutral.pitch)
+        const roll = deadzone(pose.roll - neutral.roll, 0.045)
+
+        // 시작 자세를 기준으로 한 상대 회전만 부드럽게 반영한다.
+        // 좌우/상하/기울기는 셀프뷰 체감에 맞춰 반전하고, 과도한 추적은 제한한다.
+        group.rotation.y += (clamp(-yaw * 0.55, 0.35) - group.rotation.y) * 0.14
+        group.rotation.x += (clamp(-pitch * 0.45, 0.25) - group.rotation.x) * 0.14
+        group.rotation.z += (clamp(-roll * 0.30, 0.18) - group.rotation.z) * 0.12
       } else {
         group.rotation.y = Math.sin(t * 0.25) * 0.05
         group.rotation.x = Math.sin(t * 0.18) * 0.015
@@ -752,6 +845,8 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     localStorage.setItem(CHAT_SINCE_KEY, localTimestamp())
     setMessages([{ role: 'assistant', content: GREETING }])
     respond(GREETING)
+    // XTTS 워커가 죽어있으면(예: 재부팅 후) 여기서도 확인해서 다시 띄운다. 이미 떠 있으면 서버가 아무 것도 안 함.
+    fetch(`${API}/avatar/xtts/ensure`, { method: 'POST' }).catch(() => {})
   }, [respond, setMessages])
 
   // 시스템 프롬프트: 백엔드 /avatar/context(프로파일+관심사+RAG)에 리셉션 모드 안내를 덧붙임
@@ -873,9 +968,27 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
                 ))}
               </div>
               <span className="text-xs text-blue-300">말하는 중</span>
+              <button onClick={stopSpeaking}
+                className="ml-1 text-xs px-2 py-0.5 rounded-full border border-red-500 bg-red-900/70 text-red-300 hover:bg-red-800 transition">
+                ■ 중단
+              </button>
             </div>
           )}
+          {blockedAudio && (
+            <button
+              onClick={() => { blockedAudio.play().then(() => setBlockedAudio(null)).catch(() => {}) }}
+              className="flex items-center gap-2 bg-yellow-900/80 border border-yellow-500 backdrop-blur px-4 py-2 rounded-full text-xs text-yellow-200 hover:bg-yellow-800 transition animate-pulse">
+              🔇 자동재생이 차단됨 — 눌러서 재생
+            </button>
+          )}
         </div>
+
+        {/* TTS 디버그 상태 — 콘솔 없이도 화면에서 바로 확인 가능 */}
+        {ttsDebug && (
+          <div className="absolute bottom-2 left-2 right-2 z-30 bg-black/70 backdrop-blur text-[10px] text-lime-300 px-2 py-1 rounded font-mono break-all">
+            {ttsDebug}
+          </div>
+        )}
       </div>
 
       {/* 채팅 패널 */}

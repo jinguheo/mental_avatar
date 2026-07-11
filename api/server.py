@@ -7,6 +7,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import hashlib
 import uuid, subprocess, time, json
+import re as _re
 from pathlib import Path
 
 from db.init_db import init as init_db
@@ -1333,9 +1334,117 @@ AVATAR_DATA     = Path(__file__).parent.parent / "data"
 VOICE_SAMPLE    = AVATAR_DATA / "voice_sample.wav"
 PYTHON_EXE      = config.AVATAR_PYTHON   # SadTalker (numpy 1.26 패치판)
 XTTS_PYTHON_EXE = config.XTTS_PYTHON     # Coqui XTTS v2
+XTTS_SERVER_SCRIPT = Path(__file__).parent / "xtts_server.py"
+_xtts_worker_lock = _threading.Lock()
+_xtts_worker_process = None
+
+
+def _xtts_worker_alive(timeout: float = 1.5) -> bool:
+    """상주 XTTS 워커(8768)가 응답하는지 확인."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8768/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _ensure_xtts_worker() -> dict:
+    """XTTS 상주 워커가 꺼져 있으면 백그라운드로 새로 띄운다. 이미 떠 있으면 아무 것도 안 함.
+    모델 로딩에 ~1분 걸리므로 호출 직후 바로 쓸 수 있다는 뜻은 아니다 — 몇 초~1분 뒤부터
+    tts_only 요청이 다시 빠르게(2~3초) 성공한다."""
+    global _xtts_worker_process
+    with _xtts_worker_lock:
+        if _xtts_worker_alive():
+            return {"status": "already_running"}
+        if _xtts_worker_process is not None and _xtts_worker_process.poll() is None:
+            return {"status": "starting", "pid": _xtts_worker_process.pid}
+        try:
+            AVATAR_TMP.mkdir(parents=True, exist_ok=True)
+            log_path = AVATAR_TMP / "xtts_worker.log"
+            log_f = open(log_path, "ab")
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            _xtts_worker_process = subprocess.Popen(
+                [XTTS_PYTHON_EXE, str(XTTS_SERVER_SCRIPT)],
+                stdout=log_f, stderr=log_f,
+                creationflags=creationflags,
+                cwd=str(XTTS_SERVER_SCRIPT.parent),
+            )
+            print("[xtts] 워커가 꺼져있어 새로 기동합니다 (로그: %s)" % log_path, flush=True)
+            return {"status": "starting", "log": str(log_path)}
+        except Exception as e:
+            print(f"[xtts] 워커 기동 실패: {e}", flush=True)
+            return {"status": "error", "detail": str(e)}
+
+
+def _xtts_watchdog_loop():
+    """2분마다 워커 생존을 확인하고, 죽어있으면 자동으로 다시 띄운다."""
+    while True:
+        time.sleep(120)
+        try:
+            if not _xtts_worker_alive():
+                _ensure_xtts_worker()
+        except Exception as e:
+            print(f"[xtts-watchdog] 오류: {e}", flush=True)
+
+
+@app.route("/avatar/xtts/status", methods=["GET"])
+def avatar_xtts_status():
+    return jsonify({"running": _xtts_worker_alive()})
+
+
+@app.route("/avatar/xtts/ensure", methods=["POST"])
+def avatar_xtts_ensure():
+    return jsonify(_ensure_xtts_worker())
 
 
 FACE_IMAGE_MAX_SIDE = 1024  # 이 이상이면 SadTalker 랜드마크 검출이 실패하는 게 실측 확인됨
+
+
+def _strip_tts_markup(text: str) -> str:
+    """TTS에서 읽을 필요 없는 괄호/마크업 문구를 제거한다."""
+    result = text or ""
+    patterns = [
+        r"\([^()]*\)",
+        r"（[^（）]*）",
+        r"\[[^\[\]]*\]",
+        r"【[^【】]*】",
+        r"\{[^{}]*\}",
+        r"<[^<>]*>",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for pattern in patterns:
+            next_result = _re.sub(pattern, " ", result)
+            if next_result != result:
+                changed = True
+            result = next_result
+    return _re.sub(r"^\s*[·•\-–—*]+\s*", " ", _re.sub(r"\s+", " ", result)).strip()
+
+
+def _strip_tts_markup(text: str) -> str:
+    """Remove stage directions and markup that should not be spoken by TTS."""
+    result = text or ""
+    bracket_pairs = [
+        ("(", ")"),
+        ("（", "）"),
+        ("[", "]"),
+        ("【", "】"),
+        ("{", "}"),
+        ("<", ">"),
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for open_ch, close_ch in bracket_pairs:
+            pattern = _re.escape(open_ch) + r"[^" + _re.escape(open_ch + close_ch) + r"]*" + _re.escape(close_ch)
+            next_result = _re.sub(pattern, " ", result)
+            if next_result != result:
+                changed = True
+            result = next_result
+    result = _re.sub(r"^\s*[\-\*\u00b7\u2022\u2013\u2014]+\s*", " ", result)
+    return _re.sub(r"\s+", " ", result).strip()
 
 
 def _save_face_image(file_storage, dest_path) -> None:
@@ -1503,6 +1612,7 @@ def avatar_tts_only():
     """얼굴 없이 XTTS 음성 WAV만 생성 — 3D 아바타 립싱크용"""
     text = request.form.get("text", "").strip()
     voice = request.form.get("voice", "mine").strip()
+    text = _strip_tts_markup(text)
     if not text:
         return jsonify({"error": "text required"}), 400
 
@@ -1566,6 +1676,7 @@ def _run_avatar_job_locked(job_id: str, face_path: Path, text: str, job_dir: Pat
 
     # 1) TTS
     job["stage"] = "tts"
+    text = _strip_tts_markup(text)
     tts_script = _tts_script(text, speech_path, f"speaker_wav={repr(str(VOICE_SAMPLE))}")
     tts_script_path = job_dir / "run_tts.py"
     tts_script_path.write_text(tts_script, encoding="utf-8")
@@ -1663,6 +1774,7 @@ def avatar_generate_async():
     face_file = request.files.get("face")
     ref_video = request.files.get("ref_pose")   # 참조 포즈 영상 (선택)
     text      = request.form.get("text", "").strip()
+    text      = _strip_tts_markup(text)
 
     if not face_file:
         return jsonify({"error": "face file required"}), 400
@@ -2487,6 +2599,16 @@ def tmp_cleanup():
     return jsonify(_cleanup_tmp())
 
 
+@app.route("/stt/warmup", methods=["POST", "GET"])
+def stt_warmup():
+    """STT 모델을 미리 로딩한다."""
+    try:
+        _get_whisper()
+        return jsonify({"ok": True, "status": "ready"})
+    except Exception as e:
+        return jsonify({"error": f"STT warm-up failed: {e}"}), 500
+
+
 if __name__ == "__main__":
     init_db()
     print("=" * 50)
@@ -2503,4 +2625,8 @@ if __name__ == "__main__":
     except Exception as _e:
         print(f"[cleanup] 시작 정리 오류: {_e}", flush=True)
     _threading.Thread(target=_cleanup_tmp_loop, daemon=True).start()
+    # XTTS 워커 자동 기동 + 주기적 생존 확인(꺼져 있으면 자동 재시작)
+    _threading.Thread(target=_ensure_xtts_worker, daemon=True).start()
+    _threading.Thread(target=_xtts_watchdog_loop, daemon=True).start()
+    _threading.Thread(target=_get_whisper, daemon=True).start()
     app.run(host="127.0.0.1", port=8766, debug=False, threaded=True)

@@ -7,7 +7,7 @@
 JSON POST /tts  {text, speaker?, speaker_wav?, language?}  → audio/wav 바이트
 GET /health → {"status":"ok","device":"cuda|cpu"}
 """
-import os, sys, json, uuid, tempfile, threading
+import os, sys, json, uuid, tempfile, threading, re
 from pathlib import Path
 os.environ["COQUI_TOS_AGREED"] = "1"
 # xtts 콘다 환경에서 단독 실행되므로 core.config를 import하지 않고 경로를 상대계산.
@@ -31,6 +31,51 @@ print(f"[xtts] 준비 완료 — device={_DEV}, 포트 8768 대기", flush=True)
 # XTTS 모델은 동시 호출에 안전하지 않다 — 락으로 직렬화
 _lock = threading.Lock()
 _OUT = tempfile.gettempdir()
+
+
+def _strip_tts_markup(text: str) -> str:
+    result = text or ""
+    patterns = [
+        r"\([^()]*\)",
+        r"（[^（）]*）",
+        r"\[[^\[\]]*\]",
+        r"【[^【】]*】",
+        r"\{[^{}]*\}",
+        r"<[^<>]*>",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for pattern in patterns:
+            next_result = re.sub(pattern, " ", result)
+            if next_result != result:
+                changed = True
+            result = next_result
+    return re.sub(r"^\s*[·•\-–—*]+\s*", " ", re.sub(r"\s+", " ", result)).strip()
+
+
+def _strip_tts_markup(text: str) -> str:
+    """Remove stage directions and markup that should not be spoken by TTS."""
+    result = text or ""
+    bracket_pairs = [
+        ("(", ")"),
+        ("（", "）"),
+        ("[", "]"),
+        ("【", "】"),
+        ("{", "}"),
+        ("<", ">"),
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for open_ch, close_ch in bracket_pairs:
+            pattern = re.escape(open_ch) + r"[^" + re.escape(open_ch + close_ch) + r"]*" + re.escape(close_ch)
+            next_result = re.sub(pattern, " ", result)
+            if next_result != result:
+                changed = True
+            result = next_result
+    result = re.sub(r"^\s*[\-\*\u00b7\u2022\u2013\u2014]+\s*", " ", result)
+    return re.sub(r"\s+", " ", result).strip()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -58,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self._send(400, b'{"error":"bad json"}', "application/json")
             return
-        text = (req.get("text") or "").strip()
+        text = _strip_tts_markup((req.get("text") or "").strip())
         if not text:
             self._send(400, b'{"error":"text required"}', "application/json")
             return

@@ -78,6 +78,44 @@ const VOICE_OPTIONS: VoiceOption[] = [
 interface MorphRef { mesh: THREE.Mesh; index: number }
 // 립싱크·표정 모프 상수/분류기는 @/avatarMorph 로 분리 (RealisticAvatar와 공용)
 
+// 발표 대본을 문장 단위로 잘라 각 조각이 대략 MAX_CHUNK_LEN 자를 넘지 않게 묶는다.
+// XTTS 한국어는 긴 텍스트를 한 번에 합성하면 수십 초가 걸려 "소리가 안 난다"처럼 느껴진다.
+// 짧게 나눠 순차 합성·재생하면 첫 문장이 ~3초 안에 나오고 내용도 잘리지 않는다.
+const MAX_CHUNK_LEN = 90
+function splitScriptForTTS(text: string): string[] {
+  const trimmed = (text || '').trim()
+  if (!trimmed) return []
+  const sentences = trimmed
+    .split(/(?<=[.!?…。])\s+|\n+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+  const chunks: string[] = []
+  let buf = ''
+  for (const s of sentences) {
+    // 한 문장이 너무 길면 쉼표 등으로 더 쪼갠다
+    const parts = s.length > MAX_CHUNK_LEN ? s.split(/(?<=[,、·])\s*/) : [s]
+    for (const p0 of parts) {
+      let p = p0.trim()
+      if (!p) continue
+      // 구두점으로도 안 잘리는 초장문은 길이로 강제 절단
+      while (p.length > MAX_CHUNK_LEN) {
+        if (buf) { chunks.push(buf); buf = '' }
+        chunks.push(p.slice(0, MAX_CHUNK_LEN))
+        p = p.slice(MAX_CHUNK_LEN)
+      }
+      if (!p) continue
+      if ((buf ? buf.length + 1 : 0) + p.length <= MAX_CHUNK_LEN) {
+        buf = buf ? `${buf} ${p}` : p
+      } else {
+        if (buf) chunks.push(buf)
+        buf = p
+      }
+    }
+  }
+  if (buf) chunks.push(buf)
+  return chunks
+}
+
 export default function PptPresenter() {
   const containerRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
@@ -158,6 +196,8 @@ export default function PptPresenter() {
   const [speaking, setSpeaking] = useState(false)
   const [autoPlay, setAutoPlay] = useState(false)
   const [voiceId, setVoiceId] = useState('mine')
+  // 자동재생이 브라우저 정책에 막히면, 사용자가 직접 눌러서 재생할 수 있는 버튼을 띄운다.
+  const [blockedAudio, setBlockedAudio] = useState<HTMLAudioElement | null>(null)
 
   const slidesRef = useRef<Slide[]>([])
   const voiceIdRef = useRef('mine')
@@ -515,8 +555,31 @@ export default function PptPresenter() {
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
     lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []
     emotionRef.current = 'neutral'
+    setBlockedAudio(null)
     setSpeaking(false)
   }, [])
+
+  const stripParentheticalText = (text: string): string => {
+    let result = text
+    const patterns = [
+      /\([^()]*\)/g,
+      /（[^（）]*）/g,
+      /\[[^\[\]]*\]/g,
+      /【[^【】]*】/g,
+      /\{[^{}]*\}/g,
+      /<[^<>]*>/g,
+    ]
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const pattern of patterns) {
+        const next = result.replace(pattern, ' ')
+        if (next !== result) changed = true
+        result = next
+      }
+    }
+    return result.replace(/^\s*[·•\-–—*]+\s*/g, ' ').replace(/\s+/g, ' ').trim()
+  }
 
   const speakSlide = useCallback(async (idx: number) => {
     const slide = slidesRef.current[idx]
@@ -527,51 +590,83 @@ export default function PptPresenter() {
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
     setCurrentIndex(idx); setSpeaking(true)
     emotionRef.current = classifyEmotion(slide.script)
-    try {
-      const form = new FormData()
-      form.append('text', slide.script); form.append('voice', voiceIdRef.current)
-      const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
-      if (!res.ok) throw new Error('tts failed')
-      const blob = await res.blob()
-      if (stale()) return
-      const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
-      currentAudioRef.current = audio
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
-      const ctx = audioCtxRef.current
-      if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
-      const src = ctx.createMediaElementSource(audio)
-      const analyser = ctx.createAnalyser(); analyser.fftSize = 64
-      src.connect(analyser); analyser.connect(ctx.destination)
-      lipsyncAnalyserRef.current = analyser
-      activeAudioRef.current = audio
-      lipCuesRef.current = []
-      const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
-      fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
-        .then(r => r.json())
-        .then(data => { if (!stale() && activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
-        .catch(() => {})
-      const cleanup = () => {
-        URL.revokeObjectURL(url)
-        lipsyncAnalyserRef.current = null
-        activeAudioRef.current = null; lipCuesRef.current = []
-        emotionRef.current = 'neutral'
-        if (stale()) return
-        setSpeaking(false)
-        const next = idx + 1
-        if (autoPlayRef.current && next < slidesRef.current.length) {
-          speakSlide(next)
-        } else {
-          autoPlayRef.current = false; setAutoPlay(false)
-        }
-      }
-      audio.onended = cleanup; audio.onerror = cleanup
-      audio.play().catch(cleanup)
-    } catch {
-      lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []
+
+    // 대본 전체를 한 번에 XTTS로 보내면 합성이 30초+ 걸려 "소리가 안 난다"처럼 느껴진다.
+    // 문장 단위로 잘라 순차 합성·재생하면 첫 문장이 ~3초 안에 나오고 내용도 잘리지 않는다.
+    const chunks = splitScriptForTTS(stripParentheticalText(slide.script))
+
+    const goNextSlide = () => {
       emotionRef.current = 'neutral'
-      if (!stale()) { setSpeaking(false); autoPlayRef.current = false; setAutoPlay(false) }
+      if (stale()) return
+      setSpeaking(false)
+      const next = idx + 1
+      if (autoPlayRef.current && next < slidesRef.current.length) speakSlide(next)
+      else { autoPlayRef.current = false; setAutoPlay(false) }
     }
+
+    if (chunks.length === 0) { goNextSlide(); return }
+
+    const playChunk = async (ci: number) => {
+      if (stale()) return
+      try {
+        const form = new FormData()
+        form.append('text', chunks[ci]); form.append('voice', voiceIdRef.current)
+        const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
+        if (!res.ok) throw new Error('tts failed')
+        const blob = await res.blob()
+        if (stale()) return
+        const url = URL.createObjectURL(blob)
+        const audio = new Audio(url)
+        currentAudioRef.current = audio
+        if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
+        const ctx = audioCtxRef.current
+        if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
+        if (stale()) { URL.revokeObjectURL(url); return }
+        activeAudioRef.current = audio
+        lipCuesRef.current = []
+        // AudioContext가 running일 때만 립싱크 분석 그래프에 태운다. suspended 상태에서
+        // createMediaElementSource로 연결하면 오디오가 그 그래프로만 나가는데, 컨텍스트가
+        // 안 깨어 있으면 소리가 전혀 안 들리는 채로 재생된다 — 그럴 땐 립싱크 없이 원본
+        // 경로로 재생(소리가 나는 것을 항상 우선). 실사 아바타와 동일한 처리.
+        if (ctx.state === 'running') {
+          const src = ctx.createMediaElementSource(audio)
+          const analyser = ctx.createAnalyser(); analyser.fftSize = 64
+          src.connect(analyser); analyser.connect(ctx.destination)
+          lipsyncAnalyserRef.current = analyser
+        } else {
+          lipsyncAnalyserRef.current = null
+        }
+        const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
+        fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
+          .then(r => r.json())
+          .then(data => { if (!stale() && activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
+          .catch(() => {})
+        const advance = () => {
+          URL.revokeObjectURL(url)
+          lipsyncAnalyserRef.current = null
+          activeAudioRef.current = null; lipCuesRef.current = []
+          if (stale()) return
+          const nextChunk = ci + 1
+          if (nextChunk < chunks.length) playChunk(nextChunk)  // 같은 슬라이드의 다음 문장
+          else goNextSlide()                                   // 슬라이드 전체 문장 완료 → 다음 슬라이드
+        }
+        audio.onended = advance; audio.onerror = advance
+        setBlockedAudio(null)
+        audio.play().catch(() => {
+          // 자동재생 차단 — 넘기지 않고, 사용자가 눌러서 재생할 수 있게 남겨둔다.
+          // (사용자의 실제 클릭 안에서 호출하는 play()는 브라우저가 절대 막지 않는다)
+          if (stale()) { advance(); return }
+          setBlockedAudio(audio)
+        })
+      } catch {
+        if (stale()) return
+        // 이 문장 합성 실패 → 전체 중단보다 다음 문장으로 넘어가 본다
+        const nextChunk = ci + 1
+        if (nextChunk < chunks.length) playChunk(nextChunk)
+        else goNextSlide()
+      }
+    }
+    playChunk(0)
   }, [])
 
   const handlePlay = useCallback(() => {
@@ -585,6 +680,7 @@ export default function PptPresenter() {
     ttsSeqRef.current += 1
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
     lipsyncAnalyserRef.current = null; emotionRef.current = 'neutral'
+    setBlockedAudio(null)
     setSpeaking(false); setCurrentIndex(idx)
     if (wasPlaying) speakSlide(idx)
   }, [speakSlide])
@@ -771,6 +867,13 @@ export default function PptPresenter() {
               </button>
             </div>
           </div>
+          {blockedAudio && (
+            <button
+              onClick={() => { blockedAudio.play().then(() => setBlockedAudio(null)).catch(() => {}) }}
+              className="w-full py-2 text-sm rounded-lg bg-yellow-900/80 border border-yellow-500 text-yellow-200 hover:bg-yellow-800 transition animate-pulse">
+              🔇 자동재생이 차단됐어요 — 눌러서 소리 재생
+            </button>
+          )}
           <button onClick={() => { stopSpeaking(); setSessionId(''); setSlides([]) }}
             className="text-xs text-gray-500 hover:text-gray-300 self-start">
             ↺ 새 파일 업로드

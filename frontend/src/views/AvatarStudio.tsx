@@ -22,6 +22,9 @@ interface FaceSwapProps {
 }
 
 function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHistory, faceRegistered }: FaceSwapProps) {
+  // 마운트 시점 한 번만 고정되는 캐시 버스팅 값 — 등록된 얼굴 사진이 서버에서 바뀐 뒤에도
+  // 브라우저가 예전 이미지를 계속 붙들고 있지 않도록, 이 탭을 새로 열 때마다 최신본을 받아온다.
+  const [faceVersion] = useState(() => Date.now())
   const [targetVideo, setTargetVideo] = useState<File | null>(null)
   const [ytUrl, setYtUrl] = useState('')
   const [ytTitle, setYtTitle] = useState('')
@@ -155,7 +158,7 @@ function FaceSwapPanel({ sharedFaceFile, sharedFaceUrl, onFaceSelect, avatarHist
                 className={`shrink-0 w-14 h-14 rounded-xl overflow-hidden border-2 transition ${
                   sharedFaceUrl === `${API}/avatar/face` ? 'border-gray-900' : 'border-gray-200 hover:border-gray-400'
                 }`} title="등록된 내 얼굴">
-                <img src={`${API}/avatar/face`} className="w-full h-full object-cover" alt="내 얼굴" />
+                <img src={`${API}/avatar/face?t=${faceVersion}`} className="w-full h-full object-cover" alt="내 얼굴" />
               </button>
             )}
             {avatarHistory.map(h => (
@@ -352,6 +355,9 @@ export default function AvatarStudio() {
   const [faceFile, setFaceFile]               = useState<File | null>(null)
   const [facePreview, setFacePreview]         = useState<string | null>(null)
   const [faceRegistered, setFaceRegistered]   = useState(false)
+  // 마운트 시점 한 번만 고정되는 캐시 버스팅 값 — 서버 얼굴 사진이 바뀐 뒤에도
+  // 브라우저가 예전 이미지를 계속 붙들고 있지 않도록, 탭을 새로 열 때마다 최신본을 받아온다.
+  const [faceVersion] = useState(() => Date.now())
   const [text, setText]                       = useState(() => localStorage.getItem(LAST_TEXT_KEY) || '')
   const [voiceRegistered, setVoiceRegistered] = useState(false)
   // 모드 A/C 공유 얼굴 상태
@@ -647,10 +653,13 @@ export default function AvatarStudio() {
           </button>
         ))}
       </div>
-    <div className="flex gap-6 flex-1 p-6 overflow-auto bg-white">
-      {/* 왼쪽: 입력 */}
-      <div className="w-[28rem] flex flex-col gap-4 shrink-0">
-        <h2 className="text-sm font-semibold text-gray-900">TTS + 립싱크</h2>
+    <div className="flex gap-4 flex-1 p-4 overflow-auto bg-gray-100">
+      {/* ① 입력 */}
+      <div className="w-[28rem] flex flex-col gap-4 shrink-0 bg-blue-50/40 rounded-2xl border-2 border-blue-200 p-5 overflow-y-auto">
+        <div className="flex items-center gap-2 -mx-5 -mt-5 mb-1 px-5 py-2.5 rounded-t-2xl bg-blue-100 border-b-2 border-blue-200">
+          <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold shrink-0">1</span>
+          <h2 className="text-sm font-bold text-blue-900">입력 — 얼굴·목소리·텍스트</h2>
+        </div>
 
         {/* 얼굴 사진 */}
         <div>
@@ -778,8 +787,12 @@ export default function AvatarStudio() {
         {error && <p className="text-xs text-red-500">{error}</p>}
       </div>
 
-      {/* 가운데: 결과 영상 + 포즈 참조 영상 (왼쪽 패널이 너무 길어져서 여기로 이동) */}
-      <div className="flex-1 flex flex-col gap-4 min-w-0 min-h-0">
+      {/* ② 결과 & 옵션 */}
+      <div className="flex-1 flex flex-col gap-3 min-w-0 min-h-0 bg-emerald-50/40 rounded-2xl border-2 border-emerald-200 p-5">
+        <div className="flex items-center gap-2 -mx-5 -mt-5 mb-1 px-5 py-2.5 rounded-t-2xl bg-emerald-100 border-b-2 border-emerald-200 shrink-0">
+          <span className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-bold shrink-0">2</span>
+          <h2 className="text-sm font-bold text-emerald-900">결과 &amp; 옵션</h2>
+        </div>
         <div className="flex-1 flex items-center justify-center bg-gray-50 rounded-2xl border border-gray-100 min-h-0">
           {videoUrl
             ? <video src={videoUrl} controls autoPlay loop className="max-h-full rounded-2xl shadow-lg" />
@@ -840,7 +853,7 @@ export default function AvatarStudio() {
                     !facePreview && !faceFile ? 'border-gray-900' : 'border-gray-200 hover:border-gray-400'
                   }`}
                   title="내 등록 얼굴">
-                  <img src={`${API}/avatar/face`} className="w-full h-full object-cover" alt="나" />
+                  <img src={`${API}/avatar/face?t=${faceVersion}`} className="w-full h-full object-cover" alt="나" />
                 </button>
               )}
               {/* 히스토리 얼굴들 */}
@@ -937,10 +950,13 @@ export default function AvatarStudio() {
         </div>
       </div>
 
-      {/* 오른쪽: 이전 생성 목록 */}
+      {/* ③ 이전 생성 목록 */}
       {history.length > 0 && (
-        <div className="w-48 shrink-0 flex flex-col gap-2 overflow-hidden">
-          <p className="text-xs font-semibold text-gray-600 shrink-0">이전 생성 목록</p>
+        <div className="w-52 shrink-0 flex flex-col gap-2 overflow-hidden bg-amber-50/40 rounded-2xl border-2 border-amber-200 p-4">
+          <div className="flex items-center gap-2 -mx-4 -mt-4 mb-1 px-4 py-2.5 rounded-t-2xl bg-amber-100 border-b-2 border-amber-200 shrink-0">
+            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-amber-600 text-white text-xs font-bold shrink-0">3</span>
+            <p className="text-xs font-bold text-amber-900">이전 생성 목록</p>
+          </div>
           <p className="text-[10px] text-gray-400 shrink-0">클릭: 재생 · 길게 클릭: 이 얼굴로 설정</p>
           {/* 2열 그리드 — 항목이 컨테이너 높이에 맞춰 짜부라지지 않게(예전 flex-shrink 버그와 같은 종류) content-start만으론
               부족해서 auto-rows-min(행 높이를 내용 최소크기로) + items-start(기본 stretch 해제)까지 함께 필요했음 */}
