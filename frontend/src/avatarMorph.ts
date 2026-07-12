@@ -6,6 +6,7 @@ export type Emotion = 'neutral' | 'happy' | 'sorry' | 'surprised'
 
 // Rhubarb Lip Sync 발음 구간 큐 (start~end 초, value=발음 셰이프 문자)
 export interface LipCue { start: number; end: number; value: string }
+export interface EmotionCue { start: number; end: number; emotion: Emotion }
 
 // 입싱크(viseme 근사) + 표정용 모프타겟 그룹 — Avaturn/ARKit/Oculus 명명 모두 대응
 export const MORPH_GROUPS: Record<string, RegExp[]> = {
@@ -31,6 +32,16 @@ export const RHUBARB_SHAPE_TARGETS: Record<string, Partial<Record<string, number
   F: { oo: 0.9 },
   G: { consonant: 0.5 },
   H: { ee: 0.4, consonant: 0.2 },
+  KO_CLOSED: { consonant: 0.95, aa: 0.04 },
+  KO_OPEN: { aa: 0.95, ee: 0.08 },
+  KO_ROUND: { oo: 0.95, aa: 0.18 },
+  KO_SPREAD: { ee: 0.9, aa: 0.22 },
+  KO_TRANSITION: { oo: 0.42, ee: 0.32, aa: 0.18 },
+  KO_SIBILANT: { consonant: 0.72, ee: 0.28 },
+  KO_ALVEOLAR: { consonant: 0.58, aa: 0.18 },
+  KO_BACK: { consonant: 0.48, oo: 0.28, aa: 0.18 },
+  KO_NASAL: { consonant: 0.78, aa: 0.08 },
+  KO_LIGHT: { consonant: 0.25, aa: 0.2 },
 }
 
 // 말하는 동안 기본으로 살짝 웃는 표정(neutral baseline) + 감정별 가중치(명확히 보이도록 값을 키움)
@@ -39,6 +50,24 @@ export const EMOTION_WEIGHTS: Record<Emotion, Partial<Record<string, number>>> =
   happy: { smile: 1, browUp: 0.4 },
   sorry: { frown: 0.7, browDown: 0.5, smile: 0 },
   surprised: { browUp: 1, smile: 0.1 },
+}
+
+// TTS audio has no word timestamps, so sentence lengths distribute the known
+// audio duration into stable expression windows while lip cues follow audio.
+export function buildEmotionCues(text: string, duration: number): EmotionCue[] {
+  if (!Number.isFinite(duration) || duration <= 0) return []
+  const sentences = text.split(/(?<=[.!?])\s+|\n+/).map(sentence => sentence.trim()).filter(Boolean)
+  if (sentences.length === 0) return []
+  const totalLength = sentences.reduce((sum, sentence) => sum + Math.max(sentence.length, 1), 0)
+  let start = 0
+  return sentences.map((sentence, index) => {
+    const end = index === sentences.length - 1
+      ? duration
+      : Math.min(duration, start + duration * (Math.max(sentence.length, 1) / totalLength))
+    const cue = { start, end, emotion: classifyEmotion(sentence) }
+    start = end
+    return cue
+  })
 }
 
 export function classifyEmotion(text: string): Emotion {

@@ -793,9 +793,9 @@ export default function AvatarStudio() {
           <span className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-bold shrink-0">2</span>
           <h2 className="text-sm font-bold text-emerald-900">결과 &amp; 옵션</h2>
         </div>
-        <div className="flex-1 flex items-center justify-center bg-gray-50 rounded-2xl border border-gray-100 min-h-0">
+        <div className="flex-[3] flex items-center justify-center bg-gray-50 rounded-2xl border border-gray-100 min-h-0">
           {videoUrl
-            ? <video src={videoUrl} controls autoPlay loop className="max-h-full rounded-2xl shadow-lg" />
+            ? <video src={videoUrl} controls autoPlay loop className="max-h-full max-w-full rounded-2xl shadow-lg" />
             : loading
               ? (
                 <div className="text-center text-gray-400">
@@ -813,6 +813,8 @@ export default function AvatarStudio() {
           }
         </div>
 
+        {/* 옵션 묶음 — 영상 재생 영역이 항상 크게 유지되도록 옵션들은 하단에 모아 최대 높이 제한 + 필요시 내부 스크롤 */}
+        <div className="flex-[2] min-h-0 overflow-y-auto flex flex-col gap-3 pr-1">
         {/* 말투 & 성격 (왼쪽 패널이 너무 길어져서 여기로 이동) */}
         {(styleOptions.speech_style.length > 0 || styleOptions.persona.length > 0) && (
           <div className="shrink-0 space-y-2">
@@ -856,24 +858,40 @@ export default function AvatarStudio() {
                   <img src={`${API}/avatar/face?t=${faceVersion}`} className="w-full h-full object-cover" alt="나" />
                 </button>
               )}
-              {/* 히스토리 얼굴들 */}
+              {/* 히스토리 얼굴들 — 클릭: 이 얼굴로 선택 / 우상단 ✕(hover): 이 생성 기록 삭제 */}
               {history.map(h => (
-                <button key={h.job_id}
-                  onClick={async () => {
-                    const res = await fetch(`${API}${h.thumb_url}`)
-                    const blob = await res.blob()
-                    const url = URL.createObjectURL(blob)
-                    const file = new File([blob], 'face.jpg', { type: 'image/jpeg' })
-                    onFaceSelect(file, url)
-                  }}
-                  className={`shrink-0 w-14 h-14 rounded-xl overflow-hidden border-2 transition ${
-                    facePreview && faceFile?.name === 'face.jpg' && facePreview.includes('blob')
-                      ? 'border-indigo-500' : 'border-gray-200 hover:border-gray-400'
-                  }`}
-                  title={h.created_at}>
-                  <img src={`${API}${h.thumb_url}`} className="w-full h-full object-cover" alt={h.created_at}
-                    onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                </button>
+                <div key={h.job_id} className="relative shrink-0 group">
+                  <button
+                    onClick={async () => {
+                      const res = await fetch(`${API}${h.thumb_url}`)
+                      const blob = await res.blob()
+                      const url = URL.createObjectURL(blob)
+                      const file = new File([blob], 'face.jpg', { type: 'image/jpeg' })
+                      onFaceSelect(file, url)
+                    }}
+                    className={`block w-14 h-14 rounded-xl overflow-hidden border-2 transition ${
+                      facePreview && faceFile?.name === 'face.jpg' && facePreview.includes('blob')
+                        ? 'border-indigo-500' : 'border-gray-200 hover:border-gray-400'
+                    }`}
+                    title={h.created_at}>
+                    <img src={`${API}${h.thumb_url}`} className="w-full h-full object-cover" alt={h.created_at}
+                      onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                  </button>
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      if (!confirm('이 얼굴(생성 기록)을 삭제할까요? 함께 만든 영상도 삭제됩니다.')) return
+                      try {
+                        await fetch(`${API}/avatar/history/${h.job_id}`, { method: 'DELETE' })
+                        if (videoUrl === `${API}${h.video_url}`) setVideoUrl(null)
+                        loadHistory()
+                      } catch { /* ignore */ }
+                    }}
+                    title="이 얼굴 삭제"
+                    className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-500 hover:bg-red-600 text-white text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow">
+                    ✕
+                  </button>
+                </div>
               ))}
             </div>
           </div>
@@ -947,6 +965,7 @@ export default function AvatarStudio() {
               })}
             </div>
           )}
+        </div>
         </div>
       </div>
 

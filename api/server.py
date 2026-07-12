@@ -1272,18 +1272,34 @@ _whisper_model = None
 # WhisperModel(CTranslate2)은 동시 transcribe 호출에 안전하지 않다 — Flask threaded=True에서
 # VAD가 STT 요청을 연달아 보내면 같은 모델을 동시 호출해 네이티브 크래시가 난다. 락으로 직렬화.
 _whisper_lock = _threading.Lock()
+# 모델 로드 자체를 직렬화(부팅 워밍업 스레드 + 첫 요청이 동시에 로드 → 메모리 이중 점유 방지)
+_whisper_load_lock = _threading.Lock()
+# 프론트가 "준비 중/실패"를 사용자에게 안내할 수 있도록 로드 상태를 노출한다.
+_whisper_status = {"state": "idle", "detail": ""}  # idle | loading | ready | error
 
 def _get_whisper():
     global _whisper_model
-    if _whisper_model is None:
+    if _whisper_model is not None:
+        return _whisper_model
+    with _whisper_load_lock:
+        if _whisper_model is not None:
+            return _whisper_model
+        _whisper_status.update(state="loading", detail="")
         from faster_whisper import WhisperModel
         # GPU(CTranslate2)는 onnxruntime과 무관 — 임베딩을 CPU로 격리한 뒤로 안전. CPU(5.7s) 대비 ~0.5s.
         # CUDA 로드 실패 시 CPU로 폴백.
         try:
-            _whisper_model = WhisperModel("small", device="cuda", compute_type="float16")
+            model = WhisperModel("small", device="cuda", compute_type="float16")
         except Exception as e:
             print(f"[whisper] CUDA 로드 실패, CPU 폴백: {e}")
-            _whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+            try:
+                model = WhisperModel("small", device="cpu", compute_type="int8")
+            except Exception as e2:
+                _whisper_status.update(state="error", detail=str(e2)[:200])
+                print(f"[whisper] CPU 폴백도 실패: {e2}", flush=True)
+                raise
+        _whisper_model = model
+        _whisper_status.update(state="ready", detail="")
     return _whisper_model
 
 STT_TMP = Path(__file__).parent.parent / "tmp" / "stt"
@@ -1362,14 +1378,16 @@ def _ensure_xtts_worker() -> dict:
         try:
             AVATAR_TMP.mkdir(parents=True, exist_ok=True)
             log_path = AVATAR_TMP / "xtts_worker.log"
-            log_f = open(log_path, "ab")
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            _xtts_worker_process = subprocess.Popen(
-                [XTTS_PYTHON_EXE, str(XTTS_SERVER_SCRIPT)],
-                stdout=log_f, stderr=log_f,
-                creationflags=creationflags,
-                cwd=str(XTTS_SERVER_SCRIPT.parent),
-            )
+            # with로 열어 Popen이 핸들을 자식에 상속시킨 뒤 부모 쪽 핸들은 즉시 닫는다.
+            # (매 재기동마다 파일 핸들이 새는 것을 방지)
+            with open(log_path, "ab") as log_f:
+                _xtts_worker_process = subprocess.Popen(
+                    [XTTS_PYTHON_EXE, str(XTTS_SERVER_SCRIPT)],
+                    stdout=log_f, stderr=log_f,
+                    creationflags=creationflags,
+                    cwd=str(XTTS_SERVER_SCRIPT.parent),
+                )
             print("[xtts] 워커가 꺼져있어 새로 기동합니다 (로그: %s)" % log_path, flush=True)
             return {"status": "starting", "log": str(log_path)}
         except Exception as e:
@@ -1399,28 +1417,6 @@ def avatar_xtts_ensure():
 
 
 FACE_IMAGE_MAX_SIDE = 1024  # 이 이상이면 SadTalker 랜드마크 검출이 실패하는 게 실측 확인됨
-
-
-def _strip_tts_markup(text: str) -> str:
-    """TTS에서 읽을 필요 없는 괄호/마크업 문구를 제거한다."""
-    result = text or ""
-    patterns = [
-        r"\([^()]*\)",
-        r"（[^（）]*）",
-        r"\[[^\[\]]*\]",
-        r"【[^【】]*】",
-        r"\{[^{}]*\}",
-        r"<[^<>]*>",
-    ]
-    changed = True
-    while changed:
-        changed = False
-        for pattern in patterns:
-            next_result = _re.sub(pattern, " ", result)
-            if next_result != result:
-                changed = True
-            result = next_result
-    return _re.sub(r"^\s*[·•\-–—*]+\s*", " ", _re.sub(r"\s+", " ", result)).strip()
 
 
 def _strip_tts_markup(text: str) -> str:
@@ -1758,13 +1754,29 @@ def avatar_lipsync_cues():
     """이미 생성된 TTS WAV를 Rhubarb Lip Sync로 분석해 발음 타이밍 기반 입모양 큐를 반환.
     프론트가 tts_only로 받은 오디오를 그대로 재전송 — TTS 재생성 없이 분석만 추가로 돈다."""
     audio_file = request.files.get("audio")
+    text = request.form.get("text", "").strip()
     if not audio_file:
         return jsonify({"error": "audio required"}), 400
     job_dir = AVATAR_TMP / uuid.uuid4().hex
     job_dir.mkdir(parents=True, exist_ok=True)
     wav_path = job_dir / "audio.wav"
     audio_file.save(str(wav_path))
-    cues = lipsync.extract_visemes(str(wav_path))
+    cues = []
+    if text:
+        try:
+            # Whisper timestamps locate the spoken Korean words in the XTTS WAV.
+            # The source text then maps each Korean syllable to a specific viseme.
+            model = _get_whisper()
+            with _whisper_lock:
+                segments, _ = model.transcribe(
+                    str(wav_path), language="ko", beam_size=5,
+                    word_timestamps=True, vad_filter=False,
+                )
+                cues = lipsync.extract_korean_visemes(text, list(segments))
+        except Exception as exc:
+            print(f"[korean-lipsync] alignment failed, using Rhubarb: {exc}", flush=True)
+    if not cues:
+        cues = lipsync.extract_visemes(str(wav_path))
     return jsonify({"cues": cues})
 
 
@@ -2607,6 +2619,48 @@ def stt_warmup():
         return jsonify({"ok": True, "status": "ready"})
     except Exception as e:
         return jsonify({"error": f"STT warm-up failed: {e}"}), 500
+
+
+@app.route("/status/services", methods=["GET"])
+def status_services():
+    """음성 관련 서버(TTS·STT) 준비 상태를 한 번에 알려준다. 프론트가 이걸 폴링해
+    "준비 중 / 재시작 필요" 같은 안내와 재시작 버튼을 사용자에게 보여줄 수 있다.
+    각 항목 state: ready(사용 가능) | starting(준비 중) | down(꺼짐·조치 필요)."""
+    # ── TTS (XTTS 상주 워커 8768) ──
+    if _xtts_worker_alive():
+        xtts = {"state": "ready", "message": "음성 합성 준비됨"}
+    elif _xtts_worker_process is not None and _xtts_worker_process.poll() is None:
+        xtts = {"state": "starting", "message": "음성 서버 시동 중… (모델 로딩 최대 1분)"}
+    else:
+        xtts = {"state": "down", "message": "음성 서버가 꺼져 있습니다 — 재시작이 필요합니다"}
+
+    # ── STT (faster-whisper) ──
+    st = _whisper_status.get("state", "idle")
+    if st == "ready":
+        stt = {"state": "ready", "message": "음성 인식 준비됨"}
+    elif st == "error":
+        stt = {"state": "down",
+               "message": f"음성 인식 로드 실패 — 재시작이 필요합니다 ({_whisper_status.get('detail', '')})"}
+    else:  # idle | loading
+        stt = {"state": "starting", "message": "음성 인식 준비 중…"}
+
+    return jsonify({"xtts": xtts, "stt": stt})
+
+
+@app.route("/status/restart_voice", methods=["POST"])
+def status_restart_voice():
+    """사용자가 '음성 서버 다시 시작'을 눌렀을 때 — 꺼진 서버를 백그라운드로 다시 띄운다.
+    XTTS 워커 재기동 + STT 워밍업(로드 실패 상태였다면 재시도)을 함께 트리거한다."""
+    xtts_res = _ensure_xtts_worker()
+    # STT가 오류/미로딩 상태면 백그라운드로 다시 로드 시도
+    if _whisper_status.get("state") in ("error", "idle"):
+        def _reload_whisper():
+            try:
+                _get_whisper()
+            except Exception as e:
+                print(f"[whisper] 재로드 실패: {e}", flush=True)
+        _threading.Thread(target=_reload_whisper, daemon=True).start()
+    return jsonify({"xtts": xtts_res, "stt_reload": _whisper_status.get("state")})
 
 
 if __name__ == "__main__":

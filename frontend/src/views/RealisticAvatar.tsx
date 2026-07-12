@@ -10,6 +10,7 @@ import { streamClaudeWeb, claudeWebAutoConnect } from '@/services/claudeWeb'
 import { streamChatOllama } from '@/services/ollama'
 import type { ChatMsg, Settings } from '@/types'
 import { API_BASE } from '@/config'
+import VoiceServiceBanner from '@/components/VoiceServiceBanner'
 import { type Emotion, type LipCue, MORPH_GROUPS, RHUBARB_SHAPE_TARGETS, EMOTION_WEIGHTS, classifyEmotion } from '@/avatarMorph'
 
 const API = API_BASE
@@ -384,7 +385,11 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         setSttResult({ text, language: data.language })
         if (text) sendMessageRef.current(text)
       }
-    } catch { setSttError('인식 요청 실패') }
+    } catch (e) {
+      setSttError(e instanceof DOMException && e.name === 'TimeoutError'
+        ? '음성 인식이 아직 준비 중이거나 처리가 느립니다 — 잠시 후 다시 시도하세요'
+        : '인식 요청 실패 — API 서버 연결을 확인해주세요')
+    }
     finally { setSttBusy(false); sttBusyRef.current = false }
   }, [])
 
@@ -779,6 +784,10 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
 
   return (
     <div className="flex h-full overflow-hidden bg-gray-950">
+      {/* 음성 서버(TTS·STT) 준비/오류 안내 — 정상일 땐 보이지 않음 */}
+      <div className="fixed top-2 left-1/2 -translate-x-1/2 z-[100] max-w-[92vw] pointer-events-none [&>*]:pointer-events-auto">
+        <VoiceServiceBanner />
+      </div>
       {/* 3D 뷰어 */}
       <div
         className={`flex-1 relative ${dragging ? 'ring-2 ring-blue-500 ring-inset' : ''}`}

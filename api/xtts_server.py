@@ -34,27 +34,6 @@ _OUT = tempfile.gettempdir()
 
 
 def _strip_tts_markup(text: str) -> str:
-    result = text or ""
-    patterns = [
-        r"\([^()]*\)",
-        r"（[^（）]*）",
-        r"\[[^\[\]]*\]",
-        r"【[^【】]*】",
-        r"\{[^{}]*\}",
-        r"<[^<>]*>",
-    ]
-    changed = True
-    while changed:
-        changed = False
-        for pattern in patterns:
-            next_result = re.sub(pattern, " ", result)
-            if next_result != result:
-                changed = True
-            result = next_result
-    return re.sub(r"^\s*[·•\-–—*]+\s*", " ", re.sub(r"\s+", " ", result)).strip()
-
-
-def _strip_tts_markup(text: str) -> str:
     """Remove stage directions and markup that should not be spoken by TTS."""
     result = text or ""
     bracket_pairs = [

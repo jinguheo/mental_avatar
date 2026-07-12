@@ -9,6 +9,7 @@ import { streamChatOllama } from '@/services/ollama'
 import FaceTrackingPanel from './FaceTrackingPanel'
 import type { ChatMsg, Settings } from '@/types'
 import { API_BASE } from '@/config'
+import VoiceServiceBanner from '@/components/VoiceServiceBanner'
 
 const API = API_BASE
 const CHAT_SINCE_KEY = 'mental-avatar-chat-since'
@@ -350,8 +351,13 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
         setSttResult({ text, language: data.language })
         if (text) sendMessageRef.current(text)   // 인식 끝나면 자동으로 대화 전송
       }
-    } catch {
-      setSttError('인식 요청 실패 — API 서버 연결을 확인해주세요')
+    } catch (e) {
+      // AbortError = 20초 타임아웃(모델 준비 중이거나 서버가 느림) vs 그 외(연결 끊김) 구분
+      if (e instanceof DOMException && e.name === 'TimeoutError') {
+        setSttError('음성 인식이 아직 준비 중이거나 처리가 느립니다 — 잠시 후 다시 시도하세요')
+      } else {
+        setSttError('인식 요청 실패 — API 서버 연결을 확인해주세요')
+      }
     } finally {
       setSttBusy(false); sttBusyRef.current = false
     }
@@ -907,6 +913,10 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
 
   return (
     <div className="flex h-full overflow-hidden bg-gray-950">
+      {/* 음성 서버(TTS·STT) 준비/오류 안내 — 정상일 땐 보이지 않음 */}
+      <div className="fixed top-2 left-1/2 -translate-x-1/2 z-[100] max-w-[92vw] pointer-events-none [&>*]:pointer-events-auto">
+        <VoiceServiceBanner />
+      </div>
       {/* 3D 뷰 */}
       <div className="flex-1 relative">
         <canvas ref={canvasRef} className="w-full h-full" />

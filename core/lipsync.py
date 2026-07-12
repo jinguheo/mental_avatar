@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from core.korean_lipsync import extract_korean_visemes
+
 RHUBARB_EXE = Path(__file__).parent.parent / "models" / "rhubarb" / "rhubarb.exe"
 
 

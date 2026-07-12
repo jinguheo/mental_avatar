@@ -9,7 +9,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { API_BASE } from '@/config'
-import { type Emotion, type LipCue, MORPH_GROUPS, RHUBARB_SHAPE_TARGETS, EMOTION_WEIGHTS, classifyEmotion } from '@/avatarMorph'
+import VoiceServiceBanner from '@/components/VoiceServiceBanner'
+import { type Emotion, type LipCue, type EmotionCue, MORPH_GROUPS, RHUBARB_SHAPE_TARGETS, EMOTION_WEIGHTS, buildEmotionCues, classifyEmotion } from '@/avatarMorph'
 
 const API = API_BASE
 const IDB_NAME = 'mental-avatar-glb'
@@ -18,6 +19,11 @@ const IDB_STORE = 'glb-files'
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
 const VIEW_MODE_KEY = 'mental-avatar-camera-view'
 type ViewMode = 'face' | 'upper' | 'full'
+type VideoResolution = '720p' | '1080p'
+const VIDEO_RESOLUTIONS: Record<VideoResolution, { width: number; height: number; label: string }> = {
+  '720p': { width: 1280, height: 720, label: '1280 x 720 (HD)' },
+  '1080p': { width: 1920, height: 1080, label: '1920 x 1080 (Full HD)' },
+}
 const VIEW_MODE_LABELS: Record<ViewMode, string> = { face: '얼굴만', upper: '상반신', full: '전체 보기' }
 // face: 얼굴이 화면을 꽉 채우는 클로즈업 — 카메라를 바짝 당기는 대신 FOV를 좁혀 왜곡 없이 확대(망원렌즈 효과).
 // upper: 기존 기본값(상반신). full: 전신이 다 보이는 화면.
@@ -116,6 +122,12 @@ function splitScriptForTTS(text: string): string[] {
   return chunks
 }
 
+function formatDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = Math.max(0, Math.round(seconds % 60))
+  return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`
+}
+
 export default function PptPresenter() {
   const containerRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
@@ -133,6 +145,7 @@ export default function PptPresenter() {
   const lipsyncAnalyserRef = useRef<AnalyserNode | null>(null)
   const activeAudioRef = useRef<HTMLAudioElement | null>(null)
   const lipCuesRef = useRef<LipCue[]>([])
+  const emotionCuesRef = useRef<EmotionCue[]>([])
   const emotionRef = useRef<Emotion>('neutral')
   const blinkKeysRef = useRef<string[]>([])
   const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
@@ -205,6 +218,13 @@ export default function PptPresenter() {
   const ttsSeqRef = useRef(0)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+  const recordingRef = useRef(false)
+  const stopRecordingRef = useRef<(() => void) | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [recordingProgress, setRecordingProgress] = useState({ current: 0, total: 0 })
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null)
+  const [showVideoPreview, setShowVideoPreview] = useState(false)
+  const [videoResolution, setVideoResolution] = useState<VideoResolution>('720p')
 
   useEffect(() => { slidesRef.current = slides }, [slides])
   useEffect(() => { voiceIdRef.current = voiceId }, [voiceId])
@@ -335,11 +355,14 @@ export default function PptPresenter() {
             high = bandAvg(Math.floor(n * 0.66), n)
           }
           const norm = (v: number) => Math.min(1, Math.max(0, (v - 8) / 50))
-          const ew = EMOTION_WEIGHTS[emotionRef.current] || {}
-
-          // Rhubarb 발음 타이밍 큐가 도착했으면 그걸로 정확한 입모양을, 아직이면 주파수 대역 근사로 폴백
           const cues = lipCuesRef.current
           const audioEl = activeAudioRef.current
+          const emotionCue = cues.length > 0 && audioEl
+            ? emotionCuesRef.current.find(cue => audioEl.currentTime >= cue.start && audioEl.currentTime < cue.end)
+            : null
+          const ew = EMOTION_WEIGHTS[emotionCue?.emotion ?? emotionRef.current] || {}
+
+          // Rhubarb 발음 타이밍 큐가 도착했으면 그걸로 정확한 입모양을, 아직이면 주파수 대역 근사로 폴백
           let mouthShape: Partial<Record<string, number>> | null = null
           if (cues.length > 0 && audioEl && !audioEl.paused) {
             const t = audioEl.currentTime
@@ -550,10 +573,12 @@ export default function PptPresenter() {
 
   // ── 발표(TTS 순차 재생) ──
   const stopSpeaking = useCallback(() => {
+    stopRecordingRef.current?.()
+    stopRecordingRef.current = null
     autoPlayRef.current = false; setAutoPlay(false)
     ttsSeqRef.current += 1
     if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null }
-    lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []
+    lipsyncAnalyserRef.current = null; activeAudioRef.current = null; lipCuesRef.current = []; emotionCuesRef.current = []
     emotionRef.current = 'neutral'
     setBlockedAudio(null)
     setSpeaking(false)
@@ -624,6 +649,11 @@ export default function PptPresenter() {
         if (stale()) { URL.revokeObjectURL(url); return }
         activeAudioRef.current = audio
         lipCuesRef.current = []
+        emotionCuesRef.current = []
+        audio.onloadedmetadata = () => {
+          if (!stale() || activeAudioRef.current !== audio) return
+          emotionCuesRef.current = buildEmotionCues(chunks[ci], audio.duration)
+        }
         // AudioContext가 running일 때만 립싱크 분석 그래프에 태운다. suspended 상태에서
         // createMediaElementSource로 연결하면 오디오가 그 그래프로만 나가는데, 컨텍스트가
         // 안 깨어 있으면 소리가 전혀 안 들리는 채로 재생된다 — 그럴 땐 립싱크 없이 원본
@@ -636,7 +666,7 @@ export default function PptPresenter() {
         } else {
           lipsyncAnalyserRef.current = null
         }
-        const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
+        const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav'); cuesForm.append('text', chunks[ci])
         fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
           .then(r => r.json())
           .then(data => { if (!stale() && activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
@@ -644,7 +674,7 @@ export default function PptPresenter() {
         const advance = () => {
           URL.revokeObjectURL(url)
           lipsyncAnalyserRef.current = null
-          activeAudioRef.current = null; lipCuesRef.current = []
+          activeAudioRef.current = null; lipCuesRef.current = []; emotionCuesRef.current = []
           if (stale()) return
           const nextChunk = ci + 1
           if (nextChunk < chunks.length) playChunk(nextChunk)  // 같은 슬라이드의 다음 문장
@@ -669,6 +699,210 @@ export default function PptPresenter() {
     playChunk(0)
   }, [])
 
+  const recordPresentation = useCallback(async () => {
+    const avatarCanvas = rendererRef.current?.domElement
+    const presentationSlides = slidesRef.current
+    if (!avatarCanvas || presentationSlides.length === 0) {
+      setUploadError('Load an avatar and presentation before recording.')
+      return
+    }
+    if (!('MediaRecorder' in window)) {
+      setUploadError('This browser does not support video recording.')
+      return
+    }
+
+    // The capture canvas keeps the slide and avatar in one video track.
+    const captureCanvas = document.createElement('canvas')
+    const resolution = VIDEO_RESOLUTIONS[videoResolution]
+    captureCanvas.width = resolution.width
+    captureCanvas.height = resolution.height
+    const captureCtx = captureCanvas.getContext('2d')
+    if (!captureCtx) return
+
+    if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
+    const audioCtx = audioCtxRef.current
+    if (audioCtx.state === 'suspended') await audioCtx.resume()
+    const recordingDestination = audioCtx.createMediaStreamDestination()
+    const stream = captureCanvas.captureStream(30)
+    recordingDestination.stream.getAudioTracks().forEach(track => stream.addTrack(track))
+    const mimeType = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+    ].find(type => MediaRecorder.isTypeSupported(type))
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+    const videoChunks: Blob[] = []
+    const imageUrls: string[] = []
+    let animationFrame = 0
+    let activeSlideImage: HTMLImageElement | null = null
+    let activeSlideNumber = 1
+    let finished = false
+    let shouldDownload = true
+    let resolveStopped: () => void = () => {}
+    const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
+
+    const stopRecording = (download: boolean) => {
+      if (finished) return
+      finished = true
+      shouldDownload = download
+      recordingRef.current = false
+      cancelAnimationFrame(animationFrame)
+      if (currentAudioRef.current) currentAudioRef.current.pause()
+      if (recorder.state !== 'inactive') recorder.stop()
+    }
+
+    recorder.ondataavailable = event => {
+      if (event.data.size > 0) videoChunks.push(event.data)
+    }
+    recorder.onstop = () => {
+      stream.getTracks().forEach(track => track.stop())
+      imageUrls.forEach(url => URL.revokeObjectURL(url))
+      stopRecordingRef.current = null
+      setRecording(false)
+      setRecordingProgress({ current: 0, total: 0 })
+      lipsyncAnalyserRef.current = null
+      activeAudioRef.current = null
+      lipCuesRef.current = []
+      emotionCuesRef.current = []
+      emotionRef.current = 'neutral'
+      if (shouldDownload && videoChunks.length > 0) {
+        const video = new Blob(videoChunks, { type: mimeType || 'video/webm' })
+        const url = URL.createObjectURL(video)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `presentation-${new Date().toISOString().replace(/[:.]/g, '-')}.webm`
+        link.click()
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      }
+      resolveStopped()
+    }
+
+    const loadSlideImage = async (slide: Slide) => {
+      if (!slide.image || !sessionId) return null
+      try {
+        const response = await fetch(`${API}/presenter/slide_image/${sessionId}/${slide.image}`)
+        if (!response.ok) return null
+        const url = URL.createObjectURL(await response.blob())
+        imageUrls.push(url)
+        return await new Promise<HTMLImageElement | null>(resolve => {
+          const image = new Image()
+          image.onload = () => resolve(image)
+          image.onerror = () => resolve(null)
+          image.src = url
+        })
+      } catch {
+        return null
+      }
+    }
+
+    const drawFrame = () => {
+      captureCtx.setTransform(captureCanvas.width / 1280, 0, 0, captureCanvas.height / 720, 0, 0)
+      const width = 1280
+      const height = 720
+      captureCtx.fillStyle = '#020617'
+      captureCtx.fillRect(0, 0, width, height)
+      captureCtx.fillStyle = '#111827'
+      captureCtx.fillRect(24, 24, 1232, 672)
+      if (activeSlideImage) {
+        const scale = Math.min(1200 / activeSlideImage.width, 630 / activeSlideImage.height)
+        const imageWidth = activeSlideImage.width * scale
+        const imageHeight = activeSlideImage.height * scale
+        captureCtx.drawImage(activeSlideImage, 40 + (1200 - imageWidth) / 2, 45 + (630 - imageHeight) / 2, imageWidth, imageHeight)
+      }
+      captureCtx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+      captureCtx.fillRect(1044, 390, 196, 290)
+      captureCtx.drawImage(avatarCanvas, 1052, 398, 180, 274)
+      captureCtx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+      captureCtx.fillRect(24, 24, 250, 36)
+      captureCtx.fillStyle = '#e5e7eb'
+      captureCtx.font = '16px sans-serif'
+      captureCtx.fillText(`Slide ${activeSlideNumber} / ${presentationSlides.length}`, 40, 48)
+      animationFrame = requestAnimationFrame(drawFrame)
+    }
+
+    const playRecordedChunk = async (text: string) => {
+      const form = new FormData()
+      form.append('text', text)
+      form.append('voice', voiceIdRef.current)
+      const response = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
+      if (!response.ok) throw new Error('TTS generation failed')
+      const blob = await response.blob()
+      if (!recordingRef.current) return
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      currentAudioRef.current = audio
+      activeAudioRef.current = audio
+      lipCuesRef.current = []
+      emotionCuesRef.current = []
+      audio.onloadedmetadata = () => {
+        if (recordingRef.current && activeAudioRef.current === audio) {
+          emotionCuesRef.current = buildEmotionCues(text, audio.duration)
+        }
+      }
+      const source = audioCtx.createMediaElementSource(audio)
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 64
+      source.connect(analyser)
+      analyser.connect(audioCtx.destination)
+      source.connect(recordingDestination)
+      lipsyncAnalyserRef.current = analyser
+      const cuesForm = new FormData()
+      cuesForm.append('audio', blob, 'tts.wav')
+      cuesForm.append('text', text)
+      fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
+        .then(response => response.json())
+        .then(data => { if (recordingRef.current && activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
+        .catch(() => {})
+      await new Promise<void>(resolve => {
+        const finish = () => {
+          URL.revokeObjectURL(url)
+          source.disconnect()
+          lipsyncAnalyserRef.current = null
+          if (activeAudioRef.current === audio) activeAudioRef.current = null
+          lipCuesRef.current = []; emotionCuesRef.current = []
+          resolve()
+        }
+        audio.onended = finish
+        audio.onerror = finish
+        audio.play().catch(finish)
+      })
+    }
+
+    try {
+      setUploadError('')
+      setRecording(true)
+      setRecordingProgress({ current: 0, total: presentationSlides.length })
+      recordingRef.current = true
+      stopRecordingRef.current = () => stopRecording(false)
+      recorder.start(1000)
+      drawFrame()
+
+      for (let index = 0; index < presentationSlides.length && recordingRef.current; index += 1) {
+        const slide = presentationSlides[index]
+        setCurrentIndex(index)
+        activeSlideNumber = index + 1
+        setRecordingProgress({ current: index + 1, total: presentationSlides.length })
+        activeSlideImage = await loadSlideImage(slide)
+        emotionRef.current = classifyEmotion(slide.script)
+        const chunks = splitScriptForTTS(stripParentheticalText(slide.script))
+        for (const chunk of chunks) {
+          if (!recordingRef.current) break
+          try {
+            await playRecordedChunk(chunk)
+          } catch {
+            // Continue with the remaining script when a single TTS request fails.
+          }
+        }
+        await new Promise(resolve => window.setTimeout(resolve, 350))
+      }
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Video recording failed.')
+    } finally {
+      stopRecording(true)
+      await stopped
+    }
+  }, [sessionId, videoResolution])
+
   const handlePlay = useCallback(() => {
     autoPlayRef.current = true; setAutoPlay(true)
     speakSlide(currentIndex)
@@ -686,7 +920,11 @@ export default function PptPresenter() {
   }, [speakSlide])
 
   const editScript = useCallback((idx: number, text: string) => {
-    setSlides(prev => prev.map(s => s.index === idx + 1 ? { ...s, script: text } : s))
+    setSlides(prev => {
+      const next = prev.map(s => s.index === idx + 1 ? { ...s, script: text } : s)
+      slidesRef.current = next
+      return next
+    })
   }, [])
 
   // 직접 수정한 대본을 저장 파일(slides.json)에 반영 — 텍스트박스 포커스 아웃 시 호출
@@ -719,9 +957,68 @@ export default function PptPresenter() {
   }, [sessionId, editScript])
 
   const current = slides[currentIndex]
+  const previewSlide = slides[0]
+  const scriptCharacters = slides.reduce((total, slide) => total + slide.script.trim().length, 0)
+  const ttsChunkCount = slides.reduce((total, slide) => total + splitScriptForTTS(stripParentheticalText(slide.script)).length, 0)
+  const estimatedPresentationSeconds = Math.max(1, Math.ceil(scriptCharacters / 5 + slides.length * 0.35))
+  const estimatedTtsSeconds = Math.max(1, ttsChunkCount * 4)
+  const selectedVideoResolution = VIDEO_RESOLUTIONS[videoResolution]
+
+  useEffect(() => {
+    const canvas = previewCanvasRef.current
+    const avatarCanvas = rendererRef.current?.domElement
+    if (!showVideoPreview || !canvas || !avatarCanvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    let frame = 0
+    let imageUrl = ''
+    let slideImage: HTMLImageElement | null = null
+    const draw = () => {
+      ctx.setTransform(canvas.width / 1280, 0, 0, canvas.height / 720, 0, 0)
+      ctx.fillStyle = '#020617'
+      ctx.fillRect(0, 0, 1280, 720)
+      ctx.fillStyle = '#111827'
+      ctx.fillRect(24, 24, 1232, 672)
+      if (slideImage) {
+        const scale = Math.min(1200 / slideImage.width, 630 / slideImage.height)
+        const width = slideImage.width * scale
+        const height = slideImage.height * scale
+        ctx.drawImage(slideImage, 40 + (1200 - width) / 2, 45 + (630 - height) / 2, width, height)
+      }
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+      ctx.fillRect(1044, 390, 196, 290)
+      ctx.drawImage(avatarCanvas, 1052, 398, 180, 274)
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+      ctx.fillRect(24, 24, 250, 36)
+      ctx.fillStyle = '#e5e7eb'
+      ctx.font = '16px sans-serif'
+      ctx.fillText(`Slide 1 / ${slides.length}`, 40, 48)
+      frame = requestAnimationFrame(draw)
+    }
+    if (previewSlide?.image && sessionId) {
+      fetch(`${API}/presenter/slide_image/${sessionId}/${previewSlide.image}`)
+        .then(response => response.blob())
+        .then(blob => {
+          imageUrl = URL.createObjectURL(blob)
+          const image = new Image()
+          image.onload = () => { slideImage = image }
+          image.src = imageUrl
+        })
+        .catch(() => {})
+    }
+    draw()
+    return () => {
+      cancelAnimationFrame(frame)
+      if (imageUrl) URL.revokeObjectURL(imageUrl)
+    }
+  }, [previewSlide?.image, sessionId, showVideoPreview, slides.length, videoResolution])
 
   return (
     <div className="flex h-full overflow-hidden bg-gray-950 relative">
+      {/* 음성 서버(TTS·STT) 준비/오류 안내 — 정상일 땐 보이지 않음 */}
+      <div className="fixed top-2 left-1/2 -translate-x-1/2 z-[100] max-w-[92vw] pointer-events-none [&>*]:pointer-events-auto">
+        <VoiceServiceBanner />
+      </div>
       {/* 일괄 업로드 큐 — 어느 화면(업로드/발표 보기)에 있든 백그라운드 처리 상태를 계속 볼 수 있게 항상 표시.
           완료되면 "저장된 발표" 목록에도 자동으로 나타남 */}
       {uploadQueue.length > 0 && (
@@ -853,7 +1150,7 @@ export default function PptPresenter() {
             <span className="text-xs text-gray-500">{slides.length ? `${currentIndex + 1} / ${slides.length}` : ''}</span>
             <div className="flex gap-2">
               {!autoPlay ? (
-                <button onClick={handlePlay} className="px-4 py-1.5 text-sm rounded-lg bg-blue-700 hover:bg-blue-600 text-white">
+                <button onClick={handlePlay} disabled={recording} className="px-4 py-1.5 text-sm rounded-lg bg-blue-700 hover:bg-blue-600 disabled:opacity-30 text-white">
                   ▶ 발표 시작
                 </button>
               ) : (
@@ -861,7 +1158,17 @@ export default function PptPresenter() {
                   ⏸ 정지
                 </button>
               )}
-              <button onClick={() => goTo(currentIndex + 1)} disabled={currentIndex >= slides.length - 1}
+              {recording ? (
+                <button onClick={stopSpeaking} className="px-3 py-1.5 text-sm rounded-lg bg-red-700 hover:bg-red-600 text-white">
+                  {'\uc601\uc0c1 \ucde8\uc18c'} {recordingProgress.current}/{recordingProgress.total}
+                </button>
+              ) : (
+                <button onClick={() => setShowVideoPreview(true)} disabled={!avatarLoaded || !current || autoPlay}
+                  className="px-3 py-1.5 text-sm rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-30 text-white">
+                  {'\uc601\uc0c1 \uc0dd\uc131'}
+                </button>
+              )}
+              <button onClick={() => goTo(currentIndex + 1)} disabled={currentIndex >= slides.length - 1 || recording}
                 className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
                 다음 →
               </button>
@@ -896,7 +1203,7 @@ export default function PptPresenter() {
           <div ref={containerRef} className="w-full h-full" />
 
           {/* 파일 선택 + 저장된 목록 (실사 아바타 탭과 동일) */}
-          <div className="absolute top-2 left-2 z-20 flex flex-col gap-1">
+          <div className="absolute top-2 left-2 right-[11.5rem] z-20 flex w-[calc(100%-11.5rem)] max-w-48 flex-col gap-1">
             <div className="flex gap-1">
               <label className="flex items-center gap-1 bg-black/50 backdrop-blur text-[11px] text-gray-300 hover:text-white rounded-lg px-2 py-1 cursor-pointer border border-gray-700 hover:border-gray-500 transition-colors max-w-[10rem] truncate">
                 📁 {fileName || 'GLB 선택'}
@@ -913,7 +1220,7 @@ export default function PptPresenter() {
               )}
             </div>
             {showList && (
-              <div className="bg-black/80 backdrop-blur border border-gray-700 rounded-xl overflow-hidden min-w-[200px] max-h-56 overflow-y-auto">
+              <div className="bg-black/80 backdrop-blur border border-gray-700 rounded-xl overflow-hidden w-full max-w-full min-w-0 max-h-56 overflow-y-auto">
                 {glbList.map(entry => (
                   <div key={entry.name} className="flex items-center gap-1 px-2 py-1.5 hover:bg-gray-800/80 group">
                     <button
@@ -934,12 +1241,12 @@ export default function PptPresenter() {
           </div>
 
           {/* 보기 토글 (우상단) */}
-          <div className="absolute top-2 right-2 z-20 flex flex-col items-end gap-1 bg-black/50 backdrop-blur rounded-lg p-1.5">
+          <div className="absolute top-2 right-2 z-20 grid w-40 grid-cols-2 gap-1 bg-black/50 backdrop-blur rounded-lg p-1">
             <span className="text-[10px] text-gray-400 px-1">보기</span>
-            <div className="flex gap-1">
+            <div className="contents">
               {(['face', 'upper', 'full'] as ViewMode[]).map(m => (
                 <button key={m} onClick={() => setView(m)}
-                  className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${viewMode === m ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
+                  className={`text-[10px] px-1.5 py-0.5 rounded-full border transition-colors ${viewMode === m ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/70 border-gray-600 text-gray-300 hover:bg-gray-700'}`}>
                   {VIEW_MODE_LABELS[m]}
                 </button>
               ))}
@@ -966,6 +1273,39 @@ export default function PptPresenter() {
           </div>
         </div>
       </div>
+
+      {showVideoPreview && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 p-6">
+          <div className="w-full max-w-5xl rounded-2xl border border-gray-700 bg-gray-900 p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-white">{'\uc800\uc7a5 \ubbf8\ub9ac\ubcf4\uae30'}</h3>
+                <p className="mt-1 text-xs text-gray-400">{'\uc2dc\uc791 \uc2dc \uc544\ub798 \uad6c\ub3c4\ub85c \uc2ac\ub77c\uc774\ub4dc\uc640 \uc544\ubc14\ud0c0\uac00 \ud568\uaed8 \uc800\uc7a5\ub429\ub2c8\ub2e4.'}</p>
+              </div>
+              <button onClick={() => setShowVideoPreview(false)} className="rounded-lg px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800">{'\ub2eb\uae30'}</button>
+            </div>
+            <canvas ref={previewCanvasRef} width={selectedVideoResolution.width} height={selectedVideoResolution.height} className="w-full rounded-xl bg-slate-950" />
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex gap-5 text-sm">
+                <span className="text-gray-300">{'TTS \uc900\ube44 \uc608\uc0c1: '}<strong className="text-white">~ {formatDuration(estimatedTtsSeconds)}</strong></span>
+                <span className="text-gray-300">{'\ubc1c\ud45c \uc601\uc0c1 \uae38\uc774: '}<strong className="text-white">~ {formatDuration(estimatedPresentationSeconds)}</strong></span>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                {'\ud574\uc0c1\ub3c4'}
+                <select value={videoResolution} onChange={event => setVideoResolution(event.target.value as VideoResolution)} className="rounded-md border border-gray-700 bg-gray-800 px-2 py-1 text-white outline-none">
+                  {Object.entries(VIDEO_RESOLUTIONS).map(([id, option]) => <option key={id} value={id}>{option.label}</option>)}
+                </select>
+              </label>
+              <button
+                onClick={() => { setShowVideoPreview(false); recordPresentation() }}
+                className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600"
+              >
+                {'\uc601\uc0c1 \uc0dd\uc131 \uc2dc\uc791'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
