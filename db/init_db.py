@@ -147,6 +147,19 @@ def init():
         created_at  DATETIME DEFAULT (datetime('now','localtime'))
     );
 
+    -- 자문자답(암묵지) 캡처: 아바타가 질문 → 사용자가 1인칭으로 답 → 높은 신뢰의 지식으로 저장.
+    -- 관리/목록 UI용 원본 테이블. 저장 시 KG 노드(source_type='self_interview')로도 반영된다.
+    CREATE TABLE IF NOT EXISTS self_interview (
+        id          TEXT PRIMARY KEY,
+        question    TEXT NOT NULL,
+        answer      TEXT NOT NULL,
+        topic       TEXT DEFAULT '',
+        node_id     TEXT,
+        created_at  DATETIME DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_selfint_created ON self_interview(created_at);
+
     CREATE TABLE IF NOT EXISTS project_summaries (
         id          TEXT PRIMARY KEY,
         name        TEXT NOT NULL,

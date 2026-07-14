@@ -8,8 +8,9 @@ const RealisticAvatar = lazy(() => import('./views/RealisticAvatar'))
 const KnowledgeGraph = lazy(() => import('./views/KnowledgeGraph'))
 const SettingsView = lazy(() => import('./views/Settings'))
 const PptPresenter = lazy(() => import('./views/PptPresenter'))
+const InterviewPanel = lazy(() => import('./views/InterviewPanel'))
 
-type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'presenter' | 'settings'
+type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'presenter' | 'interview' | 'settings'
 type NavItem = { id: Tab; label: string; navLabel: string; icon: Tab; description: string }
 
 const STORAGE_KEY = 'mental-avatar-settings'
@@ -22,6 +23,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'mode-r', label: '실사 아바타', navLabel: '3D', icon: 'mode-r', description: '전체 아바타 장면' },
   { id: 'mode-a', label: '영상 도구', navLabel: '영상', icon: 'mode-a', description: '아바타 영상 생성' },
   { id: 'presenter', label: '발표', navLabel: '발표', icon: 'presenter', description: '슬라이드와 내레이션' },
+  { id: 'interview', label: '자문자답', navLabel: '자문', icon: 'interview', description: '내 판단·기준을 아바타에게 채우기' },
   { id: 'settings', label: '설정', navLabel: '설정', icon: 'settings', description: '연결과 프로필' },
 ]
 
@@ -98,6 +100,15 @@ function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
         <path d="M8 20h8" />
         <path d="M8 9h8" />
         <path d="M8 12h5" />
+      </svg>
+    )
+  }
+  if (icon === 'interview') {
+    return (
+      <svg {...common}>
+        <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4L3 21l1.1-4A8.4 8.4 0 1 1 21 11.5Z" />
+        <path d="M9.2 9.3a2.8 2.8 0 0 1 5.4.9c0 1.9-2.8 2.8-2.8 2.8" />
+        <path d="M12 16.5h.01" />
       </svg>
     )
   }
@@ -219,7 +230,7 @@ function Sidebar({ current, onNavigate }: { current: Tab; onNavigate: (tab: Tab)
         <span className="flex h-10 w-10 select-none items-center justify-center rounded-2xl bg-gray-950 text-sm font-black tracking-tight text-white shadow-sm">MA</span>
       </div>
 
-      <nav className="grid h-full grid-cols-7 items-center gap-1 px-1 md:flex md:h-auto md:flex-1 md:flex-col md:items-stretch md:gap-1.5 md:overflow-y-auto md:p-2 md:pt-4">
+      <nav className="grid h-full grid-cols-8 items-center gap-1 px-1 md:flex md:h-auto md:flex-1 md:flex-col md:items-stretch md:gap-1.5 md:overflow-y-auto md:p-2 md:pt-4">
         {NAV_ITEMS.map(item => (
           <button
             key={item.id}
@@ -280,6 +291,7 @@ export default function App() {
           {tab === 'mode-r' && <RealisticAvatar settings={settings} messages={realisticMessages} setMessages={setRealisticMessages} />}
           {tab === 'kg' && <KnowledgeGraph settings={settings} />}
           {tab === 'presenter' && <PptPresenter />}
+          {tab === 'interview' && <InterviewPanel />}
           {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
         </Suspense>
       </main>

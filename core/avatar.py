@@ -892,18 +892,32 @@ def build_avatar_context(query: str = "") -> dict:
     trends = pattern.topic_trends(30)
 
     # 쿼리 관련 KG 검색
+    self_relevant: list[str] = []   # 자문자답(암묵지) — 1인칭·최우선 신뢰, 별도 섹션
     relevant = []
     graph_facts: list[str] = []
     community_labels = ""
     if query:
         # 대화기록(conversation)이 문서(chunk)보다 압도적으로 많아(720 vs 52) 순수 top-N이면
-        # 문서 지식이 밀려나기 쉽다 — 문서 히트를 쿼터로 먼저 확보한 뒤 대화로 채워 균형을 맞춘다.
-        doc_hits  = embeddings.search(query, n_results=3, where={"source_type": {"$ne": "conversation"}})
-        conv_hits = embeddings.search(query, n_results=3, where={"source_type": "conversation"})
+        # 문서 지식이 밀려나기 쉽다 — 소스별 쿼터로 균형을 맞춘다.
+        # 자문자답(self_interview)은 "내가 실제로 믿는 것"이라 최우선으로 먼저 확보한다.
+        self_hits = embeddings.search(query, n_results=2, where={"source_type": "self_interview"})
+        doc_hits  = embeddings.search(query, n_results=3, where={"source_type": {"$nin": ["conversation", "self_interview"]}})
+        conv_hits = embeddings.search(query, n_results=2, where={"source_type": "conversation"})
         matched_ids = []
         seen_ids: set = set()
+        # ① 자문자답 먼저 (최대 2, 별도 섹션)
+        for r in self_hits:
+            if r["id"] in seen_ids or len(self_relevant) >= 2:
+                continue
+            seen_ids.add(r["id"])
+            node = graph.get_node(r["id"])
+            if node and node.get("content"):
+                self_relevant.append(f"- {node['content'][:250]}")
+                matched_ids.append(r["id"])
+        # ② 나머지는 문서+대화로 채움 (자문자답 포함 총 5)
+        budget = 5 - len(self_relevant)
         for r in doc_hits + conv_hits:
-            if r["id"] in seen_ids or len(matched_ids) >= 5:
+            if r["id"] in seen_ids or len(relevant) >= budget:
                 continue
             seen_ids.add(r["id"])
             node = graph.get_node(r["id"])
@@ -970,8 +984,15 @@ def build_avatar_context(query: str = "") -> dict:
     )
 
     # 관련 컨텍스트가 있으면 추가
+    if self_relevant:
+        system += (
+            "\n\n## 내가 직접 밝힌 생각·판단 (1인칭·최우선 신뢰)\n"
+            "아래는 내가 인터뷰에서 직접 답한 내 판단·기준·경험칙입니다 — 읽은 자료가 아니라 "
+            "내가 실제로 믿는 것이니, 관련 질문엔 이 생각을 우선해서 내 목소리로 답하세요.\n"
+            + "\n".join(self_relevant)
+        )
     if relevant:
-        system += "\n\n## 질문과 관련된 내 지식\n" + "\n".join(relevant)
+        system += "\n\n## 질문과 관련된 내 지식 (참고 자료)\n" + "\n".join(relevant)
     if graph_facts:
         system += (
             "\n\n## 관련 개념 간 연결 (지식그래프, 답변에 자연스럽게 참고)\n"

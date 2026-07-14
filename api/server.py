@@ -11,7 +11,7 @@ import re as _re
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -765,6 +765,44 @@ def memory_add():
 @app.route("/memory/<mid>", methods=["DELETE"])
 def memory_delete(mid):
     avatar_core.delete_memory(mid)
+    return jsonify({"success": True})
+
+
+# ── 자문자답(암묵지) 캡처 ──────────────────────────────
+# 전적으로 사용자가 원할 때만 호출됨(질문 받기 버튼) — 자동/주기 넛지 없음.
+
+@app.route("/interview/question", methods=["GET"])
+def interview_question():
+    """다음 자문자답 질문 하나를 생성 (내 지식 심화형)."""
+    try:
+        return jsonify(self_interview.generate_question())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/interview/answer", methods=["POST"])
+def interview_answer():
+    """질문+답을 self_interview 지식으로 저장 (KG 노드 + 임베딩 + 엔티티 추출)."""
+    data = request.get_json(silent=True) or {}
+    question = (data.get("question") or "").strip()
+    answer = (data.get("answer") or "").strip()
+    topic = (data.get("topic") or "").strip()
+    if not question or not answer:
+        return jsonify({"error": "question and answer required"}), 400
+    try:
+        return jsonify(self_interview.save_answer(question, answer, topic))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/interview/list", methods=["GET"])
+def interview_list():
+    return jsonify({"items": self_interview.list_interviews(), "count": self_interview.count()})
+
+
+@app.route("/interview/<sid>", methods=["DELETE"])
+def interview_delete(sid):
+    self_interview.delete_interview(sid)
     return jsonify({"success": True})
 
 
