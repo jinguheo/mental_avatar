@@ -36,13 +36,13 @@ QUESTION_PROMPT = """당신은 한 사람("나")의 디지털 아바타를 완�
 
 주제: {topic}
 이번에 물어볼 관점: {angle}
-
+{focus_block}
 위 '주제'에 대해, 문서나 코드에는 안 드러나는 그 사람의 생각을 '{angle}' 관점에서 끌어내는
 질문을 딱 한 개만 만들어 주세요.
 
 규칙:
 - 사실 확인("무엇인가?")이 아니라 판단·경험을 묻는 질문일 것.
-- 반드시 위 '주제'와 '관점'에 맞출 것 (다른 주제로 새지 말 것).
+- 반드시 위 '주제'와 '관점'에 맞출 것 (다른 주제로 새지 말 것).{focus_rule}
 - 이미 물어본 질문과 겹치지 않게.
 - 그 사람에게 직접 말하듯 한국어 한 문장. 설명·번호·따옴표 없이 질문만 출력.
 {asked_block}
@@ -93,28 +93,38 @@ def _recent_questions(limit: int = 20) -> list[str]:
     return [r["question"] for r in rows]
 
 
-def generate_question() -> dict:
+def generate_question(topic: str = "", focus: str = "") -> dict:
     """다음 자문자답 질문 하나를 생성한다. {question, topic, angle} 반환.
 
-    다양성 확보: 후보 토픽 하나 + 관점(angle) 하나를 무작위로 골라 그 조합으로 고정한다.
-    (모든 토픽을 한꺼번에 주면 작은 모델이 한 주제·한 프레임에 고착되는 문제를 피함.)
+    topic이 주어지면 그 주제로 고정하고(예: "stereo vision"), 없으면 후보에서 무작위로 고른다.
+    focus는 "사람들이 주로 헷갈리는 부분" 같은 초점 힌트로, 질문을 그 방향으로 몰아준다.
+    관점(angle)은 항상 무작위라 같은 주제여도 클릭할 때마다 각도가 바뀐다.
     """
-    topics = _topic_candidates()
-    if not topics:
-        return {
-            "question": "요즘 어떤 일을 할 때, 남들과 다르게 판단하거나 결정하는 나만의 기준이 있나요?",
-            "fallback": True,
-        }
+    topic = (topic or "").strip()
+    focus = (focus or "").strip()
 
-    topic = random.choice(topics)
+    if not topic:
+        topics = _topic_candidates()
+        if not topics:
+            return {
+                "question": "요즘 어떤 일을 할 때, 남들과 다르게 판단하거나 결정하는 나만의 기준이 있나요?",
+                "fallback": True,
+            }
+        topic = random.choice(topics)
+
     angle = random.choice(QUESTION_ANGLES)
+
+    focus_block = f"특히 이런 부분에 초점을 맞출 것: {focus}\n" if focus else ""
+    focus_rule = f"\n- 특히 '{focus}'와 직접 관련된 판단·경험을 물을 것." if focus else ""
 
     asked = _recent_questions()
     asked_block = ""
     if asked:
         asked_block = "\n이미 물어본 질문(겹치지 말 것):\n" + "\n".join(f"- {q}" for q in asked[:12]) + "\n"
 
-    prompt = QUESTION_PROMPT.format(topic=topic, angle=angle, asked_block=asked_block)
+    prompt = QUESTION_PROMPT.format(
+        topic=topic, angle=angle, focus_block=focus_block, focus_rule=focus_rule, asked_block=asked_block,
+    )
     try:
         raw = pattern._llm_call(prompt).strip()
     except Exception as e:

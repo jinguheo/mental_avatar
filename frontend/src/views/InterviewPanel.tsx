@@ -20,6 +20,8 @@ export default function InterviewPanel() {
   const [items, setItems] = useState<Interview[]>([])
   const [count, setCount] = useState(0)
   const [error, setError] = useState('')
+  const [topic, setTopic] = useState('')   // 주제 지정(선택). 비우면 무작위
+  const [focus, setFocus] = useState('')   // 초점 힌트(선택), 예: 사람들이 주로 헷갈리는 부분
 
   const loadList = useCallback(async () => {
     try {
@@ -40,7 +42,11 @@ export default function InterviewPanel() {
     setLoadingQ(true)
     setError('')
     try {
-      const r = await fetch(`${API_BASE}/interview/question`)
+      const params = new URLSearchParams()
+      if (topic.trim()) params.set('topic', topic.trim())
+      if (focus.trim()) params.set('focus', focus.trim())
+      const qs = params.toString()
+      const r = await fetch(`${API_BASE}/interview/question${qs ? `?${qs}` : ''}`)
       const d = await r.json()
       if (d.error) setError(d.error)
       else setQuestion(d.question || '')
@@ -50,7 +56,7 @@ export default function InterviewPanel() {
     } finally {
       setLoadingQ(false)
     }
-  }, [])
+  }, [topic, focus])
 
   const save = useCallback(async () => {
     if (!question.trim() || !answer.trim()) return
@@ -108,6 +114,25 @@ export default function InterviewPanel() {
 
         {/* 질문 받기 / 답변 */}
         <section className="view-panel p-4 sm:p-5">
+          {/* 주제 지정(선택) — 비우면 내 관심사에서 무작위 */}
+          <div className="mb-3 flex flex-col gap-2 rounded-lg border border-dashed border-surface-border bg-gray-50/60 px-3 py-3">
+            <span className="dashboard-kicker">주제 지정 (선택 — 비우면 무작위)</span>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                value={topic}
+                onChange={e => setTopic(e.target.value)}
+                placeholder="주제 (예: stereo vision)"
+                className="w-full rounded-lg border border-surface-border bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-gray-400 sm:w-1/3"
+              />
+              <input
+                value={focus}
+                onChange={e => setFocus(e.target.value)}
+                placeholder="이런 부분 (예: 사람들이 주로 헷갈리는 부분)"
+                className="w-full flex-1 rounded-lg border border-surface-border bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-gray-400"
+              />
+            </div>
+          </div>
+
           {!question ? (
             <div className="flex flex-col items-center gap-3 py-6 text-center">
               <p className="text-sm text-gray-500">준비되면 질문을 하나 받아 답해보세요.</p>

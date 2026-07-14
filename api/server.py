@@ -773,9 +773,14 @@ def memory_delete(mid):
 
 @app.route("/interview/question", methods=["GET"])
 def interview_question():
-    """다음 자문자답 질문 하나를 생성 (내 지식 심화형)."""
+    """다음 자문자답 질문 하나를 생성 (내 지식 심화형).
+
+    topic 지정 시 그 주제로 고정, focus는 '헷갈리는 부분' 같은 초점 힌트. 둘 다 선택.
+    """
+    topic = request.args.get("topic", "")
+    focus = request.args.get("focus", "")
     try:
-        return jsonify(self_interview.generate_question())
+        return jsonify(self_interview.generate_question(topic, focus))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
