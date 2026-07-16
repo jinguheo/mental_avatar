@@ -49,7 +49,7 @@ OVERVIEW_PROMPT = """다음은 한 코드 프로젝트의 파일 구조와 주�
 반드시 아래 JSON 형식으로만 답해줘 (다른 텍스트 없이):
 {{
   "overview": "이 프로젝트의 목적, 핵심 기능, 대상 사용자/사용 시나리오를 4~6문장으로 한국어 설명",
-  "summary": "다음을 모두 포함해 한국어로 상세히 요약 (10문장 이상, 줄바꿈으로 항목 구분):\n- 주요 디렉토리/모듈별 역할\n- 핵심 기술스택과 선택 이유(파악 가능하면)\n- 핵심 데이터/처리 흐름 또는 아키텍처\n- 외부 연동(API, DB, 서비스 등)\n- 특이사항이나 설계상 주의점",
+  "summary": "다음을 모두 포함해 한국어로 상세히 요약 (10문장 이상, 줄바꿈으로 항목 구분):\\n- 주요 디렉토리/모듈별 역할\\n- 핵심 기술스택과 선택 이유(파악 가능하면)\\n- 핵심 데이터/처리 흐름 또는 아키텍처\\n- 외부 연동(API, DB, 서비스 등)\\n- 특이사항이나 설계상 주의점",
   "diagram": "이 프로젝트의 핵심 데이터/처리 흐름 또는 모듈 구조를 나타내는 Mermaid flowchart 코드 (예: flowchart TD\\n  A[클라이언트] --> B[API 서버]\\n  B --> C[(DB)]). 'flowchart TD'로 시작하고 노드/엣지만 포함, 설명문은 넣지 말 것. 줄바꿈은 \\n 으로."
 }}"""
 
@@ -143,12 +143,15 @@ def _sample_content(root: Path, files: list[dict], char_budget: int = 16000) -> 
     return "".join(parts) or "(읽을 수 있는 README/주요 파일이 없습니다)"
 
 
-def _ollama_overview(name: str, tree_text: str, sample_text: str) -> dict:
-    prompt = OVERVIEW_PROMPT.format(name=name, tree_text=tree_text[:6000], sample_text=sample_text)
+def _ollama_call(prompt: str) -> str:
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
+        # Ollama가 문법상 유효한 JSON만 뱉도록 강제 — 프롬프트로 "JSON만 답해줘"라고 부탁만
+        # 하는 것보다 확실하다(작은 모델일수록 형식을 흘린다).
+        "format": "json",
+        "options": {"temperature": 0.1},
     }).encode()
     req = urllib.request.Request(
         OLLAMA_URL, data=payload,
@@ -156,13 +159,37 @@ def _ollama_overview(name: str, tree_text: str, sample_text: str) -> dict:
     )
     with urllib.request.urlopen(req, timeout=240) as resp:
         body = json.loads(resp.read())
-    text = body["message"]["content"].strip()
+    return body["message"]["content"].strip()
+
+
+def _parse_overview_json(text: str) -> dict | None:
     try:
         if "```" in text:
-            text = re.search(r"```(?:json)?\s*([\s\S]+?)```", text).group(1)
-        return json.loads(text)
+            m = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
+            if m:
+                text = m.group(1)
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
     except Exception:
-        return {"overview": text[:300], "summary": text[:1000], "diagram": ""}
+        return None
+
+
+def _ollama_overview(name: str, tree_text: str, sample_text: str) -> dict:
+    """프로젝트 요약을 뽑는다. 파싱 실패 시 1회 재시도하고, 그래도 실패하면 원문을 넣되 로그를 남긴다.
+
+    이전에는 파싱 실패를 조용히 삼키고 overview에 원문 300자를 넣어버려서, 요약이 통째로
+    쓰레기가 돼도 아무 신호가 없었다. 최소한 왜 나빠졌는지는 보이게 한다.
+    """
+    prompt = OVERVIEW_PROMPT.format(name=name, tree_text=tree_text[:6000], sample_text=sample_text)
+    text = ""
+    for attempt in (1, 2):
+        text = _ollama_call(prompt)
+        data = _parse_overview_json(text)
+        if data is not None:
+            return data
+        print(f"[project_scan] 요약 JSON 파싱 실패 (시도 {attempt}/2): {text[:120]!r}", flush=True)
+    print(f"[project_scan] '{name}' 요약을 JSON으로 못 받아 원문으로 폴백합니다 — 요약 품질이 낮을 수 있습니다.", flush=True)
+    return {"overview": text[:300], "summary": text[:1000], "diagram": ""}
 
 
 def git_changes(folder_path: str) -> str:

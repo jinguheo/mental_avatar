@@ -67,6 +67,9 @@ def _via_ollama(title: str, content: str) -> dict:
         "model": OLLAMA_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
+        # 문법상 유효한 JSON을 강제 — 실패하면 MCP/API 폴백으로 넘어가느라 느려지므로
+        # 1순위 경로가 형식 때문에 새는 것을 막는다.
+        "format": "json",
         "options": {"temperature": 0.1},
     }).encode()
     req = urllib.request.Request(
