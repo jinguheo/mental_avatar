@@ -314,6 +314,82 @@ def stats():
     return jsonify({**g, **v})
 
 
+@app.route("/nodes", methods=["GET"])
+def nodes_list():
+    """데이터 관리 화면용 노드 목록 — 종류/출처/화면/검색어 필터 + 페이징."""
+    try:
+        limit = max(1, min(200, int(request.args.get("limit", 50))))
+        offset = max(0, int(request.args.get("offset", 0)))
+    except ValueError:
+        return jsonify({"error": "limit/offset은 숫자여야 합니다"}), 400
+    return jsonify(graph.search_nodes(
+        type=request.args.get("type", ""),
+        source_type=request.args.get("source_type", ""),
+        view=request.args.get("view", ""),
+        q=request.args.get("q", ""),
+        limit=limit, offset=offset,
+    ))
+
+
+@app.route("/nodes/facets", methods=["GET"])
+def nodes_facets():
+    """필터 드롭다운 채우기용 — 실제 존재하는 종류/출처/화면 값만."""
+    conn = _sqlite3.connect(str(Path(__file__).parent.parent / "db" / "knowledge.db"))
+    try:
+        types = [r[0] for r in conn.execute(
+            "SELECT DISTINCT type FROM nodes WHERE type IS NOT NULL ORDER BY 1")]
+        sources = [r[0] for r in conn.execute(
+            "SELECT DISTINCT source_type FROM nodes WHERE source_type IS NOT NULL ORDER BY 1")]
+        views = [r[0] for r in conn.execute("SELECT DISTINCT view FROM conversations ORDER BY 1")]
+    finally:
+        conn.close()
+    return jsonify({"types": types, "source_types": sources, "views": views})
+
+
+def _backup_db(tag: str) -> str:
+    """되돌릴 수 있게 삭제 직전 knowledge.db를 복사해 둔다(수 MB, 순식간).
+    워처가 시간별 백업을 돌지만 그 사이에 지운 건 못 살리므로 삭제 시점에 따로 찍는다."""
+    src = Path(__file__).parent.parent / "db" / "knowledge.db"
+    dest_dir = Path(__file__).parent.parent / "backups" / f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    _shutil.copy2(src, dest_dir / "knowledge.db")
+    return str(dest_dir)
+
+
+@app.route("/nodes/delete", methods=["POST"])
+def nodes_delete():
+    """선택한 노드 삭제. dry_run=true면 실제로 지운 뒤 롤백해 '무엇이 사라지는지'만 돌려준다."""
+    body = request.get_json(silent=True) or {}
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "ids(배열) 필요"}), 400
+    dry_run = bool(body.get("dry_run", False))
+    cleanup_orphans = bool(body.get("cleanup_orphans", True))
+
+    backup_dir = None
+    if not dry_run:
+        try:
+            backup_dir = _backup_db("pre_delete")
+        except Exception as e:
+            return jsonify({"error": f"백업 실패로 삭제를 중단했습니다: {e}"}), 500
+
+    try:
+        res = graph.delete_nodes(ids, cleanup_orphans=cleanup_orphans, dry_run=dry_run)
+    except Exception as e:
+        return jsonify({"error": f"삭제 실패(롤백됨): {e}"}), 500
+
+    if not dry_run:
+        # SQLite 커밋 후에 벡터를 지운다 — 벡터 삭제가 실패해도 삭제 자체를 되돌리진 않는다.
+        embeddings.delete_documents(res.get("deleted_ids", []))
+        embeddings.delete_entities(res.get("deleted_entity_ids", []))
+
+    res["dry_run"] = dry_run
+    res["backup_dir"] = backup_dir
+    res.pop("deleted_ids", None)
+    res.pop("deleted_entity_ids", None)
+    return jsonify(res)
+
+
 @app.route("/graph", methods=["GET"])
 def get_graph():
     node_id = request.args.get("id")

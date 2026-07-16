@@ -5,6 +5,7 @@ import { streamClaudeWeb } from '@/services/claudeWeb'
 import { streamChatOllama } from '@/services/ollama'
 import type { Settings } from '@/types'
 import { API_BASE, MCP_ENDPOINT } from '@/config'
+import KgDataManager from './KgDataManager'
 
 const API = API_BASE
 
@@ -1681,7 +1682,7 @@ function ProjectTab({ openProjectId, onProjectOpened }: { openProjectId?: string
 }
 
 // ── 메인 뷰 ──────────────────────────────────────────
-type Tab = 'search' | 'ingest' | 'graph' | 'files' | 'preference' | 'wiki' | 'project'
+type Tab = 'search' | 'ingest' | 'graph' | 'files' | 'preference' | 'wiki' | 'project' | 'data'
 
 export default function KnowledgeGraph({ settings }: { settings: Settings }) {
   const [tab, setTab] = useState<Tab>('search')
@@ -1707,7 +1708,7 @@ export default function KnowledgeGraph({ settings }: { settings: Settings }) {
           )}
         </div>
         <div className="flex gap-1 bg-gray-100 rounded-xl p-1">
-          {([['search', '검색 · 요약'], ['ingest', '내용 추가'], ['graph', '그래프'], ['files', '파일'], ['preference', 'Preference'], ['wiki', 'Wiki'], ['project', '프로젝트']] as [Tab, string][]).map(([id, label]) => (
+          {([['search', '검색 · 요약'], ['ingest', '내용 추가'], ['graph', '그래프'], ['files', '파일'], ['preference', 'Preference'], ['wiki', 'Wiki'], ['project', '프로젝트'], ['data', '데이터 관리']] as [Tab, string][]).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)}
               className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
                 tab === id ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
@@ -1737,6 +1738,7 @@ export default function KnowledgeGraph({ settings }: { settings: Settings }) {
             {tab === 'preference' && <PreferenceTab settings={settings} />}
             {tab === 'wiki'       && <WikiTab />}
             {tab === 'project'    && <ProjectTab openProjectId={openProjectId} onProjectOpened={() => setOpenProjectId(null)} />}
+            {tab === 'data'       && <KgDataManager />}
           </>
         )}
       </div>

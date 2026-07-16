@@ -97,6 +97,130 @@ def list_nodes(source_type: str = "", limit: int = 50) -> list[dict]:
 
 # ── 엣지 ──────────────────────────────────────────────
 
+def search_nodes(type: str = "", source_type: str = "", view: str = "",
+                 q: str = "", limit: int = 50, offset: int = 0) -> dict:
+    """데이터 관리 화면용 노드 조회. {nodes, total}.
+
+    기존 list_nodes()는 link_similar가 쓰고 있어 시그니처를 못 바꾸므로 별도 함수로 둔다.
+    view(대화의 화면 구분)는 별도 컬럼이 아니라 file_path에 'conversation://<view>/<id>'
+    형태로만 들어 있어 LIKE로 거른다.
+    """
+    where, params = [], []
+    if type:
+        where.append("type=?"); params.append(type)
+    if source_type:
+        where.append("source_type=?"); params.append(source_type)
+    if view:
+        where.append("file_path LIKE ?"); params.append(f"conversation://{view}/%")
+    if q:
+        where.append("(title LIKE ? OR content LIKE ?)")
+        params += [f"%{q}%", f"%{q}%"]
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+
+    conn = get_conn()
+    total = conn.execute(f"SELECT COUNT(*) FROM nodes {clause}", params).fetchone()[0]
+    rows = conn.execute(
+        f"""SELECT id, type, title, substr(content, 1, 160) AS preview, source_type,
+                   file_path, created_at
+            FROM nodes {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?""",
+        (*params, limit, offset)
+    ).fetchall()
+    conn.close()
+    return {"nodes": [dict(r) for r in rows], "total": total}
+
+
+def _orphan_entity_ids(cur) -> set[str]:
+    """어떤 문서·대화·프로젝트에서도 참조되지 않는 entity. (엔티티끼리만 이어진 것도 고아로 본다)"""
+    rows = cur.execute("""
+        SELECT n.id FROM nodes n
+        WHERE n.type='entity'
+          AND NOT EXISTS (
+            SELECT 1 FROM edges e JOIN nodes s ON s.id = e.from_id
+            WHERE e.to_id = n.id AND s.type != 'entity'
+          )
+    """).fetchall()
+    return {r[0] for r in rows}
+
+
+def delete_nodes(ids: list[str], cleanup_orphans: bool = True, dry_run: bool = False) -> dict:
+    """노드를 삭제하고 딸린 것들을 함께 정리한다.
+
+    edges/node_topics는 FK CASCADE로 자동이지만, 아래 둘은 코드가 직접 해야 한다:
+      - conversations 행: nodes와 FK가 없고 file_path 문자열로만 이어져 있다. 안 지우면
+        대화 노드만 사라지고 recent_conversations()/말투학습은 계속 그 대화를 먹는다.
+      - Chroma 벡터: 호출부가 커밋 후 지운다(여기선 대상 id만 돌려준다).
+
+    고아 엔티티는 '이번 삭제로 새로 고아가 된 것'만 지운다. 기존에 이미 고아이던 것까지
+    쓸어버리면 대화 몇 건 지웠는데 무관한 엔티티가 사라지는 사고가 난다.
+
+    dry_run이면 실제로 지운 뒤 롤백한다 — 미리보기 수치가 실제 결과와 어긋날 수 없다.
+    """
+    empty = {"nodes": 0, "edges": 0, "conversations": 0, "orphan_entities": 0,
+             "deleted_ids": [], "deleted_entity_ids": []}
+    if not ids:
+        return empty
+
+    conn = get_conn()
+    conn.isolation_level = None      # BEGIN/COMMIT/ROLLBACK을 직접 관리
+    cur = conn.cursor()
+    # id 목록이 길어도(대화 971건 등) SQL 변수 한도에 걸리지 않도록 임시 테이블로 넘긴다
+    cur.execute("CREATE TEMP TABLE IF NOT EXISTS _del_ids (id TEXT PRIMARY KEY)")
+    cur.execute("DELETE FROM _del_ids")
+    cur.executemany("INSERT OR IGNORE INTO _del_ids(id) VALUES (?)", [(i,) for i in ids])
+
+    cur.execute("BEGIN")
+    try:
+        target_ids = [r[0] for r in cur.execute(
+            "SELECT n.id FROM nodes n JOIN _del_ids d ON d.id = n.id").fetchall()]
+        if not target_ids:
+            conn.rollback()
+            return empty
+
+        edges_n = cur.execute(
+            """SELECT COUNT(*) FROM edges
+               WHERE from_id IN (SELECT id FROM _del_ids) OR to_id IN (SELECT id FROM _del_ids)"""
+        ).fetchone()[0]
+
+        cur.execute("""
+            DELETE FROM conversations
+            WHERE ('conversation://' || view || '/' || id) IN (
+                SELECT file_path FROM nodes
+                WHERE id IN (SELECT id FROM _del_ids) AND type='conversation'
+            )
+        """)
+        conv_n = cur.rowcount
+
+        pre_orphans = _orphan_entity_ids(cur)
+        cur.execute("DELETE FROM nodes WHERE id IN (SELECT id FROM _del_ids)")
+        nodes_n = cur.rowcount
+
+        new_orphans: set[str] = set()
+        if cleanup_orphans:
+            new_orphans = _orphan_entity_ids(cur) - pre_orphans
+            if new_orphans:
+                cur.executemany("DELETE FROM nodes WHERE id=?", [(i,) for i in new_orphans])
+
+        result = {
+            "nodes": nodes_n,
+            "edges": edges_n,
+            "conversations": conv_n,
+            "orphan_entities": len(new_orphans),
+            "deleted_ids": target_ids + list(new_orphans),
+            "deleted_entity_ids": list(new_orphans),
+        }
+
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def add_edge(from_id: str, to_id: str, relation: str, weight: float = 1.0) -> str:
     """(from,to,relation)이 같은 엣지는 새로 만들지 않고 기존 것을 반환한다.
 
@@ -233,6 +357,12 @@ def upsert_entity(name: str, entity_type: str = "concept", description: str = ""
     eid = _find_entity_id(conn, canon)
     if not eid:
         eid = _find_similar_entity_id(canon)
+        # 임베딩 색인은 노드가 지워져도 남을 수 있다(유령 항목). 그런 id를 그대로 돌려주면
+        # 호출부의 add_edge가 FK 위반으로 터지므로, 실제로 존재하는 노드일 때만 채택한다.
+        if eid and not conn.execute(
+                "SELECT 1 FROM nodes WHERE id=? AND type='entity'", (eid,)).fetchone():
+            print(f"[graph] 임베딩이 이미 없는 엔티티({eid})에 매칭 — 무시하고 새로 만듭니다", flush=True)
+            eid = ""
     if eid:
         conn.close()
         return eid

@@ -130,6 +130,32 @@ def delete_document(node_id: str):
         pass
 
 
+def delete_documents(node_ids: list[str]) -> int:
+    """여러 노드의 벡터를 한 번에 삭제. 실패해도 예외를 올리지 않고 0을 반환한다
+    (SQLite 삭제는 이미 커밋된 뒤라, 벡터 삭제 실패가 삭제 전체를 되돌리면 안 됨)."""
+    if not node_ids:
+        return 0
+    try:
+        _get_collection().delete(ids=list(node_ids))
+        return len(node_ids)
+    except Exception as e:
+        print(f"[embeddings] 벡터 일괄 삭제 실패({len(node_ids)}건): {e}", flush=True)
+        return 0
+
+
+def delete_entities(entity_ids: list[str]) -> int:
+    """엔티티 전용 컬렉션에서 삭제. index_entity의 짝 — 이게 없으면 엔티티를 지워도
+    이름 임베딩이 남아 upsert_entity가 죽은 엔티티에 매칭될 수 있다."""
+    if not entity_ids:
+        return 0
+    try:
+        _get_entity_collection().delete(ids=list(entity_ids))
+        return len(entity_ids)
+    except Exception as e:
+        print(f"[embeddings] 엔티티 벡터 일괄 삭제 실패({len(entity_ids)}건): {e}", flush=True)
+        return 0
+
+
 def get_stats() -> dict:
     col = _get_collection()
     return {"vector_count": col.count()}
