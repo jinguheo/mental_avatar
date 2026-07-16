@@ -1224,20 +1224,93 @@ WATCHER_HEARTBEAT = Path(__file__).parent.parent / "tmp" / "watcher_heartbeat.js
 WATCHER_STALE_SEC = 90
 
 
-@app.route("/watcher/health", methods=["GET"])
-def watcher_health():
+WATCHER_SCRIPT      = Path(__file__).parent.parent / "watcher" / "file_watcher.py"
+_watcher_process    = None
+_watcher_lock       = _threading.Lock()
+
+
+def _humanize_ago(secs: float) -> str:
+    """경과 초를 사람이 읽는 한국어로. 몇 초 전인지 며칠 전인지가 한눈에 구분돼야 한다."""
+    if secs < 60:
+        return f"{int(secs)}초 전"
+    if secs < 3600:
+        return f"{int(secs // 60)}분 전"
+    if secs < 86400:
+        return f"{int(secs // 3600)}시간 전"
+    return f"{secs / 86400:.1f}일 전"
+
+
+def _watcher_state() -> dict:
+    """하트비트 파일로 워처 생존을 판단한다. {alive, seconds_ago?, pid?, reason?}"""
     if not WATCHER_HEARTBEAT.exists():
-        return jsonify({"alive": False, "reason": "하트비트 파일 없음(워처 미실행 또는 구버전)"})
+        return {"alive": False, "reason": "하트비트 파일 없음(워처 미실행 또는 구버전)"}
     try:
         info = json.loads(WATCHER_HEARTBEAT.read_text(encoding="utf-8"))
         age = time.time() - info.get("ts", 0)
     except Exception as e:
-        return jsonify({"alive": False, "reason": f"하트비트 읽기 실패: {e}"})
-    return jsonify({
+        return {"alive": False, "reason": f"하트비트 읽기 실패: {e}"}
+    return {
         "alive": age < WATCHER_STALE_SEC,
         "seconds_ago": round(age, 1),
         "pid": info.get("pid"),
-    })
+    }
+
+
+def _ensure_watcher() -> dict:
+    """워처가 죽어 있으면 백그라운드로 다시 띄운다. 살아 있으면 아무 것도 안 함.
+
+    XTTS 워커와 달리 워처에는 그동안 자동복구가 없어서, 한 번 죽으면 아무도 모른 채
+    문서 ingest와 시간별 백업이 통째로 멈춰 있었다(실제로 7일간 정지한 적 있음).
+    중복 기동은 하트비트로 막는다 — start_dashboard.bat이 이미 띄웠으면 여기서 안 띄운다.
+    """
+    global _watcher_process
+    with _watcher_lock:
+        if _watcher_state()["alive"]:
+            return {"status": "already_running"}
+        if _watcher_process is not None and _watcher_process.poll() is None:
+            return {"status": "starting", "pid": _watcher_process.pid}
+        try:
+            AVATAR_TMP.mkdir(parents=True, exist_ok=True)
+            log_path = AVATAR_TMP / "watcher.log"
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            with open(log_path, "ab") as log_f:
+                _watcher_process = subprocess.Popen(
+                    [PYTHON_EXE, str(WATCHER_SCRIPT)],
+                    stdout=log_f, stderr=log_f,
+                    creationflags=creationflags,
+                    cwd=str(WATCHER_SCRIPT.parent.parent),
+                )
+            print(f"[watcher] 워처가 꺼져있어 새로 기동합니다 (로그: {log_path})", flush=True)
+            return {"status": "starting", "log": str(log_path)}
+        except Exception as e:
+            print(f"[watcher] 기동 실패: {e}", flush=True)
+            return {"status": "error", "detail": str(e)}
+
+
+def _watcher_watchdog_loop():
+    """2분마다 워처 생존을 확인하고, 죽어있으면 자동으로 다시 띄운다(_xtts_watchdog_loop와 동일 패턴).
+
+    첫 확인을 바로 하지 않고 한 주기 쉬고 시작하는 이유: 부팅 시 start_dashboard.bat이
+    워처를 띄우는데, 서버가 먼저 떠서 곧바로 확인하면 아직 하트비트가 없어 중복 기동이 된다.
+    """
+    while True:
+        time.sleep(120)
+        try:
+            if not _watcher_state()["alive"]:
+                _ensure_watcher()
+        except Exception as e:
+            print(f"[watcher-watchdog] 오류: {e}", flush=True)
+
+
+@app.route("/watcher/health", methods=["GET"])
+def watcher_health():
+    return jsonify(_watcher_state())
+
+
+@app.route("/watcher/restart", methods=["POST"])
+def watcher_restart():
+    """사용자가 배너에서 '다시 시작'을 눌렀을 때 — 꺼진 워처를 백그라운드로 다시 띄운다."""
+    return jsonify(_ensure_watcher())
 
 
 # ── 백업 / 복원 ──────────────────────────────────────────────
@@ -2687,7 +2760,21 @@ def status_services():
     else:  # idle | loading
         stt = {"state": "starting", "message": "음성 인식 준비 중…"}
 
-    return jsonify({"xtts": xtts, "stt": stt})
+    # ── 워처 (watcher/file_watcher.py — 문서 ingest + 시간별 백업) ──
+    ws = _watcher_state()
+    if ws["alive"]:
+        watcher = {"state": "ready", "message": "문서 감시 중"}
+    elif _watcher_process is not None and _watcher_process.poll() is None:
+        watcher = {"state": "starting", "message": "문서 감시 시동 중…"}
+    else:
+        # 얼마나 오래 멈춰 있었는지가 중요하다 — 그동안 새 문서 ingest와 자동 백업이 모두 정지 상태였다.
+        # (7일씩 멈춘 전례가 있어 "몇 초 전"과 "일주일 전"이 한눈에 구분돼야 한다)
+        secs = ws.get("seconds_ago")
+        since = f" (마지막 동작: {_humanize_ago(secs)})" if isinstance(secs, (int, float)) else ""
+        watcher = {"state": "down",
+                   "message": f"문서 감시·자동 백업이 멈춰 있습니다{since} — 재시작이 필요합니다"}
+
+    return jsonify({"xtts": xtts, "stt": stt, "watcher": watcher})
 
 
 @app.route("/status/restart_voice", methods=["POST"])
@@ -2726,4 +2813,6 @@ if __name__ == "__main__":
     _threading.Thread(target=_ensure_xtts_worker, daemon=True).start()
     _threading.Thread(target=_xtts_watchdog_loop, daemon=True).start()
     _threading.Thread(target=_get_whisper, daemon=True).start()
+    # 워처도 같은 방식으로 자동복구(즉시 기동은 하지 않음 — 부팅 시 start_dashboard.bat과 중복 기동 방지)
+    _threading.Thread(target=_watcher_watchdog_loop, daemon=True).start()
     app.run(host="127.0.0.1", port=8766, debug=False, threaded=True)

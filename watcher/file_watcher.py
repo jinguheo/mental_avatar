@@ -14,6 +14,10 @@ EXTENSIONS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".txt", ".md"}
 HEARTBEAT_PATH = os.path.join(ROOT_DIR, "tmp", "watcher_heartbeat.json")
 
 
+# 이 시간 안에 갱신된 하트비트가 있으면 다른 워처가 이미 돌고 있다고 본다(서버의 판정 기준과 동일).
+HEARTBEAT_STALE_SEC = 90
+
+
 def _write_heartbeat():
     try:
         os.makedirs(os.path.dirname(HEARTBEAT_PATH), exist_ok=True)
@@ -21,6 +25,21 @@ def _write_heartbeat():
             json.dump({"ts": time.time(), "pid": os.getpid()}, f)
     except Exception:
         pass
+
+
+def _already_running() -> bool:
+    """다른 워처 인스턴스가 이미 돌고 있는지 하트비트로 확인한다.
+
+    워처는 start_dashboard.bat, 서버(8766)의 자동복구, 수동 실행 등 여러 경로로 뜰 수 있는데
+    두 개가 동시에 돌면 같은 파일을 이중 ingest하고 백업도 두 벌씩 쌓인다. 어느 경로로 띄우든
+    여기서 막는다.
+    """
+    try:
+        with open(HEARTBEAT_PATH, encoding="utf-8") as f:
+            info = json.load(f)
+    except Exception:
+        return False   # 파일 없음/깨짐 = 돌고 있지 않음
+    return (time.time() - info.get("ts", 0)) < HEARTBEAT_STALE_SEC
 
 # ── 백업 설정: db/knowledge.db + db/vectors/ + data/ 를 통째로 복사 ──
 BACKUP_DIR      = os.path.join(ROOT_DIR, "backups")
@@ -165,4 +184,8 @@ def start():
 
 
 if __name__ == "__main__":
+    if _already_running():
+        # cp949 콘솔에서 죽지 않도록 ASCII 문장부호만 쓴다(em-dash는 cp949로 인코딩 불가).
+        print("[watcher] 이미 다른 워처가 실행 중입니다. 중복 기동하지 않고 종료합니다.")
+        sys.exit(0)
     start()
