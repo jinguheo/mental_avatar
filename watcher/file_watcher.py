@@ -1,5 +1,5 @@
 """docs/ 폴더 감시 — 새 파일 자동 ingest + DB/벡터/얼굴·목소리 주기 백업"""
-import sys, os, time, shutil, json, requests
+import sys, os, re, time, shutil, json, requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from watchdog.observers import Observer
@@ -49,7 +49,8 @@ BACKUP_SOURCES  = [
     os.path.join(ROOT_DIR, "data"),
 ]
 BACKUP_INTERVAL_SEC = 3600   # 1시간마다
-BACKUP_KEEP          = 24    # 최근 24개(=하루치)만 보관, 오래된 건 삭제
+BACKUP_KEEP          = 24    # 시간별 백업(YYYYMMDD_HHMMSS)은 최근 24개(=하루치)만 보관
+MANUAL_BACKUP_KEEP   = 10    # 작업 전 백업(pre_delete_* 등)은 별도로 최근 10개 보관
 
 # preference(MBTI/성격/선호도) 자동측정 — 실제 주기는 /preference/due가 사용자 설정(preference_interval_days)으로 판단,
 # watcher는 그 판단을 부담없는 간격(1시간)으로 확인만 함
@@ -140,13 +141,18 @@ def _check_preference_schedule():
 
 
 def _prune_old_backups():
+    """오래된 백업 정리 — 시간별 백업과 작업 전 백업(pre_*)을 각각 따로 센다.
+
+    한 묶음으로 이름순 정렬하면 'pre_...'가 '2026...'보다 뒤라 역순에서 앞자리를 차지해,
+    삭제를 몇 번 하면 pre_* 백업이 24칸을 다 먹고 시간별 백업이 전멸한다. 두 종류는
+    수명이 다르므로(하나는 시계열, 하나는 되돌리기용) 분리해서 관리한다.
+    """
     if not os.path.isdir(BACKUP_DIR):
         return
-    entries = sorted(
-        (d for d in os.listdir(BACKUP_DIR) if os.path.isdir(os.path.join(BACKUP_DIR, d))),
-        reverse=True,
-    )
-    for old in entries[BACKUP_KEEP:]:
+    dirs = [d for d in os.listdir(BACKUP_DIR) if os.path.isdir(os.path.join(BACKUP_DIR, d))]
+    hourly = sorted((d for d in dirs if re.fullmatch(r"\d{8}_\d{6}", d)), reverse=True)
+    manual = sorted((d for d in dirs if d.startswith("pre_")), reverse=True)
+    for old in hourly[BACKUP_KEEP:] + manual[MANUAL_BACKUP_KEEP:]:
         shutil.rmtree(os.path.join(BACKUP_DIR, old), ignore_errors=True)
 
 

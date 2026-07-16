@@ -347,12 +347,23 @@ def nodes_facets():
 
 
 def _backup_db(tag: str) -> str:
-    """되돌릴 수 있게 삭제 직전 knowledge.db를 복사해 둔다(수 MB, 순식간).
-    워처가 시간별 백업을 돌지만 그 사이에 지운 건 못 살리므로 삭제 시점에 따로 찍는다."""
-    src = Path(__file__).parent.parent / "db" / "knowledge.db"
-    dest_dir = Path(__file__).parent.parent / "backups" / f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
+    """되돌릴 수 있게 삭제 직전 상태를 복사해 둔다(약 15MB, 순식간).
+    워처가 시간별 백업을 돌지만 그 사이에 지운 건 못 살리므로 삭제 시점에 따로 찍는다.
+
+    knowledge.db만으로는 부족하다 — 삭제는 Chroma 벡터도 함께 지우므로, DB만 되돌리면
+    노드는 살아나도 임베딩이 없어 검색에 안 걸리는 반쪽 복구가 된다. vectors/도 같이 뜬다.
+    (data/의 얼굴·목소리는 노드 삭제와 무관해서 제외 — 워처의 시간별 백업이 담당한다.)
+
+    이 'pre_*' 백업은 워처의 _prune_old_backups가 시간별 백업과 별도 정원으로 관리한다
+    (한 묶음으로 이름순 정리하면 pre_*가 시간별 백업을 밀어내 전멸시킨다).
+    """
+    root = Path(__file__).parent.parent
+    dest_dir = root / "backups" / f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    _shutil.copy2(src, dest_dir / "knowledge.db")
+    _shutil.copy2(root / "db" / "knowledge.db", dest_dir / "knowledge.db")
+    vectors = root / "db" / "vectors"
+    if vectors.is_dir():
+        _shutil.copytree(vectors, dest_dir / "vectors", dirs_exist_ok=True)
     return str(dest_dir)
 
 

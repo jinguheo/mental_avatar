@@ -58,15 +58,10 @@ export function useVoiceServiceStatus(pollMs = 5000) {
 
 /** 준비 중/꺼짐일 때만 보이는 상단 배너. ready면 null 반환. */
 export default function VoiceServiceBanner() {
-  const { status, offline, restarting, restart } = useVoiceServiceStatus()
+  // offline(8766 무응답)은 여기서 다루지 않는다 — App 전역의 SystemStatusBanner가 알려주므로
+  // 이 배너까지 띄우면 아바타 화면에서 같은 경고가 두 개 겹친다. 여기는 TTS/STT만 책임진다.
+  const { status, restarting, restart } = useVoiceServiceStatus()
 
-  if (offline) {
-    return (
-      <Bar tone="down">
-        <span>⚠️ API 서버(127.0.0.1:8766)에 연결할 수 없습니다. 서버가 실행 중인지 확인해주세요.</span>
-      </Bar>
-    )
-  }
   if (!status) return null
 
   const items = [

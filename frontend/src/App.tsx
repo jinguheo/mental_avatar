@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { DEFAULT_SETTINGS, type ChatMsg, type Settings } from './types'
 import { claudeWebAutoConnect } from './services/claudeWeb'
-import WatcherBanner from './components/WatcherBanner'
+import SystemStatusBanner from './components/SystemStatusBanner'
 
 const AvatarStudio = lazy(() => import('./views/AvatarStudio'))
 const Avatar3DChat = lazy(() => import('./views/Avatar3DChat'))
@@ -285,8 +285,8 @@ export default function App() {
       <Sidebar current={tab} onNavigate={setTab} />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden pb-16 md:pb-0">
-        {/* 워처(문서 감시·자동 백업)가 멈췄을 때만 보이는 안내 — 정상이면 렌더되지 않음 */}
-        <WatcherBanner />
+        {/* API 서버·워처가 멈췄을 때만 보이는 안내 — 정상이면 렌더되지 않음 */}
+        <SystemStatusBanner />
         <Suspense fallback={<LoadingView />}>
           {tab === 'home' && <HomeView onOpen={setTab} />}
           {tab === 'mode-a' && <AvatarStudio />}
