@@ -98,10 +98,30 @@ def list_nodes(source_type: str = "", limit: int = 50) -> list[dict]:
 # ── 엣지 ──────────────────────────────────────────────
 
 def add_edge(from_id: str, to_id: str, relation: str, weight: float = 1.0) -> str:
-    edge_id = _uid()
+    """(from,to,relation)이 같은 엣지는 새로 만들지 않고 기존 것을 반환한다.
+
+    edges에는 (from_id,to_id,relation) 유니크 제약이 없고 PK는 매번 새로 만드는 uid라
+    INSERT OR IGNORE로는 중복이 걸러지지 않는다(같은 엣지가 수천 행까지 쌓였던 원인).
+    스키마에 제약을 거는 대신 여기서 확인 후 삽입한다 — 기존 데이터에 남은 중복 때문에
+    UNIQUE 인덱스 생성이 실패하므로.
+    """
     conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM edges WHERE from_id=? AND to_id=? AND relation=?",
+        (from_id, to_id, relation)
+    ).fetchone()
+    if row:
+        # 더 강한 신호로만 갱신 (약한 재관측이 기존 가중치를 깎지 않도록)
+        conn.execute(
+            "UPDATE edges SET weight=? WHERE id=? AND weight<?",
+            (weight, row["id"], weight)
+        )
+        conn.commit()
+        conn.close()
+        return row["id"]
+    edge_id = _uid()
     conn.execute(
-        "INSERT OR IGNORE INTO edges (id,from_id,to_id,relation,weight) VALUES (?,?,?,?,?)",
+        "INSERT INTO edges (id,from_id,to_id,relation,weight) VALUES (?,?,?,?,?)",
         (edge_id, from_id, to_id, relation, weight)
     )
     conn.commit()
