@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import { API_BASE } from '@/config'
+
 import {
   FACE_SNAPSHOT_KEY,
   TRACKING_VIDEO_SOURCE_EVENT,
@@ -108,11 +109,24 @@ interface Props {
   onHeadPose?: (pose: { pitch: number; yaw: number; roll: number } | null) => void
   /** 브라우저에 남은 이전 snapshot 대신 서버에 현재 등록된 얼굴 이미지를 우선 표시한다. */
   preferRegisteredFace?: boolean
+  /** AI 대화처럼 다른 화면의 등록 영상을 공유하지 않고 이 패널에서만 선택 */
+  isolatedVideo?: boolean
+  /** 독립 이미지 선택 상태의 탭별 저장 범위 */
+  storageScope?: string
+  /** 이미지 선택·정렬 확인만 제공하고 추적/부가 컨트롤은 숨김 */
+  imageOnly?: boolean
 }
 
-export default function FaceTrackingPanel({ className = '', compact = false, onBlendshapes, onHeadPose, preferRegisteredFace = false }: Props) {
+export default function FaceTrackingPanel({ className = '', compact = false, onBlendshapes, onHeadPose, preferRegisteredFace = false, isolatedVideo = false, storageScope = 'ai-chat', imageOnly = false }: Props) {
+  const localImageSessionKey = `mental-avatar-${storageScope}-face-image`
+  const localImageNameSessionKey = `mental-avatar-${storageScope}-face-image-name`
+  const alignedFaceDisplaySessionKey = `mental-avatar-${storageScope}-aligned-face-display`
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoRef  = useRef<HTMLVideoElement>(null)
+  const localVideoInputRef = useRef<HTMLInputElement>(null)
+  const localVideoUrlRef = useRef<string | null>(null)
+  const localImageInputRef = useRef<HTMLInputElement>(null)
+  const localImageUrlRef = useRef<string | null>(null)
 
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
   const sceneRef    = useRef<THREE.Scene | null>(null)
@@ -130,6 +144,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const streamRef     = useRef<MediaStream | null>(null)
   const lastTsRef     = useRef(0)
   const lastLandmarksRef = useRef<LM[] | null>(null)
+  const fixedImageLandmarksRef = useRef<LM[] | null>(null)
   const trackingNeutralLandmarksRef = useRef<LM[] | null>(null)
   const trackingBaseLandmarksRef = useRef<LM[] | null>(null)
   const trackingLoopTokenRef = useRef(0)
@@ -160,12 +175,26 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const [recStatus, setRecStatus]     = useState('')
   const [resultUrl, setResultUrl]     = useState<string | null>(null)
   const [hasSavedFace, setHasSavedFace] = useState(false)
-  const [trackingVideoSource, setTrackingVideoSource] = useState(() => readTrackingVideoSource())
+  const [localImageUrl, setLocalImageUrl] = useState<string | null>(() => {
+    try { return sessionStorage.getItem(localImageSessionKey) }
+    catch { return null }
+  })
+  const [localImageName, setLocalImageName] = useState(() => {
+    try { return sessionStorage.getItem(localImageNameSessionKey) || '' }
+    catch { return '' }
+  })
+  const [alignedFaceDisplayUrl, setAlignedFaceDisplayUrl] = useState<string | null>(() => {
+    try { return localStorage.getItem(alignedFaceDisplaySessionKey) || sessionStorage.getItem(alignedFaceDisplaySessionKey) }
+    catch { return null }
+  })
+  const [trackingVideoSource, setTrackingVideoSource] = useState(() => isolatedVideo ? null : readTrackingVideoSource())
   const recorderRef  = useRef<MediaRecorder | null>(null)
   const recChunksRef = useRef<Blob[]>([])
 
   // 저장된 얼굴 사진 + landmark 정렬 미리보기 (카메라 없이도 확인 가능)
   const alignCanvasRef = useRef<HTMLCanvasElement>(null)
+  const alignedLandmarksRef = useRef<LM[] | null>(null)
+  const alignedVideoSourceRef = useRef<string | null>(null)
   const [showAlignCheck, setShowAlignCheck] = useState(false)
   const [alignCheckMsg, setAlignCheckMsg] = useState('')
 
@@ -173,6 +202,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     trackingLoopTokenRef.current += 1
     lastTsRef.current = 0
     lastLandmarksRef.current = null
+    fixedImageLandmarksRef.current = null
     trackingNeutralLandmarksRef.current = null
     trackingBaseLandmarksRef.current = null
     trackingFrameReadyRef.current = false
@@ -203,7 +233,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     }
   }, [])
 
-  const applyTrackingVideoSource = useCallback((source = readTrackingVideoSource()) => {
+  const applyTrackingVideoSource = useCallback((source = isolatedVideo ? null : readTrackingVideoSource()) => {
     setTrackingVideoSource(source)
     const video = videoRef.current
     resetVideoTrackingState(true)
@@ -244,10 +274,47 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     video.onloadedmetadata = syncAspect
     video.play().catch(() => {})
     setStatus('idle')
-  }, [resetVideoTrackingState])
+  }, [isolatedVideo, resetVideoTrackingState])
+
+  const selectLocalVideo = useCallback((file: File | null) => {
+    if (!file) return
+    if (localVideoUrlRef.current) URL.revokeObjectURL(localVideoUrlRef.current)
+    const url = URL.createObjectURL(file)
+    localVideoUrlRef.current = url
+    applyTrackingVideoSource({ url, name: file.name, savedAt: new Date().toISOString(), manual: true })
+  }, [applyTrackingVideoSource])
+
+  const selectLocalImage = useCallback((file: File | null) => {
+    if (!file) return
+    if (localImageUrlRef.current) URL.revokeObjectURL(localImageUrlRef.current)
+    const url = URL.createObjectURL(file)
+    localImageUrlRef.current = url
+    alignedLandmarksRef.current = null
+    alignedVideoSourceRef.current = null
+    setAlignedFaceDisplayUrl(null)
+    try {
+      localStorage.removeItem(alignedFaceDisplaySessionKey)
+      sessionStorage.removeItem(alignedFaceDisplaySessionKey)
+    } catch { /* storage quota */ }
+    setLocalImageUrl(url)
+    setLocalImageName(file.name)
+    try { sessionStorage.removeItem(localImageSessionKey); sessionStorage.setItem(localImageNameSessionKey, file.name) } catch { /* storage quota */ }
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        try { sessionStorage.setItem(localImageSessionKey, reader.result) } catch { /* storage quota */ }
+      }
+    }
+    reader.readAsDataURL(file)
+    setShowAlignCheck(true)
+  }, [alignedFaceDisplaySessionKey, localImageNameSessionKey, localImageSessionKey])
 
   useEffect(() => {
     applyTrackingVideoSource()
+    if (isolatedVideo) return () => {
+      if (localVideoUrlRef.current) URL.revokeObjectURL(localVideoUrlRef.current)
+      if (localImageUrlRef.current) URL.revokeObjectURL(localImageUrlRef.current)
+    }
     const onTrackingVideoChange = (event: Event) => {
       const detail = (event as CustomEvent).detail
       applyTrackingVideoSource(detail ?? readTrackingVideoSource())
@@ -262,7 +329,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       window.removeEventListener('storage', onStorage)
       if (videoRef.current) videoRef.current.onloadedmetadata = null
     }
-  }, [applyTrackingVideoSource])
+  }, [applyTrackingVideoSource, isolatedVideo])
 
   const getTextureFaceUrl = useCallback(() => (
     preferRegisteredFace ? getRegisteredFaceImageUrl() : getFaceImageUrl()
@@ -478,6 +545,8 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     }
   }, [])
 
+  // 독립 이미지가 선택되면 저장 얼굴의 이전 메시를 그대로 두지 않고,
+  // 선택 이미지 자체의 landmark/텍스처를 즉시 메시 기준으로 적용한다.
   const applyTrackingMotion = useCallback((landmarks: LM[]) => {
     const base = trackingBaseLandmarksRef.current
     if (!base?.length) return landmarks
@@ -512,7 +581,8 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const trackLoop = useCallback((lm: unknown, token = trackingLoopTokenRef.current) => {
     if (token !== trackingLoopTokenRef.current) return
     const video = videoRef.current
-    if (!video || video.paused || video.ended) return
+    if (!video) return
+    if (video.paused || video.ended) return
     if (video.readyState >= 2) {
       const now = performance.now()
       if (now > lastTsRef.current) {
@@ -550,7 +620,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
             // 첫 사용자(등록된 얼굴이 아직 없는 경우)는 최초 한 번 얼굴을 자동 저장해둔다.
             // 라이브 텍스처는 계속 그대로 사용한다 — 여기서 정지사진으로 바꾸면
             // 이후 라이브 트래킹 내내 그 순간의 포즈로 텍스처가 고정되어 어긋나 보인다.
-            if (mirroredInputRef.current && !autoSavedFaceRef.current && !localStorage.getItem(FACE_SNAPSHOT_KEY)) {
+            if (!preferRegisteredFace && mirroredInputRef.current && !autoSavedFaceRef.current && !localStorage.getItem(FACE_SNAPSHOT_KEY)) {
               const snapCanvas = document.createElement('canvas')
               snapCanvas.width = video.videoWidth || 640
               snapCanvas.height = video.videoHeight || 480
@@ -596,15 +666,19 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
             const euler = new THREE.Euler().setFromRotationMatrix(m, 'YXZ')
             onHeadPoseRef.current({ pitch: euler.x, yaw: euler.y, roll: euler.z })
           }
-        } catch { if (motionSourceOnlyRef.current) hideTrackedFace() }
+        } catch {
+          if (motionSourceOnlyRef.current) {
+            hideTrackedFace()
+          }
+        }
       }
     }
     requestAnimationFrame(() => trackLoop(lm, token))
-  }, [applyTrackingMotion, hideTrackedFace, updateFaceMesh])
+  }, [applyTrackingMotion, hideTrackedFace, preferRegisteredFace, updateFaceMesh])
 
   const startTracking = useCallback(async () => {
     const registeredSource = trackingVideoSource ?? readTrackingVideoSource()
-    if (preferRegisteredFace && !registeredSource) {
+    if (preferRegisteredFace && !registeredSource && !isolatedVideo) {
       setStatus('error')
       setStatusMsg('등록된 추적 영상이 없습니다')
       return
@@ -750,12 +824,15 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     videoTexCanvasRef.current = null
     videoTexCtxRef.current = null
 
-    const savedLandmarks = readFaceLandmarks()
+    const textureUrl = getTextureFaceUrl()
+    const detectedTextureLandmarks = preferRegisteredFace ? await detectImageLandmarks(textureUrl) : null
+    const savedLandmarks = detectedTextureLandmarks?.length ? detectedTextureLandmarks : readFaceLandmarks()
+    fixedImageLandmarksRef.current = null
 
     if (savedLandmarks?.length) {
       textureLandmarksRef.current = savedLandmarks
-      textureMirroredRef.current = true
-      const tex = new THREE.TextureLoader().load(getTextureFaceUrl())
+      textureMirroredRef.current = !detectedTextureLandmarks
+      const tex = new THREE.TextureLoader().load(textureUrl)
       tex.minFilter = THREE.LinearFilter
       tex.magFilter = THREE.LinearFilter
       tex.generateMipmaps = false
@@ -792,7 +869,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
 
     setStatusMsg('트래킹 중')
     trackLoop(lm, trackingLoopTokenRef.current)
-  }, [status, trackingVideoSource, initLandmarker, trackLoop, detectImageLandmarks, getTextureFaceUrl, preferRegisteredFace, resetVideoTrackingState])
+  }, [status, trackingVideoSource, initLandmarker, trackLoop, detectImageLandmarks, getTextureFaceUrl, isolatedVideo, localImageUrl, preferRegisteredFace, resetVideoTrackingState])
 
   // 마지막 프레임을 정지 이미지로 캡처해 저장 + 메시에 계속 표시(웹캠 꺼도 외형 유지)
   const captureAndPersistSnapshot = useCallback(() => {
@@ -829,7 +906,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       tex.colorSpace = THREE.SRGBColorSpace
       staticTexRef.current = tex
       mat.map = tex
-      mat.opacity = 0.92
+      mat.opacity = 0
       mat.needsUpdate = true
     }
     setHasSavedFace(true)
@@ -857,14 +934,63 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       ctx.clearRect(0, 0, w, h)
       ctx.drawImage(img, 0, 0, w, h)
 
-      const detectedLandmarks = preferRegisteredFace ? await detectImageLandmarks(getTextureFaceUrl()) : null
-      const landmarks = preferRegisteredFace ? detectedLandmarks : readFaceLandmarks()
-      const pointFor = (p: LM) => detectedLandmarks
+      // AI 대화 탭에서는 선택 이미지 위에 서버에 저장된 얼굴을 반투명하게 겹쳐
+      // 두 얼굴의 위치와 크기를 한 화면에서 비교할 수 있게 한다.
+      if (isolatedVideo && localImageUrl) {
+        const saved = new Image()
+        saved.onload = () => {
+          ctx.save()
+          ctx.globalAlpha = 0.35
+          ctx.drawImage(saved, 0, 0, w, h)
+          ctx.restore()
+        }
+        saved.src = getTextureFaceUrl()
+      }
+
+      const detectedLandmarks = await detectImageLandmarks(img.src)
+      const landmarks = isolatedVideo ? detectedLandmarks : (preferRegisteredFace ? detectedLandmarks : readFaceLandmarks())
+      const pointFor = (p: LM) => (isolatedVideo || detectedLandmarks)
         ? { x: p.x * w, y: p.y * h }
         : landmarkToSavedSnapshotPoint(p, w, h)
       if (!landmarks?.length) {
-        setAlignCheckMsg('저장된 landmark 없음 — 이 브라우저에서 아직 얼굴을 등록한 적이 없습니다.')
+        setAlignCheckMsg(isolatedVideo ? '선택한 영상에서 얼굴을 찾지 못했습니다.' : '저장된 landmark 없음 — 이 브라우저에서 아직 얼굴을 등록한 적이 없습니다.')
         return
+      }
+
+      // 정렬 확인 결과는 tracking용 landmark/video와 분리된 결과 공간에만 저장한다.
+      alignedLandmarksRef.current = landmarks.map(point => ({ ...point }))
+      alignedVideoSourceRef.current = img.src
+
+      const facePoints = landmarks.map(pointFor)
+      const faceMinX = Math.min(...facePoints.map(point => point.x))
+      const faceMaxX = Math.max(...facePoints.map(point => point.x))
+      const faceMinY = Math.min(...facePoints.map(point => point.y))
+      const faceMaxY = Math.max(...facePoints.map(point => point.y))
+      const faceCx = (faceMinX + faceMaxX) / 2
+      const faceCy = (faceMinY + faceMaxY) / 2
+      const faceRx = Math.max(1, (faceMaxX - faceMinX) * 0.64)
+      const faceRy = Math.max(1, (faceMaxY - faceMinY) * 0.72)
+      const faceCanvas = document.createElement('canvas')
+      faceCanvas.width = w
+      faceCanvas.height = h
+      const faceCtx = faceCanvas.getContext('2d')
+      if (!faceCtx) return
+      faceCtx.fillStyle = '#000'
+      faceCtx.fillRect(0, 0, w, h)
+      faceCtx.save()
+      faceCtx.beginPath()
+      faceCtx.ellipse(faceCx, faceCy, faceRx, faceRy, 0, 0, Math.PI * 2)
+      faceCtx.clip()
+      faceCtx.drawImage(img, 0, 0, w, h)
+      faceCtx.restore()
+
+      const alignedFaceDataUrl = faceCanvas.toDataURL('image/png')
+      setAlignedFaceDisplayUrl(alignedFaceDataUrl)
+      try {
+        localStorage.setItem(alignedFaceDisplaySessionKey, alignedFaceDataUrl)
+        sessionStorage.removeItem(alignedFaceDisplaySessionKey)
+      } catch {
+        try { sessionStorage.setItem(alignedFaceDisplaySessionKey, alignedFaceDataUrl) } catch { /* storage quota */ }
       }
 
       // landmark는 원본(비거울) 좌표, 사진은 거울모드로 저장되므로 x를 뒤집어서 겹쳐야 한다.
@@ -891,9 +1017,24 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       }
       setAlignCheckMsg(`landmark ${landmarks.length}개 · 초록 윤곽선이 눈/입/얼굴선에 겹치면 정상입니다`)
     }
-    img.onerror = () => setAlignCheckMsg('등록된 얼굴 이미지를 불러올 수 없습니다.')
-    img.src = getTextureFaceUrl()
-  }, [getTextureFaceUrl, detectImageLandmarks, preferRegisteredFace])
+    img.onerror = () => setAlignCheckMsg(isolatedVideo ? '선택한 영상을 불러올 수 없습니다.' : '등록된 얼굴 이미지를 불러올 수 없습니다.')
+    if (isolatedVideo && localImageUrl) {
+      img.src = localImageUrl
+    } else if (isolatedVideo) {
+      const video = videoRef.current
+      if (!video || video.readyState < 2 || !video.videoWidth) {
+        setAlignCheckMsg('먼저 영상을 선택하고 미리보기가 표시될 때까지 기다려 주세요.')
+        return
+      }
+      const source = document.createElement('canvas')
+      source.width = video.videoWidth
+      source.height = video.videoHeight
+      source.getContext('2d')?.drawImage(video, 0, 0, source.width, source.height)
+      img.src = source.toDataURL('image/jpeg', 0.9)
+    } else {
+      img.src = getTextureFaceUrl()
+    }
+  }, [alignedFaceDisplaySessionKey, getTextureFaceUrl, detectImageLandmarks, isolatedVideo, localImageUrl, preferRegisteredFace])
 
   useEffect(() => {
     if (showAlignCheck) drawAlignCheck()
@@ -901,7 +1042,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
 
   const stopTracking = useCallback(() => {
     resetVideoTrackingState(false)
-    if (mirroredInputRef.current) captureAndPersistSnapshot()
     streamRef.current?.getTracks().forEach(t => t.stop())
     streamRef.current = null
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.pause() }
@@ -915,7 +1055,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     setStatus('idle'); setStatusMsg('')
     onBlendshapesRef.current?.(null)
     onHeadPoseRef.current?.(null)
-  }, [captureAndPersistSnapshot, resetVideoTrackingState])
+  }, [resetVideoTrackingState])
 
   // 마운트 시 기본 얼굴 텍스처는 영상 탭에서 저장한 서버 등록 얼굴을 사용한다.
   useEffect(() => {
@@ -929,7 +1069,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       if (cancelled || initializationToken !== trackingLoopTokenRef.current) return
       textureMirroredRef.current = !detectedLandmarks
       if (landmarks?.length) {
-        lastLandmarksRef.current = landmarks
+            lastLandmarksRef.current = landmarks.map(point => ({ ...point }))
         textureLandmarksRef.current = landmarks
         if (!motionSourceOnlyRef.current) updateFaceMesh(landmarks)
       } else {
@@ -944,13 +1084,13 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         tex.colorSpace = THREE.SRGBColorSpace
         staticTexRef.current = tex
         mat.map = tex
-        mat.opacity = 0.92
+        mat.opacity = showMesh && status === 'tracking' ? 0.92 : 0
         mat.needsUpdate = true
       }
       setHasSavedFace(true)
     })()
     return () => { cancelled = true }
-  }, [ensureFaceIndex, updateFaceMesh, getTextureFaceUrl, detectImageLandmarks, preferRegisteredFace])
+  }, [ensureFaceIndex, updateFaceMesh, getTextureFaceUrl, detectImageLandmarks, preferRegisteredFace, showMesh, status])
 
   // ── 녹화 → 립싱크 영상 생성 ──
   const startRecording = useCallback(async () => {
@@ -1021,47 +1161,69 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     <div className={`${/\b(absolute|fixed|relative|sticky)\b/.test(className) ? '' : 'relative '}${className}`}
       style={{ aspectRatio: videoAspect, overflow: 'hidden' }}>
       <video ref={videoRef}
-        className={`absolute inset-0 z-10 h-full w-full bg-black transition-opacity ${hasLiveVideo ? 'opacity-100' : 'opacity-0'}`}
+        className={`${imageOnly ? 'hidden ' : ''}absolute inset-0 z-10 h-full w-full bg-black transition-opacity ${hasLiveVideo && status === 'tracking' ? 'opacity-100' : 'opacity-0'}`}
         style={{ transform: mirroredInput ? 'scaleX(-1)' : 'none', objectFit: 'contain' }}
         playsInline muted />
+      {(alignedFaceDisplayUrl || localImageUrl) && status !== 'tracking' && (
+        <img
+          src={alignedFaceDisplayUrl || localImageUrl || ''}
+          alt="정렬된 얼굴 영역"
+          className="pointer-events-none absolute inset-0 z-10 h-full w-full bg-black object-contain"
+        />
+      )}
       <canvas ref={canvasRef}
-        className="pointer-events-none absolute inset-0 z-20 w-full h-full"
+        className={`${imageOnly ? 'hidden ' : ''}pointer-events-none absolute inset-0 z-20 w-full h-full`}
         style={{ background: 'transparent' }} />
 
       {/* 컨트롤 */}
       <div className="absolute top-2 left-2 flex items-center gap-1.5 flex-wrap z-30">
-        {status === 'tracking' ? (
+        {isolatedVideo && (
+          <>
+            <input ref={localImageInputRef} type="file" accept="image/*" className="hidden"
+              onChange={event => { selectLocalImage(event.target.files?.[0] ?? null); event.currentTarget.value = '' }} />
+            <button type="button" onClick={() => localImageInputRef.current?.click()}
+              className="px-2.5 py-1 text-xs rounded-lg border border-blue-500 bg-blue-900/80 text-blue-200 hover:bg-blue-800 transition backdrop-blur">
+              이미지 선택
+            </button>
+            {localImageName && <span className="max-w-[10rem] truncate text-[10px] text-blue-200 backdrop-blur bg-black/40 px-2 py-1 rounded">{localImageName}</span>}
+          </>
+        )}
+        {!imageOnly && (status === 'tracking' ? (
           <button onClick={stopTracking}
             className="px-2.5 py-1 text-xs rounded-lg border border-red-600 bg-red-900/80 text-red-300 hover:bg-red-800 transition backdrop-blur">
-            {preferRegisteredFace ? '■ 영상 추적 중지' : '■ 웹캠 중지'}
+            {isolatedVideo ? '■ 웹캠 추적 중지' : preferRegisteredFace ? '■ 영상 추적 중지' : '■ 웹캠 중지'}
           </button>
         ) : (
           <button onClick={startTracking} disabled={status === 'loading'}
             className={`px-2.5 py-1 text-xs rounded-lg border transition backdrop-blur
               ${status === 'loading' ? 'bg-gray-700/80 border-gray-600 text-gray-400'
                                      : 'bg-gray-800/80 text-gray-100 hover:bg-gray-700 border-gray-500'}`}>
-            {status === 'loading' ? '⟳ 로딩…' : preferRegisteredFace ? '▶ 영상 추적 시작' : '▶ 웹캠 시작'}
+            {status === 'loading' ? '⟳ 로딩…' : isolatedVideo ? '▶ 웹캠 추적 시작' : preferRegisteredFace ? '▶ 영상 추적 시작' : '▶ 웹캠 시작'}
           </button>
-        )}
+        ))}
         {!compact && (
           <>
-            <button onClick={() => setShowWire(v => !v)}
-              className={`px-2.5 py-1 text-xs rounded-lg border transition backdrop-blur
-                ${showWire ? 'bg-cyan-900/80 border-cyan-600 text-cyan-300' : 'bg-gray-800/80 border-gray-600 hover:bg-gray-700'}`}>
-              윤곽 {showWire ? 'ON' : 'OFF'}
-            </button>
-            <button onClick={() => setShowMesh(v => !v)}
-              className={`px-2.5 py-1 text-xs rounded-lg border transition backdrop-blur
-                ${showMesh ? 'bg-indigo-900/80 border-indigo-600 text-indigo-300' : 'bg-gray-800/80 border-gray-600 hover:bg-gray-700'}`}>
-              메시 {showMesh ? 'ON' : 'OFF'}
-            </button>
+            {!imageOnly && (
+              <>
+                <button onClick={() => setShowWire(v => !v)}
+                  className={`px-2.5 py-1 text-xs rounded-lg border transition backdrop-blur
+                    ${showWire ? 'bg-cyan-900/80 border-cyan-600 text-cyan-300' : 'bg-gray-800/80 border-gray-600 hover:bg-gray-700'}`}>
+                  윤곽 {showWire ? 'ON' : 'OFF'}
+                </button>
+                <button onClick={() => setShowMesh(v => !v)}
+                  className={`px-2.5 py-1 text-xs rounded-lg border transition backdrop-blur
+                    ${showMesh ? 'bg-indigo-900/80 border-indigo-600 text-indigo-300' : 'bg-gray-800/70 border-gray-600 hover:bg-gray-700'}`}>
+                  메시 {showMesh ? 'ON' : 'OFF'}
+                </button>
+              </>
+            )}
             <button onClick={() => setShowAlignCheck(v => !v)}
               title="저장된 얼굴 사진과 landmark가 서로 맞는지 카메라 없이 미리 확인"
               className={`px-2.5 py-1 text-xs rounded-lg border transition backdrop-blur
                 ${showAlignCheck ? 'bg-emerald-900/80 border-emerald-600 text-emerald-300' : 'bg-gray-800/80 border-gray-600 hover:bg-gray-700'}`}>
               정렬 확인
             </button>
-            {status === 'tracking' && (
+            {!imageOnly && status === 'tracking' && (
               recording ? (
                 <button onClick={stopRecording}
                   className="px-2.5 py-1 text-xs rounded-lg border border-red-500 bg-red-600/80 text-white hover:bg-red-500 transition backdrop-blur animate-pulse">
@@ -1087,26 +1249,33 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         </div>
       )}
 
-      {!hasLiveVideo && !hasSavedFace && (
+      {!hasLiveVideo && !hasSavedFace && !alignedFaceDisplayUrl && !localImageUrl && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center text-gray-500 pointer-events-none gap-1 bg-black">
           <span className="text-3xl">◈</span>
-          <p className="text-xs">{preferRegisteredFace ? '영상 추적 시작을 눌러주세요' : '웹캠 시작을 눌러주세요'}</p>
+          <p className="text-xs">{imageOnly ? '이미지를 선택해 주세요' : isolatedVideo ? '웹캠 추적 시작을 눌러주세요' : preferRegisteredFace ? '영상 추적 시작을 눌러주세요' : '웹캠 시작을 눌러주세요'}</p>
           <p className="text-[11px] text-gray-600">
-            {preferRegisteredFace ? '등록된 영상의 얼굴 움직임을 추적합니다' : '시작 전에는 카메라와 마이크를 사용하지 않습니다'}
+            {imageOnly ? '이미지 선택 후 정렬 확인만 사용할 수 있습니다' : isolatedVideo ? '선택한 이미지는 정렬용, 움직임은 웹캠으로 추적합니다' : preferRegisteredFace ? '등록된 영상의 얼굴 움직임을 추적합니다' : '시작 전에는 카메라와 마이크를 사용하지 않습니다'}
           </p>
         </div>
       )}
 
       {/* 정렬 확인 — 카메라 없이 저장된 사진 위에 landmark를 겹쳐 그려 매칭 여부를 미리 본다 */}
       {showAlignCheck && (
-        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-2 bg-black/90 p-4">
-          <div className="flex w-full max-w-[420px] items-center justify-between">
+        <div className="pointer-events-none absolute inset-0 z-40 flex flex-col gap-1.5 overflow-hidden bg-black/90 p-3">
+          <div className="pointer-events-auto flex w-full max-w-[420px] items-center justify-between">
             <span className="text-xs text-gray-300">저장 얼굴 · landmark 정렬 미리보기</span>
             <button onClick={() => setShowAlignCheck(false)} className="text-xs text-gray-400 hover:text-white">✕ 닫기</button>
           </div>
-          <canvas ref={alignCanvasRef} className="max-w-full rounded-lg border border-gray-700 bg-black" />
-          {alignCheckMsg && <p className="text-[11px] text-gray-400">{alignCheckMsg}</p>}
-          <button onClick={drawAlignCheck} className="text-xs text-gray-400 underline hover:text-white">↻ 새로고침</button>
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <canvas ref={alignCanvasRef} className="pointer-events-auto max-h-full max-w-full rounded-lg border border-gray-700 bg-black object-contain" />
+          </div>
+          <div className="pointer-events-auto flex shrink-0 flex-col items-center gap-1">
+            {alignCheckMsg && <p className="max-w-full truncate text-[11px] text-gray-400">{alignCheckMsg}</p>}
+            <div className="flex items-center gap-3">
+            <button onClick={drawAlignCheck} className="text-xs text-gray-400 underline hover:text-white">↻ 새로고침</button>
+            <button onClick={() => setShowAlignCheck(false)} className="rounded-lg border border-gray-500 bg-gray-800 px-3 py-1.5 text-xs text-gray-100 hover:bg-gray-700">닫기</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

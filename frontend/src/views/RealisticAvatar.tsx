@@ -11,6 +11,7 @@ import { streamChatOllama } from '@/services/ollama'
 import type { ChatMsg, Settings } from '@/types'
 import { API_BASE } from '@/config'
 import VoiceServiceBanner from '@/components/VoiceServiceBanner'
+import FaceTrackingPanel from './FaceTrackingPanel'
 import { type Emotion, type LipCue, MORPH_GROUPS, RHUBARB_SHAPE_TARGETS, EMOTION_WEIGHTS, classifyEmotion } from '@/avatarMorph'
 import { FACE_ALIGNED_PATCH_KEY, FACE_SNAPSHOT_KEY, getRegisteredFaceImageUrl } from '@/faceAlignment'
 
@@ -1078,6 +1079,14 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
             onError={() => updateFaceOverlay({ enabled: false })}
           />
         )}
+
+        {/* 3D 탭 전용 얼굴 이미지 선택·정렬·웹캠 추적 패널 */}
+        <FaceTrackingPanel
+          className="absolute bottom-3 left-3 z-30 w-[26rem] max-w-[calc(100%-1.5rem)] rounded-xl border border-gray-700 bg-black shadow-2xl overflow-hidden"
+          preferRegisteredFace
+          isolatedVideo
+          storageScope="3d"
+          imageOnly />
 
         {/* 파일 선택 + 목록 (좌상단) */}
         <div className="absolute top-3 left-3 z-20 flex flex-col gap-1">

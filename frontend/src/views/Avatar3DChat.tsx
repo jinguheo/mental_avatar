@@ -191,9 +191,22 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
   }, [])
   const headPoseRef = useRef<{ pitch: number; yaw: number; roll: number } | null>(null)
   const headPoseNeutralRef = useRef<{ pitch: number; yaw: number; roll: number } | null>(null)
+  const headPoseCalibrationRef = useRef<Array<{ pitch: number; yaw: number; roll: number }>>([])
   const handleHeadPose = useCallback((pose: { pitch: number; yaw: number; roll: number } | null) => {
-    if (!pose) headPoseNeutralRef.current = null
-    else if (!headPoseNeutralRef.current) headPoseNeutralRef.current = pose
+    if (!pose) {
+      headPoseNeutralRef.current = null
+      headPoseCalibrationRef.current = []
+    } else if (!headPoseNeutralRef.current) {
+      const samples = headPoseCalibrationRef.current
+      samples.push(pose)
+      if (samples.length >= 8) {
+        headPoseNeutralRef.current = {
+          pitch: samples.reduce((sum, item) => sum + item.pitch, 0) / samples.length,
+          yaw: samples.reduce((sum, item) => sum + item.yaw, 0) / samples.length,
+          roll: samples.reduce((sum, item) => sum + item.roll, 0) / samples.length,
+        }
+      }
+    }
     headPoseRef.current = pose
   }, [])
 
@@ -701,9 +714,9 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
 
         // 시작 자세를 기준으로 한 상대 회전만 부드럽게 반영한다.
         // 좌우/상하/기울기는 셀프뷰 체감에 맞춰 반전하고, 과도한 추적은 제한한다.
-        group.rotation.y += (clamp(-yaw * 0.55, 0.35) - group.rotation.y) * 0.14
-        group.rotation.x += (clamp(-pitch * 0.45, 0.25) - group.rotation.x) * 0.14
-        group.rotation.z += (clamp(-roll * 0.30, 0.18) - group.rotation.z) * 0.12
+        group.rotation.y += (clamp(-yaw * 1.25, 0.75) - group.rotation.y) * 0.18
+        group.rotation.x += (clamp(-pitch * 1.10, 0.55) - group.rotation.x) * 0.18
+        group.rotation.z += (clamp(-roll * 0.90, 0.35) - group.rotation.z) * 0.16
       } else {
         group.rotation.y = Math.sin(t * 0.25) * 0.05
         group.rotation.x = Math.sin(t * 0.18) * 0.015
@@ -926,7 +939,8 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
           className="absolute top-4 left-4 z-20 w-[26rem] max-w-[42vw] rounded-xl border border-gray-700 shadow-2xl bg-black overflow-hidden"
           onBlendshapes={handleFaceBlendshapes}
           onHeadPose={handleHeadPose}
-          preferRegisteredFace />
+          preferRegisteredFace
+          isolatedVideo />
 
         {/* 3D 아바타 외형 스타일 선택 (우상단) */}
         <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-1.5 bg-black/40 backdrop-blur rounded-xl p-2">
