@@ -71,7 +71,7 @@ async function idbDelete(name: string) {
   })
 }
 
-interface Slide { index: number; title: string; image: string | null; script: string }
+interface Slide { index: number; title: string; image: string | null; script: string; video_file?: string; video_url?: string }
 
 interface VoiceOption { id: string; label: string }
 const VOICE_OPTIONS: VoiceOption[] = [
@@ -182,7 +182,7 @@ export default function PptPresenter() {
   const [slides, setSlides] = useState<Slide[]>([])
 
   // ── 저장된 발표(슬라이드+대본) 목록 — api/server.py가 세션 디렉터리에 slides.json으로 영속 저장 ──
-  interface SavedSession { session_id: string; source_name: string; created_at: string; slide_count: number; thumbnail: string | null }
+  interface SavedSession { session_id: string; source_name: string; created_at: string; slide_count: number; video_count?: number; thumbnail: string | null }
   const [savedSessions, setSavedSessions] = useState<SavedSession[]>([])
   const [showSaved, setShowSaved] = useState(true)
   const refreshSavedSessions = useCallback(() => {
@@ -195,7 +195,9 @@ export default function PptPresenter() {
       const res = await fetch(`${API}/presenter/session/${id}`)
       const data = await res.json()
       if (data.error) throw new Error(data.error)
-      setSessionId(id); setSlides(data.slides); setCurrentIndex(0); setShowSaved(false)
+      const savedIndex = Number(localStorage.getItem(`presenter:last-slide:${id}`))
+      const resumeIndex = Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < data.slides.length ? savedIndex : 0
+      setSessionId(id); setSlides(data.slides); setCurrentIndex(resumeIndex); setFinalVideoUrl(data.final_video_url ? `${API}${data.final_video_url}` : null); setShowSaved(false)
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : '불러오기 실패')
     }
@@ -225,9 +227,14 @@ export default function PptPresenter() {
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const [showVideoPreview, setShowVideoPreview] = useState(false)
   const [videoResolution, setVideoResolution] = useState<VideoResolution>('720p')
+  const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null)
+  const [mergingVideo, setMergingVideo] = useState(false)
 
   useEffect(() => { slidesRef.current = slides }, [slides])
   useEffect(() => { voiceIdRef.current = voiceId }, [voiceId])
+  useEffect(() => {
+    if (sessionId) localStorage.setItem(`presenter:last-slide:${sessionId}`, String(currentIndex))
+  }, [sessionId, currentIndex])
 
   // ── 아바타 GLB 뷰어 (idle 애니메이션만 — 립싱크는 다음 단계) ──
   const loadGLB = useCallback((url: string) => {
@@ -699,9 +706,10 @@ export default function PptPresenter() {
     playChunk(0)
   }, [])
 
-  const recordPresentation = useCallback(async () => {
+  const recordPresentation = useCallback(async (singleIndex?: number) => {
     const avatarCanvas = rendererRef.current?.domElement
     const presentationSlides = slidesRef.current
+    const selectedIndices = singleIndex == null ? presentationSlides.map((_, index) => index) : [singleIndex]
     if (!avatarCanvas || presentationSlides.length === 0) {
       setUploadError('Load an avatar and presentation before recording.')
       return
@@ -767,6 +775,19 @@ export default function PptPresenter() {
       emotionRef.current = 'neutral'
       if (shouldDownload && videoChunks.length > 0) {
         const video = new Blob(videoChunks, { type: mimeType || 'video/webm' })
+        if (singleIndex != null && sessionId) {
+          const form = new FormData()
+          form.append('video', video, `slide_${singleIndex}.webm`)
+          fetch(`${API}/presenter/session/${sessionId}/slide/${singleIndex}/video`, { method: 'POST', body: form })
+            .then(response => { if (!response.ok) throw new Error('슬라이드 영상 저장 실패'); return response.json() })
+            .then(() => {
+              setSlides(prev => prev.map(slide => slide.index === singleIndex ? { ...slide, video_file: `slide_${singleIndex}.webm`, video_url: `${API}/presenter/session/${sessionId}/slide/${singleIndex}/video` } : slide))
+              setSavedSessions(prev => prev.map(item => item.session_id === sessionId ? { ...item, video_count: Math.min(item.slide_count, (item.video_count ?? 0) + 1) } : item))
+            })
+            .catch(error => setUploadError(error instanceof Error ? error.message : String(error)))
+            .finally(() => resolveStopped())
+          return
+        }
         const url = URL.createObjectURL(video)
         const link = document.createElement('a')
         link.href = url
@@ -871,17 +892,18 @@ export default function PptPresenter() {
     try {
       setUploadError('')
       setRecording(true)
-      setRecordingProgress({ current: 0, total: presentationSlides.length })
+      setRecordingProgress({ current: 0, total: selectedIndices.length })
       recordingRef.current = true
       stopRecordingRef.current = () => stopRecording(false)
       recorder.start(1000)
       drawFrame()
 
-      for (let index = 0; index < presentationSlides.length && recordingRef.current; index += 1) {
+      for (let position = 0; position < selectedIndices.length && recordingRef.current; position += 1) {
+        const index = selectedIndices[position]
         const slide = presentationSlides[index]
         setCurrentIndex(index)
         activeSlideNumber = index + 1
-        setRecordingProgress({ current: index + 1, total: presentationSlides.length })
+        setRecordingProgress({ current: position + 1, total: selectedIndices.length })
         activeSlideImage = await loadSlideImage(slide)
         emotionRef.current = classifyEmotion(slide.script)
         const chunks = splitScriptForTTS(stripParentheticalText(slide.script))
@@ -902,6 +924,23 @@ export default function PptPresenter() {
       await stopped
     }
   }, [sessionId, videoResolution])
+
+  const mergePresentationVideo = useCallback(async () => {
+    const completedCount = slidesRef.current.filter(slide => Boolean(slide.video_url)).length
+    if (!sessionId || completedCount !== slides.length || slides.length === 0) return
+    setMergingVideo(true)
+    setUploadError('')
+    try {
+      const response = await fetch(`${API}/presenter/session/${sessionId}/video/merge`, { method: 'POST' })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || '최종 발표 영상 결합 실패')
+      setFinalVideoUrl(`${API}${data.video_url}`)
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMergingVideo(false)
+    }
+  }, [sessionId, slides.length])
 
   const handlePlay = useCallback(() => {
     autoPlayRef.current = true; setAutoPlay(true)
@@ -957,6 +996,7 @@ export default function PptPresenter() {
   }, [sessionId, editScript])
 
   const current = slides[currentIndex]
+  const generatedVideoCount = slides.filter(slide => Boolean(slide.video_url)).length
   const previewSlide = slides[0]
   const scriptCharacters = slides.reduce((total, slide) => total + slide.script.trim().length, 0)
   const ttsChunkCount = slides.reduce((total, slide) => total + splitScriptForTTS(stripParentheticalText(slide.script)).length, 0)
@@ -1069,6 +1109,9 @@ export default function PptPresenter() {
                     </div>
                     <div className="text-[10px] text-gray-500">{s.slide_count}슬라이드 · {s.created_at.replace('T', ' ').slice(0, 16)}</div>
                   </button>
+                  <span className={`text-[10px] whitespace-nowrap ${s.video_count === s.slide_count ? 'text-emerald-400' : s.video_count ? 'text-blue-300' : 'text-amber-300'}`}>
+                    {s.video_count === s.slide_count ? '영상 완료' : s.video_count ? `영상 ${s.video_count}/${s.slide_count} 완료` : '영상 생성 필요'}
+                  </span>
                   <button
                     onClick={() => deleteSavedSession(s.session_id)}
                     className="text-[10px] text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity px-1"
@@ -1172,6 +1215,28 @@ export default function PptPresenter() {
                 className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200">
                 다음 →
               </button>
+            </div>
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2">
+            <span className="text-xs text-gray-400">슬라이드 영상: <strong className={current?.video_url ? 'text-emerald-400' : 'text-amber-400'}>{current?.video_url ? '완료' : '생성 필요'}</strong></span>
+            <span className="text-[10px] text-gray-500">총 {generatedVideoCount}/{slides.length}개 영상 완료{recording ? ` · ${recordingProgress.current}/${recordingProgress.total} 생성 중` : ''}</span>
+            <div className="flex items-center gap-2">
+              {current?.video_url && <a href={`${API}${current.video_url}`} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300">재생</a>}
+              <button onClick={() => { stopSpeaking(); recordPresentation(currentIndex) }} disabled={!avatarLoaded || !current || recording || autoPlay} className="px-2.5 py-1 text-xs rounded-lg bg-indigo-700 hover:bg-indigo-600 disabled:opacity-30 text-white">{current?.video_url ? '다시 생성' : '이 슬라이드 생성'}</button>
+            </div>
+          </div>
+          <div className="flex gap-1 overflow-x-auto pb-1">
+            {slides.map((slide, index) => (
+              <button key={slide.index} onClick={() => goTo(index)} className={`min-w-8 px-2 py-1 rounded text-[10px] border ${index === currentIndex ? 'border-blue-500 bg-blue-900/50 text-blue-200' : slide.video_url ? 'border-emerald-700 text-emerald-300' : 'border-amber-700 text-amber-300'}`} title={slide.video_url ? '영상 완료' : '영상 생성 필요'}>
+                {index + 1}{slide.video_url ? ' ✓' : ' !'}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2">
+            <span className="text-xs text-gray-400">최종 발표 영상: <strong className={finalVideoUrl ? 'text-emerald-400' : generatedVideoCount === slides.length ? 'text-amber-300' : 'text-gray-500'}>{finalVideoUrl ? '완료' : generatedVideoCount === slides.length ? '결합 가능' : `${generatedVideoCount}/${slides.length} 생성 중`}</strong></span>
+            <div className="flex gap-2">
+              {finalVideoUrl && <a href={finalVideoUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300">재생</a>}
+              <button onClick={mergePresentationVideo} disabled={mergingVideo || generatedVideoCount !== slides.length} className="px-2.5 py-1 text-xs rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-30 text-white">{mergingVideo ? '결합 중…' : finalVideoUrl ? '다시 결합' : '하나로 결합'}</button>
             </div>
           </div>
           {blockedAudio && (

@@ -3146,6 +3146,63 @@ def presenter_slide_image(session_id: str, filename: str):
     return send_file(str(path), mimetype="image/png")
 
 
+@app.route("/presenter/session/<session_id>/slide/<int:slide_index>/video", methods=["GET", "POST"])
+def presenter_slide_video(session_id: str, slide_index: int):
+    session_dir = PRESENTER_TMP / secure_filename(session_id)
+    meta_path = session_dir / PRESENTER_META
+    if not meta_path.exists():
+        return jsonify({"error": "not found"}), 404
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    slides = meta.get("slides", [])
+    slide = next((item for item in slides if item.get("index") == slide_index), None)
+    if slide is None:
+        return jsonify({"error": "slide not found"}), 404
+    video_name = slide.get("video_file") or f"slide_{slide_index}.webm"
+    video_path = session_dir / video_name
+    if request.method == "POST":
+        video = request.files.get("video")
+        if not video:
+            return jsonify({"error": "video required"}), 400
+        video.save(str(video_path))
+        slide["video_file"] = video_name
+        meta_path.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return jsonify({"ok": True, "video_file": video_name})
+    if not video_path.exists():
+        return jsonify({"error": "not found"}), 404
+    return send_file(str(video_path), mimetype="video/webm", as_attachment=False)
+
+
+@app.route("/presenter/session/<session_id>/video/merge", methods=["POST"])
+def presenter_video_merge(session_id: str):
+    session_dir = PRESENTER_TMP / secure_filename(session_id)
+    meta_path = session_dir / PRESENTER_META
+    if not meta_path.exists():
+        return jsonify({"error": "not found"}), 404
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    slides = meta.get("slides", [])
+    videos = [session_dir / slide["video_file"] for slide in slides if slide.get("video_file")]
+    if len(videos) != len(slides) or not videos or not all(path.exists() for path in videos):
+        return jsonify({"error": "모든 슬라이드 영상이 먼저 완료되어야 합니다.", "completed": sum(path.exists() for path in videos), "total": len(slides)}), 409
+    list_path = session_dir / "presentation_concat.txt"
+    output_path = session_dir / "presentation_final.webm"
+    try:
+        list_path.write_text("\n".join(f"file '{path.as_posix().replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for path in videos), encoding="utf-8")
+        subprocess.run([str(SADTALKER_DIR / "ffmpeg.exe"), "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", str(output_path)], check=True, capture_output=True, timeout=600)
+        return jsonify({"ok": True, "video_url": f"/presenter/session/{session_id}/video/final"})
+    except Exception as exc:
+        return jsonify({"error": f"최종 발표 영상 결합 실패: {exc}"}), 500
+    finally:
+        list_path.unlink(missing_ok=True)
+
+
+@app.route("/presenter/session/<session_id>/video/final", methods=["GET"])
+def presenter_final_video(session_id: str):
+    path = PRESENTER_TMP / secure_filename(session_id) / "presentation_final.webm"
+    if not path.exists():
+        return jsonify({"error": "not found"}), 404
+    return send_file(str(path), mimetype="video/webm", as_attachment=False)
+
+
 @app.route("/presenter/regenerate/<session_id>/<int:slide_index>", methods=["POST"])
 def presenter_regenerate(session_id: str, slide_index: int):
     """해당 슬라이드 하나만 대본을 다시 생성 (원본 텍스트/이미지는 그대로, LLM 출력만 새로)"""
@@ -3188,6 +3245,7 @@ def presenter_sessions():
                 "source_name": meta.get("source_name", ""),
                 "created_at": meta.get("created_at", ""),
                 "slide_count": len(meta.get("slides", [])),
+                "video_count": sum(1 for slide in meta.get("slides", []) if slide.get("video_file") and (d / slide["video_file"]).exists()),
                 "thumbnail": (meta["slides"][0]["image"] if meta.get("slides") and meta["slides"][0].get("image") else None),
             })
         except Exception:
@@ -3202,7 +3260,13 @@ def presenter_session_get(session_id: str):
     meta_path = PRESENTER_TMP / session_id / PRESENTER_META
     if not meta_path.exists():
         return jsonify({"error": "not found"}), 404
-    return jsonify(_json.loads(meta_path.read_text(encoding="utf-8")))
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    for slide in meta.get("slides", []):
+        if slide.get("video_file"):
+            slide["video_url"] = f"/presenter/session/{session_id}/slide/{slide.get('index', 0)}/video"
+    if (PRESENTER_TMP / session_id / "presentation_final.webm").exists():
+        meta["final_video_url"] = f"/presenter/session/{session_id}/video/final"
+    return jsonify(meta)
 
 
 @app.route("/presenter/session/<session_id>", methods=["PUT"])
