@@ -925,7 +925,8 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
         <FaceTrackingPanel
           className="absolute top-4 left-4 z-20 w-[26rem] max-w-[42vw] rounded-xl border border-gray-700 shadow-2xl bg-black overflow-hidden"
           onBlendshapes={handleFaceBlendshapes}
-          onHeadPose={handleHeadPose} />
+          onHeadPose={handleHeadPose}
+          preferRegisteredFace />
 
         {/* 3D 아바타 외형 스타일 선택 (우상단) */}
         <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-1.5 bg-black/40 backdrop-blur rounded-xl p-2">

@@ -1400,6 +1400,35 @@ def watcher_restart():
     return jsonify(_ensure_watcher())
 
 
+@app.route("/server/restart", methods=["POST"])
+def server_restart():
+    """현재 API 프로세스를 안전하게 종료하고 같은 인터프리터로 재시작한다."""
+    active_jobs = [
+        job for job in _faceswap_jobs.values()
+        if job.get("stage") not in ("done", "error", "canceled")
+    ]
+    if active_jobs:
+        return jsonify({"error": "얼굴교체 작업이 진행 중입니다. 작업 완료 후 서버를 재시작해주세요."}), 409
+    server_script = str(Path(__file__).resolve())
+
+    def _restart_later():
+        time.sleep(1.0)
+        # 부모가 포트를 놓은 뒤 새 서버를 띄우도록 별도 프로세스에서 대기한다.
+        launcher = (
+            "import os,time; time.sleep(2); "
+            f"os.execv({PYTHON_EXE!r}, [{PYTHON_EXE!r}, {server_script!r}])"
+        )
+        subprocess.Popen(
+            [PYTHON_EXE, "-c", launcher],
+            cwd=str(Path(__file__).parent.parent),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        os._exit(0)
+
+    _threading.Thread(target=_restart_later, daemon=True).start()
+    return jsonify({"status": "restarting"})
+
+
 # ── 백업 / 복원 ──────────────────────────────────────────────
 import sqlite3 as _sqlite3
 import base64 as _base64
@@ -1441,8 +1470,31 @@ def backup():
     if data_dir.exists():
         for f in data_dir.iterdir():
             if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.wav', '.mp3'):
-                files_meta.append({"name": f.name, "size": f.stat().st_size})
+                try:
+                    files_meta.append({
+                        "name": f.name,
+                        "size": f.stat().st_size,
+                        "content_base64": _base64.b64encode(f.read_bytes()).decode(),
+                    })
+                except Exception as e:
+                    files_meta.append({"name": f.name, "size": f.stat().st_size, "error": str(e)})
     result["data_files"] = files_meta
+
+    avatar_dir = Path(__file__).parent.parent / "tmp" / "avatar"
+    avatar_files = []
+    avatar_ext = {".mp4", ".webm", ".jpg", ".jpeg", ".png", ".wav", ".json"}
+    if avatar_dir.exists():
+        for f in avatar_dir.rglob("*"):
+            if f.is_file() and f.suffix.lower() in avatar_ext:
+                try:
+                    avatar_files.append({
+                        "path": f.relative_to(avatar_dir).as_posix(),
+                        "size": f.stat().st_size,
+                        "content_base64": _base64.b64encode(f.read_bytes()).decode(),
+                    })
+                except Exception as e:
+                    avatar_files.append({"path": f.relative_to(avatar_dir).as_posix(), "size": f.stat().st_size, "error": str(e)})
+    result["avatar_files"] = avatar_files
 
     return jsonify(result)
 
@@ -1466,6 +1518,41 @@ def restore():
             restored.append("db")
         except Exception as e:
             return jsonify({"success": False, "error": f"DB 복원 실패: {e}"}), 500
+
+    data_files = payload.get("data_files") or []
+    data_dir = Path(__file__).parent.parent / "data"
+    allowed_ext = {".jpg", ".jpeg", ".png", ".wav", ".mp3"}
+    for item in data_files:
+        try:
+            name = Path(str(item.get("name", ""))).name
+            if not name or Path(name).suffix.lower() not in allowed_ext:
+                continue
+            content = item.get("content_base64")
+            if not content:
+                continue
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / name).write_bytes(_base64.b64decode(content))
+            restored.append(f"data/{name}")
+        except Exception as e:
+            return jsonify({"success": False, "error": f"미디어 복원 실패: {e}"}), 500
+
+    avatar_files = payload.get("avatar_files") or []
+    avatar_dir = Path(__file__).parent.parent / "tmp" / "avatar"
+    allowed_avatar_ext = {".mp4", ".webm", ".jpg", ".jpeg", ".png", ".wav", ".json"}
+    for item in avatar_files:
+        try:
+            rel = Path(str(item.get("path", "")))
+            if not rel.parts or rel.is_absolute() or ".." in rel.parts or rel.suffix.lower() not in allowed_avatar_ext:
+                continue
+            content = item.get("content_base64")
+            if not content:
+                continue
+            target = avatar_dir.joinpath(*rel.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(_base64.b64decode(content))
+            restored.append(f"tmp/avatar/{rel.as_posix()}")
+        except Exception as e:
+            return jsonify({"success": False, "error": f"아바타 미디어 복원 실패: {e}"}), 500
 
     return jsonify({"success": True, "restored": restored})
 
@@ -1556,6 +1643,33 @@ XTTS_PYTHON_EXE = config.XTTS_PYTHON     # Coqui XTTS v2
 XTTS_SERVER_SCRIPT = Path(__file__).parent / "xtts_server.py"
 _xtts_worker_lock = _threading.Lock()
 _xtts_worker_process = None
+_xtts_paused_for_gpu = False
+
+
+def _pause_xtts_for_gpu() -> bool:
+    """GPU 얼굴교체 동안 XTTS 상주 모델을 내려 VRAM을 확보한다."""
+    global _xtts_paused_for_gpu, _xtts_worker_process
+    with _xtts_worker_lock:
+        _xtts_paused_for_gpu = True
+        process = _xtts_worker_process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        _xtts_worker_process = None
+    print("[xtts] GPU 얼굴교체를 위해 워커를 일시 중지했습니다.", flush=True)
+    return True
+
+
+def _resume_xtts_after_gpu() -> None:
+    """GPU 얼굴교체 후 XTTS 워커를 다시 올린다."""
+    global _xtts_paused_for_gpu
+    _xtts_paused_for_gpu = False
+    _ensure_xtts_worker()
+    print("[xtts] GPU 얼굴교체 종료 — 워커 재기동 요청", flush=True)
 
 
 def _xtts_worker_alive(timeout: float = 1.5) -> bool:
@@ -1568,11 +1682,44 @@ def _xtts_worker_alive(timeout: float = 1.5) -> bool:
         return False
 
 
+def _xtts_synthesize(text: str, speaker=None, speaker_wav=None, timeout: float = 180):
+    """Synthesize through the resident XTTS worker; never load XTTS per request."""
+    import json as _json
+    import urllib.request as _urlreq
+
+    if _xtts_paused_for_gpu:
+        return None
+    _ensure_xtts_worker()
+    deadline = time.time() + min(timeout, 180)
+    while time.time() < deadline and not _xtts_worker_alive():
+        time.sleep(2)
+    if not _xtts_worker_alive():
+        return None
+
+    payload = _json.dumps({
+        "text": text,
+        "speaker": speaker,
+        "speaker_wav": speaker_wav,
+        "language": "ko",
+    }).encode()
+    req = _urlreq.Request(
+        "http://127.0.0.1:8768/tts",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with _urlreq.urlopen(req, timeout=timeout) as response:
+        if response.status != 200:
+            return None
+        return response.read()
+
+
 def _ensure_xtts_worker() -> dict:
     """XTTS 상주 워커가 꺼져 있으면 백그라운드로 새로 띄운다. 이미 떠 있으면 아무 것도 안 함.
     모델 로딩에 ~1분 걸리므로 호출 직후 바로 쓸 수 있다는 뜻은 아니다 — 몇 초~1분 뒤부터
     tts_only 요청이 다시 빠르게(2~3초) 성공한다."""
     global _xtts_worker_process
+    if _xtts_paused_for_gpu:
+        return {"status": "paused_for_gpu"}
     with _xtts_worker_lock:
         if _xtts_worker_alive():
             return {"status": "already_running"}
@@ -1603,7 +1750,7 @@ def _xtts_watchdog_loop():
     while True:
         time.sleep(120)
         try:
-            if not _xtts_worker_alive():
+            if not _xtts_paused_for_gpu and not _xtts_worker_alive():
                 _ensure_xtts_worker()
         except Exception as e:
             print(f"[xtts-watchdog] 오류: {e}", flush=True)
@@ -1839,26 +1986,7 @@ def avatar_tts_only():
         print(f"[tts_only] 워커 미응답, subprocess 폴백: {_e}", flush=True)
 
     # ② 폴백: 워커가 꺼져 있으면 기존 subprocess 방식(매번 모델 로드, 느림)
-    import uuid as _uuid
-    job_dir = AVATAR_TMP / _uuid.uuid4().hex
-    job_dir.mkdir(parents=True, exist_ok=True)
-    speech_path = job_dir / "speech.wav"
-
-    speaker_arg = f"speaker={repr(template_speaker)}" if template_speaker \
-        else f"speaker_wav={repr(str(VOICE_SAMPLE))}"
-    tts_script = _tts_script(text, speech_path, speaker_arg)
-    script_path = job_dir / "run_tts.py"
-    script_path.write_text(tts_script, encoding="utf-8")
-    try:
-        subprocess.run([XTTS_PYTHON_EXE, str(script_path)],
-                       check=True, capture_output=True, timeout=180)
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": "TTS failed", "detail": e.stderr.decode(errors="replace")}), 500
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "TTS timeout"}), 500
-
-    return send_file(str(speech_path), mimetype="audio/wav",
-                     as_attachment=False, download_name="speech.wav")
+    return jsonify({"error": "XTTS worker is not ready", "retryable": True}), 503
 
 
 def _run_avatar_job(job_id: str, face_path: Path, text: str, job_dir: Path) -> None:
@@ -1873,22 +2001,19 @@ def _run_avatar_job_locked(job_id: str, face_path: Path, text: str, job_dir: Pat
     job = _avatar_jobs[job_id]
     speech_path = job_dir / "speech.wav"
 
-    # 1) TTS
+    # 1) TTS — use the resident XTTS worker; do not reload the model per job.
     job["stage"] = "tts"
     text = _strip_tts_markup(text)
-    tts_script = _tts_script(text, speech_path, f"speaker_wav={repr(str(VOICE_SAMPLE))}")
-    tts_script_path = job_dir / "run_tts.py"
-    tts_script_path.write_text(tts_script, encoding="utf-8")
     try:
-        subprocess.run([XTTS_PYTHON_EXE, str(tts_script_path)],
-                       check=True, capture_output=True, timeout=180)
-    except subprocess.CalledProcessError as e:
+        wav_bytes = _xtts_synthesize(text, speaker_wav=str(VOICE_SAMPLE), timeout=180)
+        if not wav_bytes:
+            job["stage"] = "error"
+            job["error"] = "XTTS worker is not ready"
+            return
+        speech_path.write_bytes(wav_bytes)
+    except Exception as e:
         job["stage"] = "error"
-        job["error"] = f"TTS 실패: {e.stderr.decode(errors='replace')[:300]}"
-        return
-    except subprocess.TimeoutExpired:
-        job["stage"] = "error"
-        job["error"] = "TTS 타임아웃"
+        job["error"] = f"TTS 실패: {str(e)[:300]}"
         return
 
     # 2) SadTalker — 프로파일 영상 설정 반영
@@ -2219,6 +2344,8 @@ _faceswap_jobs: dict = {}
 _ytdl_jobs: dict = {}
 
 YTDL_HISTORY_FILE = AVATAR_TMP / "ytdl_history.json"
+YTDL_DOWNLOAD_DIR = AVATAR_TMP / "youtube_downloads"
+YTDL_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 def _load_ytdl_history() -> list:
     try:
@@ -2232,9 +2359,54 @@ def _load_ytdl_history() -> list:
 def _save_ytdl_history(entry: dict):
     import json as _json
     history = _load_ytdl_history()
+    # 같은 URL을 반복 저장하지 않고 최신 다운로드 하나만 유지한다.
+    for old in history:
+        if old.get("url") == entry.get("url") and old.get("video_path") != entry.get("video_path"):
+            try:
+                Path(old.get("video_path", "")).unlink(missing_ok=True)
+            except OSError:
+                pass
+    history = [old for old in history if old.get("url") != entry.get("url")]
     history.insert(0, entry)
     history = history[:50]
     YTDL_HISTORY_FILE.write_text(_json.dumps(history, ensure_ascii=False), encoding="utf-8")
+
+
+def _migrate_ytdl_downloads():
+    """기존 ytdl 결과도 전용 보관 폴더로 이동해 재시작 후 일관되게 로드한다."""
+    import shutil as _shutil_local
+    history = _load_ytdl_history()
+    changed = False
+    unique = []
+    seen_urls = set()
+    for item in history:
+        url = item.get("url", "")
+        if url and url in seen_urls:
+            try:
+                Path(item.get("video_path", "")).unlink(missing_ok=True)
+            except OSError:
+                pass
+            changed = True
+            continue
+        if url:
+            seen_urls.add(url)
+        unique.append(item)
+    history = unique
+    for item in history:
+        old_path = Path(item.get("video_path", ""))
+        if not old_path.exists() or old_path.parent == YTDL_DOWNLOAD_DIR:
+            continue
+        dest = YTDL_DOWNLOAD_DIR / f"{item.get('job_id', old_path.stem)}{old_path.suffix.lower() or '.mp4'}"
+        if not dest.exists():
+            _shutil_local.copy2(str(old_path), str(dest))
+        item["video_path"] = str(dest)
+        changed = True
+    if changed:
+        import json as _json
+        YTDL_HISTORY_FILE.write_text(_json.dumps(history, ensure_ascii=False), encoding="utf-8")
+
+
+_migrate_ytdl_downloads()
 
 
 @app.route("/avatar/ytdl/history", methods=["GET"])
@@ -2302,6 +2474,11 @@ def avatar_ytdl():
             except Exception:
                 final_path = raw_path
 
+            # 다운로드 결과는 job 임시 폴더와 분리된 영구 폴더에 보관한다.
+            saved_path = YTDL_DOWNLOAD_DIR / f"{job_id}{Path(final_path).suffix.lower() or '.mp4'}"
+            _shutil.copy2(final_path, saved_path)
+            final_path = str(saved_path)
+
             _ytdl_jobs[job_id].update({"stage": "done", "video_path": final_path, "title": title,
                                         "url": url, "duration": duration})
             _save_ytdl_history({"job_id": job_id, "title": title, "url": url,
@@ -2311,7 +2488,78 @@ def avatar_ytdl():
             _ytdl_jobs[job_id]["stage"] = "error"
             _ytdl_jobs[job_id]["error"] = str(e)
 
-    _threading.Thread(target=_run, daemon=True).start()
+    # 실제 CUDA/ONNX 처리는 API와 분리된 worker 프로세스에서 실행한다.
+    # 네이티브 GPU 충돌이 발생해도 API 서버는 계속 살아 있도록 한다.
+    return jsonify({"job_id": job_id})
+
+    def _run_worker_process():
+        xtts_paused = False
+        worker_proc = None
+        state_file = job_dir / "faceswap_worker_state.json"
+        cancel_file = job_dir / "faceswap_worker.cancel"
+        worker_script = Path(__file__).resolve().parent.parent / "core" / "faceswap_worker.py"
+
+        def run_worker(gpu: bool) -> int:
+            nonlocal worker_proc
+            state_file.unlink(missing_ok=True)
+            worker_proc = subprocess.Popen(
+                [PYTHON_EXE, str(worker_script), str(face_path), str(video_path), output_path,
+                 str(state_file), str(cancel_file), "1" if gpu else "0"],
+                cwd=str(worker_script.parent.parent),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            while worker_proc.poll() is None:
+                try:
+                    state = _json.loads(state_file.read_text(encoding="utf-8"))
+                    job = _faceswap_jobs.get(job_id)
+                    if job:
+                        job.update({k: state[k] for k in ("stage", "progress", "processed_frames", "total_frames") if k in state})
+                        if state.get("error"):
+                            job["error"] = state["error"]
+                except (OSError, ValueError, KeyError):
+                    pass
+                if _faceswap_jobs.get(job_id, {}).get("cancel_requested"):
+                    cancel_file.touch(exist_ok=True)
+                time.sleep(0.4)
+            return worker_proc.returncode or 0
+
+        try:
+            if use_gpu:
+                xtts_paused = _pause_xtts_for_gpu()
+            code = run_worker(use_gpu)
+            state = {}
+            try:
+                state = _json.loads(state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            if code != 0 or state.get("stage") == "error":
+                if not use_gpu:
+                    raise RuntimeError(state.get("error") or f"face-swap worker exit code {code}")
+                job = _faceswap_jobs[job_id]
+                job.update({"stage": "GPU worker 실패 - CPU 전환 중", "progress": 0,
+                            "processed_frames": 0, "total_frames": 0, "error": ""})
+                Path(output_path).unlink(missing_ok=True)
+                Path(f"{output_path}_tmp.mp4").unlink(missing_ok=True)
+                cancel_file.unlink(missing_ok=True)
+                code = run_worker(False)
+                state = _json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
+                if code != 0 or state.get("stage") == "error":
+                    raise RuntimeError(state.get("error") or f"CPU face-swap worker exit code {code}")
+            if _faceswap_jobs[job_id].get("cancel_requested") or state.get("stage") == "canceled":
+                _faceswap_jobs[job_id]["stage"] = "canceled"
+            else:
+                _faceswap_jobs[job_id].update({"stage": "done", "progress": 100, "mp4_path": output_path})
+        except Exception as e:
+            _faceswap_jobs[job_id]["stage"] = "error"
+            _faceswap_jobs[job_id]["error"] = str(e)
+        finally:
+            if worker_proc is not None and worker_proc.poll() is None:
+                worker_proc.terminate()
+            cancel_file.unlink(missing_ok=True)
+            if xtts_paused:
+                _resume_xtts_after_gpu()
+
+    _threading.Thread(target=_run_worker_process, daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
@@ -2326,10 +2574,68 @@ def avatar_ytdl_status(job_id: str):
 @app.route("/avatar/ytdl/<job_id>/video", methods=["GET"])
 def avatar_ytdl_video(job_id: str):
     job = _ytdl_jobs.get(job_id)
-    if not job or job["stage"] != "done":
+    if not job:
+        job = next((item for item in _load_ytdl_history() if item.get("job_id") == job_id), None)
+        if job:
+            job = {**job, "stage": "done"}
+    if not job or job.get("stage") != "done":
         return jsonify({"error": "not ready"}), 404
-    return send_file(job["video_path"], mimetype="video/mp4", as_attachment=False,
-                     download_name=f"{job.get('title','video')[:40]}.mp4")
+    source_path = Path(job["video_path"])
+    if not source_path.exists():
+        return jsonify({"error": "downloaded video file is missing"}), 404
+
+    # 원본(AV1 등)은 그대로 보존하고, 브라우저 재생용 H.264/AAC 미리보기만 별도 생성한다.
+    preview_path = source_path.with_name(f"{source_path.stem}.preview.mp4")
+    if source_path.suffix.lower() != ".mp4":
+        preview_path = source_path.with_suffix(".preview.mp4")
+    if not preview_path.exists():
+        try:
+            subprocess.run([
+                str(SADTALKER_DIR / "ffmpeg.exe"), "-y", "-i", str(source_path),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-movflags", "+faststart", str(preview_path)
+            ], check=True, capture_output=True, timeout=300)
+        except Exception as e:
+            print(f"[ytdl] 브라우저 미리보기 변환 실패, 원본 제공: {e}", flush=True)
+            preview_path = source_path
+
+    suffix = preview_path.suffix.lower()
+    mimetype = "video/webm" if suffix == ".webm" else "video/mp4"
+    return send_file(str(preview_path), mimetype=mimetype, as_attachment=False,
+                     download_name=f"{job.get('title','video')[:40]}{suffix or '.mp4'}")
+
+
+@app.route("/avatar/ytdl/<job_id>", methods=["DELETE"])
+def avatar_ytdl_delete(job_id: str):
+    history = _load_ytdl_history()
+    kept = []
+    removed = None
+    for item in history:
+        if item.get("job_id") == job_id and removed is None:
+            removed = item
+        else:
+            kept.append(item)
+    if removed is None:
+        return jsonify({"error": "not found"}), 404
+
+    source_to_remove = Path(removed.get("video_path", ""))
+    paths = [source_to_remove, source_to_remove.with_name(f"{source_to_remove.stem}.preview.mp4")]
+    job_dir = AVATAR_TMP / secure_filename(job_id)
+    paths.extend(job_dir.glob("*"))
+    avatar_root = AVATAR_TMP.resolve()
+    for path in paths:
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(avatar_root)
+            if resolved.is_file():
+                resolved.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
+    if job_dir.exists():
+        _shutil.rmtree(job_dir, ignore_errors=True)
+    YTDL_HISTORY_FILE.write_text(_json.dumps(kept, ensure_ascii=False), encoding="utf-8")
+    _ytdl_jobs.pop(job_id, None)
+    return jsonify({"success": True})
 
 
 _SADTALKER_REF_DIR   = SADTALKER_DIR / "examples" / "ref_video"
@@ -2406,34 +2712,242 @@ def avatar_faceswap():
     _save_face_image(source_face, face_path)
 
     # 대상 영상: 직접 업로드 또는 YouTube 다운로드 결과 사용
-    if yt_job_id and yt_job_id in _ytdl_jobs and _ytdl_jobs[yt_job_id]["stage"] == "done":
-        video_path = Path(_ytdl_jobs[yt_job_id]["video_path"])
+    persisted_yt_path = None
+    if yt_job_id:
+        memory_job = _ytdl_jobs.get(yt_job_id)
+        if memory_job and memory_job.get("stage") == "done":
+            candidate = Path(memory_job.get("video_path", ""))
+            if candidate.exists():
+                persisted_yt_path = candidate
+        if persisted_yt_path is None:
+            for item in _load_ytdl_history():
+                if item.get("job_id") == yt_job_id:
+                    candidate = Path(item.get("video_path", ""))
+                    if candidate.exists():
+                        persisted_yt_path = candidate
+                    break
+
+    if persisted_yt_path is not None:
+        video_path = job_dir / f"target{Path(persisted_yt_path).suffix or '.mp4'}"
+        _shutil.copy2(str(persisted_yt_path), str(video_path))
     else:
         video_path = job_dir / f"target{Path(target_video.filename).suffix or '.mp4'}"
         target_video.save(str(video_path))
 
-    _faceswap_jobs[job_id] = {"stage": "processing", "error": "", "mp4_path": None}
+    _faceswap_jobs[job_id] = {
+        "stage": "processing", "error": "", "mp4_path": None,
+        "progress": 0, "processed_frames": 0, "total_frames": 0,
+        "cancel_requested": False,
+        "gpu_error": "",
+    }
 
     def _run():
+        gpu_error_text = ""
+        xtts_paused = False
         try:
             from core.faceswap import swap_faces_in_video
-            swap_faces_in_video(str(face_path), str(video_path), output_path, use_gpu=use_gpu)
+            if use_gpu:
+                xtts_paused = _pause_xtts_for_gpu()
+            def on_progress(processed: int, total: int):
+                job = _faceswap_jobs.get(job_id)
+                if job is None:
+                    return
+                job["processed_frames"] = processed
+                job["total_frames"] = total
+                job["progress"] = round(processed / total * 100, 1) if total else 0
+
+            def is_cancelled() -> bool:
+                job = _faceswap_jobs.get(job_id)
+                return bool(job and job.get("cancel_requested"))
+
+            try:
+                swap_faces_in_video(
+                    str(face_path), str(video_path), output_path,
+                    use_gpu=use_gpu, progress_callback=on_progress,
+                    cancel_callback=is_cancelled,
+                )
+            except Exception as gpu_error:
+                if not use_gpu:
+                    raise
+                gpu_error_text = str(gpu_error)
+                # CUDA/ONNX 오류가 나면 같은 원본으로 즉시 CPU 모드 재시도
+                print(f"[faceswap] GPU 실패, CPU로 전환: {gpu_error}")
+                job = _faceswap_jobs.get(job_id)
+                if job is not None:
+                    job["stage"] = "GPU 실패 - CPU 전환 중"
+                    job["error"] = ""
+                    job["progress"] = 0
+                    job["processed_frames"] = 0
+                    job["total_frames"] = 0
+                Path(output_path).unlink(missing_ok=True)
+                Path(f"{output_path}_tmp.mp4").unlink(missing_ok=True)
+                swap_faces_in_video(
+                    str(face_path), str(video_path), output_path,
+                    use_gpu=False, progress_callback=on_progress,
+                    cancel_callback=is_cancelled,
+                )
+            if is_cancelled():
+                _faceswap_jobs[job_id]["stage"] = "canceled"
+                return
             _faceswap_jobs[job_id]["stage"] = "done"
+            _faceswap_jobs[job_id]["progress"] = 100
             _faceswap_jobs[job_id]["mp4_path"] = output_path
         except Exception as e:
             _faceswap_jobs[job_id]["stage"] = "error"
-            _faceswap_jobs[job_id]["error"] = str(e)
+            detail = str(e)
+            if gpu_error_text:
+                detail = f"GPU 오류: {gpu_error_text} | CPU 전환 후 오류: {detail}"
+            _faceswap_jobs[job_id]["error"] = detail
+        finally:
+            if xtts_paused:
+                _resume_xtts_after_gpu()
 
-    _threading.Thread(target=_run, daemon=True).start()
+    def _run_worker_process():
+        state_file = job_dir / "faceswap_worker_state.json"
+        cancel_file = job_dir / "faceswap_worker.cancel"
+        worker_script = Path(__file__).resolve().parent.parent / "core" / "faceswap_worker.py"
+        paused = False
+        proc = None
+
+        def run_worker(gpu: bool):
+            nonlocal proc
+            state_file.unlink(missing_ok=True)
+            proc = subprocess.Popen(
+                [PYTHON_EXE, str(worker_script), str(face_path), str(video_path), output_path,
+                 str(state_file), str(cancel_file), "1" if gpu else "0"],
+                cwd=str(worker_script.parent.parent),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            while proc.poll() is None:
+                try:
+                    state = _json.loads(state_file.read_text(encoding="utf-8"))
+                    job = _faceswap_jobs.get(job_id)
+                    if job:
+                        for key in ("stage", "progress", "processed_frames", "total_frames"):
+                            if key in state:
+                                job[key] = state[key]
+                        if state.get("error"):
+                            job["error"] = state["error"]
+                except (OSError, ValueError):
+                    pass
+                if _faceswap_jobs.get(job_id, {}).get("cancel_requested"):
+                    cancel_file.touch(exist_ok=True)
+                time.sleep(0.4)
+            return proc.returncode or 0
+
+        try:
+            if use_gpu:
+                paused = _pause_xtts_for_gpu()
+            code = run_worker(use_gpu)
+            state = _json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
+            if (code != 0 or state.get("stage") == "error") and use_gpu:
+                _faceswap_jobs[job_id].update({"stage": "GPU 실패 - CPU 전환 중", "progress": 0,
+                                                "processed_frames": 0, "total_frames": 0, "error": ""})
+                Path(output_path).unlink(missing_ok=True)
+                cancel_file.unlink(missing_ok=True)
+                code = run_worker(False)
+                state = _json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
+            if code != 0 or state.get("stage") == "error":
+                raise RuntimeError(state.get("error") or f"face-swap worker exit code {code}")
+            if _faceswap_jobs[job_id].get("cancel_requested") or state.get("stage") == "canceled":
+                _faceswap_jobs[job_id]["stage"] = "canceled"
+            else:
+                _faceswap_jobs[job_id].update({"stage": "done", "progress": 100, "mp4_path": output_path})
+        except Exception as e:
+            _faceswap_jobs[job_id].update({"stage": "error", "error": str(e)})
+        finally:
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+            cancel_file.unlink(missing_ok=True)
+            if paused:
+                _resume_xtts_after_gpu()
+
+    _threading.Thread(target=_run_worker_process, daemon=True).start()
     return jsonify({"job_id": job_id})
+
+
+@app.route("/avatar/faceswap/<job_id>/cancel", methods=["POST"])
+def avatar_faceswap_cancel(job_id: str):
+    job = _faceswap_jobs.get(job_id)
+    if not job:
+        job_dir = AVATAR_TMP / secure_filename(job_id)
+        state_file = job_dir / "faceswap_worker_state.json"
+        if state_file.exists():
+            try:
+                import json as _json_local
+                persisted = _json_local.loads(state_file.read_text(encoding="utf-8"))
+                if persisted.get("stage") not in ("done", "error", "canceled"):
+                    (job_dir / "faceswap_worker.cancel").touch(exist_ok=True)
+                    return jsonify({"success": True, "stage": "canceling"})
+            except (OSError, ValueError):
+                pass
+        return jsonify({"error": "not found"}), 404
+    if job["stage"] not in ("done", "error", "canceled"):
+        job["cancel_requested"] = True
+        return jsonify({"success": True, "stage": "canceling"})
+    return jsonify({"success": False, "stage": job["stage"]})
 
 
 @app.route("/avatar/faceswap/<job_id>", methods=["GET"])
 def avatar_faceswap_status(job_id: str):
     job = _faceswap_jobs.get(job_id)
     if not job:
-        return jsonify({"error": "not found"}), 404
+        job_dir = AVATAR_TMP / secure_filename(job_id)
+        state_file = job_dir / "faceswap_worker_state.json"
+        result_file = job_dir / "faceswap_result.mp4"
+        if state_file.exists():
+            try:
+                persisted = _json.loads(state_file.read_text(encoding="utf-8"))
+                job = {
+                    "stage": persisted.get("stage", "processing"),
+                    "error": persisted.get("error", ""),
+                    "mp4_path": str(result_file) if result_file.exists() else None,
+                    "progress": persisted.get("progress", 0),
+                    "processed_frames": persisted.get("processed_frames", 0),
+                    "total_frames": persisted.get("total_frames", 0),
+                    "cancel_requested": False,
+                    "gpu_error": "",
+                }
+                _faceswap_jobs[job_id] = job
+            except (OSError, ValueError):
+                pass
+        if not job:
+            return jsonify({"error": "not found"}), 404
     return jsonify({**job, "video_url": f"/avatar/faceswap/{job_id}/video" if job["stage"] == "done" else None})
+
+
+@app.route("/avatar/faceswap/active", methods=["GET"])
+def avatar_faceswap_active():
+    """현재 실행 중인 모든 얼굴교체 워커의 진행률을 반환한다."""
+    active = []
+    seen = set()
+    for job_id, job in list(_faceswap_jobs.items()):
+        if job.get("stage") in ("done", "error", "canceled"):
+            continue
+        active.append({"job_id": job_id, **job})
+        seen.add(job_id)
+    if AVATAR_TMP.exists():
+        for job_dir in AVATAR_TMP.iterdir():
+            if not job_dir.is_dir() or job_dir.name in seen:
+                continue
+            state_file = job_dir / "faceswap_worker_state.json"
+            if not state_file.exists():
+                continue
+            try:
+                import json as _json_local
+                state = _json_local.loads(state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if state.get("stage") in ("done", "error", "canceled"):
+                continue
+            active.append({"job_id": job_dir.name, "mp4_path": None, "cancel_requested": False,
+                           "gpu_error": "", "error": state.get("error", ""),
+                           "stage": state.get("stage", "processing"),
+                           "progress": state.get("progress", 0),
+                           "processed_frames": state.get("processed_frames", 0),
+                           "total_frames": state.get("total_frames", 0)})
+    active.sort(key=lambda item: item.get("job_id", ""))
+    return jsonify({"jobs": active, "count": len(active)})
 
 
 @app.route("/avatar/faceswap/<job_id>/video", methods=["GET"])
@@ -2513,18 +3027,14 @@ def avatar_tts_generate():
 
     speech_path = job_dir / "speech.wav"
 
-    # 1) XTTS v2 TTS (xtts 환경의 python으로 subprocess 실행)
-    tts_script = _tts_script(text, speech_path, f"speaker_wav={repr(str(VOICE_SAMPLE))}")
-    tts_script_path = job_dir / "run_tts.py"
-    tts_script_path.write_text(tts_script, encoding="utf-8")
-
+    # 1) XTTS v2 TTS through the resident worker; do not reload the model per request.
     try:
-        subprocess.run([XTTS_PYTHON_EXE, str(tts_script_path)],
-                       check=True, capture_output=True, timeout=180)
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": "TTS failed", "detail": e.stderr.decode(errors="replace")}), 500
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "TTS timeout"}), 500
+        wav_bytes = _xtts_synthesize(text, speaker_wav=str(VOICE_SAMPLE), timeout=180)
+        if not wav_bytes:
+            return jsonify({"error": "XTTS worker is not ready", "retryable": True}), 503
+        speech_path.write_bytes(wav_bytes)
+    except Exception as e:
+        return jsonify({"error": "TTS failed", "detail": str(e)[:300]}), 500
 
     # 2) SadTalker 립싱크
     result_dir = job_dir / "result"

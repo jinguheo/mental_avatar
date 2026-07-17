@@ -16,8 +16,15 @@ MODEL_PATH = Path(__file__).parent.parent / "models" / "faceswap" / "inswapper_1
 # 별도 CUDA/cuDNN 설치 없이도 torch 패키지에 이미 번들되어 있다 — 그 디렉터리를 PATH에 추가하면
 # CUDA 프로바이더가 정상 로드된다 (없으면 onnxruntime이 조용히 CPU로 폴백되어 영상 처리가 매우 느려짐).
 _torch_lib = Path(sys.exec_prefix) / "Lib" / "site-packages" / "torch" / "lib"
-if _torch_lib.is_dir() and str(_torch_lib) not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = str(_torch_lib) + os.pathsep + os.environ.get("PATH", "")
+if _torch_lib.is_dir():
+    # Windows/Python 3.11 DLL 검색은 PATH만으로 부족할 수 있다.
+    # 시스템 CUDA_PATH(12.6)가 PyTorch 번들 CUDA 12.1/cuDNN 9.1과 섞이지 않도록 제거하고
+    # PyTorch가 검증한 CUDA/cuDNN DLL 디렉터리를 명시적으로 등록한다.
+    os.environ.pop("CUDA_PATH", None)
+    if hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(str(_torch_lib))
+    if str(_torch_lib) not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = str(_torch_lib) + os.pathsep + os.environ.get("PATH", "")
 
 
 def get_face(img, app):
@@ -53,7 +60,7 @@ def _get_models(use_gpu: bool):
     return _model_cache[use_gpu]
 
 
-def swap_faces_in_video(source_face_path: str, target_video_path: str, output_path: str, use_gpu: bool = True) -> bool:
+def swap_faces_in_video(source_face_path: str, target_video_path: str, output_path: str, use_gpu: bool = True, progress_callback=None, cancel_callback=None) -> bool:
     """
     target_video의 모든 프레임에서 얼굴을 source_face로 교체.
     use_gpu=True면 CUDAExecutionProvider 우선 시도(실측 10초/720p 기준 CPU 671초 → GPU 51초, 약 13배).
@@ -77,12 +84,18 @@ def swap_faces_in_video(source_face_path: str, target_video_path: str, output_pa
     fps    = cap.get(cv2.CAP_PROP_FPS) or 25
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
     tmp_path = str(output_path) + "_tmp.mp4"
     out = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
 
     frame_count = 0
     while True:
+        if cancel_callback and cancel_callback():
+            cap.release()
+            out.release()
+            Path(tmp_path).unlink(missing_ok=True)
+            return False
         ret, frame = cap.read()
         if not ret:
             break
@@ -91,9 +104,13 @@ def swap_faces_in_video(source_face_path: str, target_video_path: str, output_pa
             frame = swapper.get(frame, tgt_face, src_face, paste_back=True)
         out.write(frame)
         frame_count += 1
+        if progress_callback and (frame_count == 1 or frame_count % 10 == 0 or (total_frames and frame_count >= total_frames)):
+            progress_callback(frame_count, total_frames)
 
     cap.release()
     out.release()
+    if progress_callback:
+        progress_callback(frame_count, total_frames)
 
     # 오디오 병합
     import subprocess

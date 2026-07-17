@@ -6,15 +6,24 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import { API_BASE } from '@/config'
+import {
+  FACE_SNAPSHOT_KEY,
+  TRACKING_VIDEO_SOURCE_EVENT,
+  getFaceImageUrl,
+  getRegisteredFaceImageUrl,
+  landmarkToSavedSnapshotPoint,
+  landmarkToSavedSnapshotUv,
+  readTrackingVideoSource,
+  readFaceLandmarks,
+  saveFaceAlignmentSnapshot,
+  type FaceLandmark,
+} from '@/faceAlignment'
 
 const API      = API_BASE
 const MP_WASM  = '/mediapipe/wasm'
 const MP_MODEL = '/mediapipe/models/face_landmarker.task'
 
-const LS_SNAPSHOT  = 'mental-avatar-face-snapshot'
-const LS_LANDMARKS = 'mental-avatar-face-landmarks'
-
-type LM = { x: number; y: number; z: number }
+type LM = FaceLandmark
 
 /**
  * 캡처한 프레임이 사실상 검은 화면인지 판단한다.
@@ -57,6 +66,7 @@ function drawMirrored(ctx: CanvasRenderingContext2D, source: CanvasImageSource, 
   ctx.restore()
 }
 
+
 // 얼굴 주요 윤곽(눈/입/눈썹/얼굴선) — 3D 와이어프레임과 2D 정렬 확인 미리보기가 공유한다.
 const FACE_CONTOUR_GROUPS: number[][] = [
   [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,10], // OVAL
@@ -96,9 +106,11 @@ interface Props {
   onBlendshapes?: (scores: Record<string, number> | null) => void
   /** 매 프레임 추적된 머리 회전(라디안, 추적 중단 시 null) — 다른 3D 아바타의 고개 방향 구동에 사용 */
   onHeadPose?: (pose: { pitch: number; yaw: number; roll: number } | null) => void
+  /** 브라우저에 남은 이전 snapshot 대신 서버에 현재 등록된 얼굴 이미지를 우선 표시한다. */
+  preferRegisteredFace?: boolean
 }
 
-export default function FaceTrackingPanel({ className = '', compact = false, onBlendshapes, onHeadPose }: Props) {
+export default function FaceTrackingPanel({ className = '', compact = false, onBlendshapes, onHeadPose, preferRegisteredFace = false }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoRef  = useRef<HTMLVideoElement>(null)
 
@@ -110,16 +122,28 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const videoTexRef = useRef<THREE.Texture | null>(null)
   const videoTexCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const videoTexCtxRef = useRef<CanvasRenderingContext2D | null>(null)
+  const frameDetectCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const frameDetectCtxRef = useRef<CanvasRenderingContext2D | null>(null)
   const rafRef      = useRef<number>(0)
 
   const landmarkerRef = useRef<unknown>(null)
   const streamRef     = useRef<MediaStream | null>(null)
   const lastTsRef     = useRef(0)
   const lastLandmarksRef = useRef<LM[] | null>(null)
+  const trackingNeutralLandmarksRef = useRef<LM[] | null>(null)
+  const trackingBaseLandmarksRef = useRef<LM[] | null>(null)
+  const trackingLoopTokenRef = useRef(0)
   const textureLandmarksRef = useRef<LM[] | null>(null)
+  const textureMirroredRef = useRef(true)
+  // 등록 얼굴에서 랜드마크를 못 찾은 채 추적에 들어갔는지. 이 경우 UV가 영상 인물의 좌표로
+  // 폴백해 텍스처가 어긋난 채 따라다니는데, 안내가 뒤 단계 메시지에 덮여 보이지 않았다.
+  const faceTextureMissingRef = useRef(false)
+  const trackingFrameReadyRef = useRef(false)
   const autoSavedFaceRef = useRef(false)
   const staticTexRef  = useRef<THREE.Texture | null>(null)
   const faceIndexReadyRef = useRef(false)
+  const mirroredInputRef = useRef(true)
+  const motionSourceOnlyRef = useRef(false)
   const onBlendshapesRef = useRef(onBlendshapes)
   useEffect(() => { onBlendshapesRef.current = onBlendshapes }, [onBlendshapes])
   const onHeadPoseRef = useRef(onHeadPose)
@@ -131,10 +155,12 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const [showMesh, setShowMesh]       = useState(true)
   const [videoAspect, setVideoAspect] = useState('4/3')
   const [hasLiveVideo, setHasLiveVideo] = useState(false)
+  const [mirroredInput, setMirroredInput] = useState(true)
   const [recording, setRecording]     = useState(false)
   const [recStatus, setRecStatus]     = useState('')
   const [resultUrl, setResultUrl]     = useState<string | null>(null)
   const [hasSavedFace, setHasSavedFace] = useState(false)
+  const [trackingVideoSource, setTrackingVideoSource] = useState(() => readTrackingVideoSource())
   const recorderRef  = useRef<MediaRecorder | null>(null)
   const recChunksRef = useRef<Blob[]>([])
 
@@ -142,6 +168,105 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const alignCanvasRef = useRef<HTMLCanvasElement>(null)
   const [showAlignCheck, setShowAlignCheck] = useState(false)
   const [alignCheckMsg, setAlignCheckMsg] = useState('')
+
+  const resetVideoTrackingState = useCallback((closeLandmarker = false) => {
+    trackingLoopTokenRef.current += 1
+    lastTsRef.current = 0
+    lastLandmarksRef.current = null
+    trackingNeutralLandmarksRef.current = null
+    trackingBaseLandmarksRef.current = null
+    trackingFrameReadyRef.current = false
+    faceTextureMissingRef.current = false
+    frameDetectCanvasRef.current = null
+    frameDetectCtxRef.current = null
+    wireRef.current?.geometry.setDrawRange(0, 0)
+    if (faceMeshRef.current) {
+      const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
+      mat.opacity = 0
+      mat.needsUpdate = true
+    }
+    if (closeLandmarker && landmarkerRef.current) {
+      try {
+        ;(landmarkerRef.current as { close?: () => void }).close?.()
+      } catch { /* ignore MediaPipe cleanup errors */ }
+      landmarkerRef.current = null
+    }
+  }, [])
+
+  const hideTrackedFace = useCallback(() => {
+    lastLandmarksRef.current = null
+    wireRef.current?.geometry.setDrawRange(0, 0)
+    if (faceMeshRef.current) {
+      const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
+      mat.opacity = 0
+      mat.needsUpdate = true
+    }
+  }, [])
+
+  const applyTrackingVideoSource = useCallback((source = readTrackingVideoSource()) => {
+    setTrackingVideoSource(source)
+    const video = videoRef.current
+    resetVideoTrackingState(true)
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    streamRef.current = null
+    motionSourceOnlyRef.current = false
+    onBlendshapesRef.current?.(null)
+    onHeadPoseRef.current?.(null)
+
+    if (!source || !video) {
+      if (video) {
+        video.pause()
+        video.removeAttribute('src')
+        video.load()
+      }
+      setHasLiveVideo(false)
+      setStatus('idle')
+      setStatusMsg('')
+      setMirroredInput(true)
+      mirroredInputRef.current = true
+      return
+    }
+
+    video.srcObject = null
+    video.src = source.url
+    video.loop = true
+    video.muted = true
+    video.load()
+    mirroredInputRef.current = false
+    setMirroredInput(false)
+    setHasLiveVideo(true)
+    setStatusMsg(`Registered video ready: ${source.name}`)
+    const syncAspect = () => {
+      const vw = video.videoWidth || 640
+      const vh = video.videoHeight || 480
+      setVideoAspect(`${vw}/${vh}`)
+    }
+    video.onloadedmetadata = syncAspect
+    video.play().catch(() => {})
+    setStatus('idle')
+  }, [resetVideoTrackingState])
+
+  useEffect(() => {
+    applyTrackingVideoSource()
+    const onTrackingVideoChange = (event: Event) => {
+      const detail = (event as CustomEvent).detail
+      applyTrackingVideoSource(detail ?? readTrackingVideoSource())
+    }
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'mental-avatar-tracking-video-source') applyTrackingVideoSource()
+    }
+    window.addEventListener(TRACKING_VIDEO_SOURCE_EVENT, onTrackingVideoChange)
+    window.addEventListener('storage', onStorage)
+    return () => {
+      window.removeEventListener(TRACKING_VIDEO_SOURCE_EVENT, onTrackingVideoChange)
+      window.removeEventListener('storage', onStorage)
+      if (videoRef.current) videoRef.current.onloadedmetadata = null
+    }
+  }, [applyTrackingVideoSource])
+
+  const getTextureFaceUrl = useCallback(() => (
+    preferRegisteredFace ? getRegisteredFaceImageUrl() : getFaceImageUrl()
+  ), [preferRegisteredFace])
 
   // ── Three.js 씬 초기화 (OrthographicCamera: 랜드마크 좌표 → 직접 매핑) ──
   useEffect(() => {
@@ -268,13 +393,36 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     }
   }, [ensureFaceIndex])
 
+  const detectImageLandmarks = useCallback(async (imageUrl: string): Promise<LM[] | null> => {
+    try {
+      const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision')
+      const vision = await FilesetResolver.forVisionTasks(MP_WASM)
+      const detector = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MP_MODEL, delegate: 'CPU' },
+        runningMode: 'IMAGE',
+        numFaces: 1,
+        minFaceDetectionConfidence: 0.3,
+        minFacePresenceConfidence: 0.3,
+      })
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.src = imageUrl
+      await img.decode()
+      const result = detector.detect(img)
+      detector.close()
+      return result.faceLandmarks?.[0] as LM[] || null
+    } catch {
+      return null
+    }
+  }, [])
+
   const updateFaceMesh = useCallback((lms: LM[]) => {
     const cam = cameraRef.current
     const aspect = cam ? cam.right : 1
 
     const S = 0.96
     const toWorld = (lm: LM) => ({
-      x: -(lm.x - 0.5) * 2 * aspect * S,
+      x: (mirroredInputRef.current ? -1 : 1) * (lm.x - 0.5) * 2 * aspect * S,
       y: -(lm.y - 0.5) * 2 * S,
       z: lm.z * 0.3,
     })
@@ -288,14 +436,17 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       const uvSource = textureLandmarksRef.current ?? lms
       // textureLandmarksRef가 설정된 경우 = 등록된 정지사진(거울모드로 저장됨)을 텍스처로 쓰는 중.
       // 라이브 트래킹 중(uvSource === lms, 원본/비거울 캔버스 텍스처)에는 뒤집지 않는다.
-      const usingMirroredStaticPhoto = textureLandmarksRef.current !== null
+      const usingStaticPhoto = textureLandmarksRef.current !== null
       for (let i = 0; i < Math.min(lms.length, 478); i++) {
         const { x, y, z } = toWorld(lms[i])
         pos[i*3] = x; pos[i*3+1] = y; pos[i*3+2] = z
         const uv = uvSource[i]
         if (uvArr && uv) {
-          uvArr[i*2]   = usingMirroredStaticPhoto ? 1 - uv.x : uv.x
-          uvArr[i*2+1] = 1 - uv.y
+          const mappedUv = usingStaticPhoto
+            ? (textureMirroredRef.current ? landmarkToSavedSnapshotUv(uv) : { u: uv.x, v: 1 - uv.y })
+            : { u: uv.x, v: 1 - uv.y }
+          uvArr[i*2]   = mappedUv.u
+          uvArr[i*2+1] = mappedUv.v
         }
       }
       mesh.geometry.attributes.position.needsUpdate = true
@@ -327,7 +478,39 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     }
   }, [])
 
-  const trackLoop = useCallback((lm: unknown) => {
+  const applyTrackingMotion = useCallback((landmarks: LM[]) => {
+    const base = trackingBaseLandmarksRef.current
+    if (!base?.length) return landmarks
+
+    let neutral = trackingNeutralLandmarksRef.current
+    if (!neutral?.length) {
+      neutral = landmarks.map(point => ({ ...point }))
+      trackingNeutralLandmarksRef.current = neutral
+      return base
+    }
+
+    const baseLeft = base[234]
+    const baseRight = base[454]
+    const neutralLeft = neutral[234]
+    const neutralRight = neutral[454]
+    const baseWidth = baseLeft && baseRight ? Math.abs(baseRight.x - baseLeft.x) : 1
+    const neutralWidth = neutralLeft && neutralRight ? Math.abs(neutralRight.x - neutralLeft.x) : 1
+    const motionScale = neutralWidth > 0.0001 ? baseWidth / neutralWidth : 1
+
+    return base.map((basePoint, index) => {
+      const currentPoint = landmarks[index]
+      const neutralPoint = neutral![index]
+      if (!currentPoint || !neutralPoint) return basePoint
+      return {
+        x: basePoint.x + (currentPoint.x - neutralPoint.x) * motionScale,
+        y: basePoint.y + (currentPoint.y - neutralPoint.y) * motionScale,
+        z: basePoint.z + (currentPoint.z - neutralPoint.z) * motionScale,
+      }
+    })
+  }, [])
+
+  const trackLoop = useCallback((lm: unknown, token = trackingLoopTokenRef.current) => {
+    if (token !== trackingLoopTokenRef.current) return
     const video = videoRef.current
     if (!video || video.paused || video.ended) return
     if (video.readyState >= 2) {
@@ -336,13 +519,38 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         lastTsRef.current = now
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const r = (lm as any).detectForVideo(video, now)
+          let detectSource: HTMLVideoElement | HTMLCanvasElement = video
+          if (motionSourceOnlyRef.current) {
+            const width = video.videoWidth
+            const height = video.videoHeight
+            if (!width || !height) {
+              requestAnimationFrame(() => trackLoop(lm, token))
+              return
+            }
+            let frameCanvas = frameDetectCanvasRef.current
+            if (!frameCanvas || frameCanvas.width !== width || frameCanvas.height !== height) {
+              frameCanvas = document.createElement('canvas')
+              frameCanvas.width = width
+              frameCanvas.height = height
+              frameDetectCanvasRef.current = frameCanvas
+              frameDetectCtxRef.current = frameCanvas.getContext('2d', { willReadFrequently: true })
+            }
+            const frameCtx = frameDetectCtxRef.current
+            if (!frameCtx) {
+              hideTrackedFace()
+              requestAnimationFrame(() => trackLoop(lm, token))
+              return
+            }
+            frameCtx.drawImage(video, 0, 0, width, height)
+            detectSource = frameCanvas
+          }
+          const r = (lm as any).detectForVideo(detectSource, now)
           if (r.faceLandmarks?.length > 0) {
             const landmarks = r.faceLandmarks[0] as LM[]
             // 첫 사용자(등록된 얼굴이 아직 없는 경우)는 최초 한 번 얼굴을 자동 저장해둔다.
             // 라이브 텍스처는 계속 그대로 사용한다 — 여기서 정지사진으로 바꾸면
             // 이후 라이브 트래킹 내내 그 순간의 포즈로 텍스처가 고정되어 어긋나 보인다.
-            if (!autoSavedFaceRef.current && !localStorage.getItem(LS_SNAPSHOT)) {
+            if (mirroredInputRef.current && !autoSavedFaceRef.current && !localStorage.getItem(FACE_SNAPSHOT_KEY)) {
               const snapCanvas = document.createElement('canvas')
               snapCanvas.width = video.videoWidth || 640
               snapCanvas.height = video.videoHeight || 480
@@ -352,16 +560,31 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
                 if (!isFrameTooDark(snapCanvas)) {
                   const dataUrl = snapCanvas.toDataURL('image/jpeg', 0.85)
                   try {
-                    localStorage.setItem(LS_SNAPSHOT, dataUrl)
-                    localStorage.setItem(LS_LANDMARKS, JSON.stringify(landmarks))
+                    saveFaceAlignmentSnapshot(dataUrl, landmarks, snapCanvas.width, snapCanvas.height)
                   } catch { /* ignore storage quota errors */ }
                   autoSavedFaceRef.current = true
                   setHasSavedFace(true)
                 }
               }
             }
-            updateFaceMesh(landmarks)
+            const drivenLandmarks = motionSourceOnlyRef.current
+              ? applyTrackingMotion(landmarks)
+              : landmarks
+            updateFaceMesh(drivenLandmarks)
             lastLandmarksRef.current = landmarks
+            if (motionSourceOnlyRef.current && !trackingFrameReadyRef.current) {
+              trackingFrameReadyRef.current = true
+              if (faceMeshRef.current) {
+                const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
+                mat.opacity = 0.92
+                mat.needsUpdate = true
+              }
+              // 등록 얼굴 랜드마크가 없으면 경고를 유지한다 — 여기서 덮으면 어긋난 매핑이
+              // 정상 추적처럼 보인다(이 화면의 원래 문제).
+              if (!faceTextureMissingRef.current) setStatusMsg('Tracking current frame landmarks')
+            }
+          } else if (motionSourceOnlyRef.current) {
+            hideTrackedFace()
           }
           if (onBlendshapesRef.current && r.faceBlendshapes?.length > 0) {
             const scores: Record<string, number> = {}
@@ -373,13 +596,97 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
             const euler = new THREE.Euler().setFromRotationMatrix(m, 'YXZ')
             onHeadPoseRef.current({ pitch: euler.x, yaw: euler.y, roll: euler.z })
           }
-        } catch { /* 일시적 오류 무시 */ }
+        } catch { if (motionSourceOnlyRef.current) hideTrackedFace() }
       }
     }
-    requestAnimationFrame(() => trackLoop(lm))
-  }, [updateFaceMesh])
+    requestAnimationFrame(() => trackLoop(lm, token))
+  }, [applyTrackingMotion, hideTrackedFace, updateFaceMesh])
 
   const startTracking = useCallback(async () => {
+    const registeredSource = trackingVideoSource ?? readTrackingVideoSource()
+    if (preferRegisteredFace && !registeredSource) {
+      setStatus('error')
+      setStatusMsg('등록된 추적 영상이 없습니다')
+      return
+    }
+    if (registeredSource && status !== 'tracking' && status !== 'loading') {
+      const video = videoRef.current
+      if (!video) return
+
+      setTrackingVideoSource(registeredSource)
+      setStatus('loading')
+      setStatusMsg(`Loading registered video: ${registeredSource.name}`)
+      resetVideoTrackingState(true)
+      streamRef.current?.getTracks().forEach(t => t.stop())
+      streamRef.current = null
+      video.srcObject = null
+      if (video.src !== registeredSource.url) video.src = registeredSource.url
+      video.loop = true
+      video.muted = true
+      try { video.currentTime = 0 } catch { /* ignore seek errors before metadata */ }
+      mirroredInputRef.current = false
+      motionSourceOnlyRef.current = true
+      setMirroredInput(false)
+
+      try {
+        await video.play()
+        setHasLiveVideo(true)
+        setStatus('tracking')
+      } catch (err) {
+        setHasLiveVideo(false)
+        setStatus('error')
+        setStatusMsg('Registered video playback error: ' + (err instanceof Error ? err.message : String(err)))
+        return
+      }
+
+      const lm = await initLandmarker()
+      if (!lm) return
+
+      const vw = video.videoWidth || 640
+      const vh = video.videoHeight || 480
+      setVideoAspect(`${vw}/${vh}`)
+      const a = vw / vh
+      const cam = cameraRef.current
+      if (cam) { cam.left = -a; cam.right = a; cam.updateProjectionMatrix() }
+      const canvas = canvasRef.current
+      if (canvas && rendererRef.current) {
+        rendererRef.current.setSize(canvas.clientWidth, canvas.clientHeight, false)
+      }
+
+      staticTexRef.current?.dispose()
+      staticTexRef.current = null
+      videoTexRef.current?.dispose()
+      videoTexRef.current = null
+      videoTexCanvasRef.current = null
+      videoTexCtxRef.current = null
+
+      const textureUrl = getTextureFaceUrl()
+      const detectedTextureLandmarks = preferRegisteredFace ? await detectImageLandmarks(textureUrl) : null
+      const savedLandmarks = preferRegisteredFace ? detectedTextureLandmarks : readFaceLandmarks()
+      textureLandmarksRef.current = savedLandmarks?.length ? savedLandmarks : null
+      trackingBaseLandmarksRef.current = savedLandmarks?.length ? savedLandmarks : null
+      trackingNeutralLandmarksRef.current = null
+      textureMirroredRef.current = !detectedTextureLandmarks
+      faceTextureMissingRef.current = preferRegisteredFace && !textureLandmarksRef.current
+      const tex = new THREE.TextureLoader().load(textureUrl)
+      tex.minFilter = THREE.LinearFilter
+      tex.magFilter = THREE.LinearFilter
+      tex.generateMipmaps = false
+      tex.colorSpace = THREE.SRGBColorSpace
+      staticTexRef.current = tex
+      if (faceMeshRef.current) {
+        const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
+        mat.map = tex
+        mat.opacity = 0
+        mat.needsUpdate = true
+      }
+
+      setStatusMsg(faceTextureMissingRef.current
+        ? '⚠ 등록된 얼굴에서 랜드마크를 찾지 못했습니다 — 텍스처가 어긋난 채로 추적됩니다'
+        : `Waiting for current frame landmarks: ${registeredSource.name}`)
+      trackLoop(lm, trackingLoopTokenRef.current)
+      return
+    }
     if (status === 'tracking' || status === 'loading') return
 
     setStatusMsg('웹캠 권한 요청 중…')
@@ -395,6 +702,10 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
 
     const video = videoRef.current
     if (!video) return
+    resetVideoTrackingState(true)
+    mirroredInputRef.current = true
+    motionSourceOnlyRef.current = false
+    setMirroredInput(true)
     video.srcObject = stream
     streamRef.current = stream
 
@@ -439,13 +750,12 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     videoTexCanvasRef.current = null
     videoTexCtxRef.current = null
 
-    const savedLandmarksRaw = localStorage.getItem(LS_LANDMARKS)
-    let savedLandmarks: LM[] | null = null
-    try { savedLandmarks = savedLandmarksRaw ? JSON.parse(savedLandmarksRaw) : null } catch { savedLandmarks = null }
+    const savedLandmarks = readFaceLandmarks()
 
     if (savedLandmarks?.length) {
       textureLandmarksRef.current = savedLandmarks
-      const tex = new THREE.TextureLoader().load(`${API}/avatar/face?t=${Date.now()}`)
+      textureMirroredRef.current = true
+      const tex = new THREE.TextureLoader().load(getTextureFaceUrl())
       tex.minFilter = THREE.LinearFilter
       tex.magFilter = THREE.LinearFilter
       tex.generateMipmaps = false
@@ -459,6 +769,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       }
     } else {
       textureLandmarksRef.current = null
+      textureMirroredRef.current = false
       const texCanvas = document.createElement('canvas')
       texCanvas.width = vw
       texCanvas.height = vh
@@ -480,8 +791,8 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     }
 
     setStatusMsg('트래킹 중')
-    trackLoop(lm)
-  }, [status, initLandmarker, trackLoop])
+    trackLoop(lm, trackingLoopTokenRef.current)
+  }, [status, trackingVideoSource, initLandmarker, trackLoop, detectImageLandmarks, getTextureFaceUrl, preferRegisteredFace, resetVideoTrackingState])
 
   // 마지막 프레임을 정지 이미지로 캡처해 저장 + 메시에 계속 표시(웹캠 꺼도 외형 유지)
   const captureAndPersistSnapshot = useCallback(() => {
@@ -502,8 +813,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
 
     try {
-      localStorage.setItem(LS_SNAPSHOT, dataUrl)
-      localStorage.setItem(LS_LANDMARKS, JSON.stringify(landmarks))
+      saveFaceAlignmentSnapshot(dataUrl, landmarks, canvas.width, canvas.height)
     } catch { /* 용량 초과 등은 무시 */ }
     textureLandmarksRef.current = landmarks
     // 사진이 거울모드로 저장됐으므로, 이미 그려져 있던 uv(비거울 기준)를 다시 계산해야 한다.
@@ -525,12 +835,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     setHasSavedFace(true)
 
     // 서버에도 등록(다른 화면/재시작 후에도 얼굴 이미지 재사용 가능하도록)
-    canvas.toBlob(blob => {
-      if (!blob) return
-      const form = new FormData()
-      form.append('face', blob, 'captured_face.jpg')
-      fetch(`${API}/avatar/register_face`, { method: 'POST', body: form }).catch(() => {})
-    }, 'image/jpeg', 0.85)
   }, [updateFaceMesh])
 
   // 저장된 얼굴 사진 위에 저장된 landmark를 그려서, 카메라를 켜지 않고도
@@ -543,7 +847,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
 
     setAlignCheckMsg('불러오는 중…')
     const img = new Image()
-    img.onload = () => {
+    img.onload = async () => {
       const maxW = 420
       const scale = Math.min(1, maxW / img.naturalWidth)
       const w = Math.round(img.naturalWidth * scale)
@@ -553,11 +857,11 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       ctx.clearRect(0, 0, w, h)
       ctx.drawImage(img, 0, 0, w, h)
 
-      const landmarksRaw = localStorage.getItem(LS_LANDMARKS)
-      let landmarks: LM[] | null = null
-      if (landmarksRaw) {
-        try { landmarks = JSON.parse(landmarksRaw) } catch { landmarks = null }
-      }
+      const detectedLandmarks = preferRegisteredFace ? await detectImageLandmarks(getTextureFaceUrl()) : null
+      const landmarks = preferRegisteredFace ? detectedLandmarks : readFaceLandmarks()
+      const pointFor = (p: LM) => detectedLandmarks
+        ? { x: p.x * w, y: p.y * h }
+        : landmarkToSavedSnapshotPoint(p, w, h)
       if (!landmarks?.length) {
         setAlignCheckMsg('저장된 landmark 없음 — 이 브라우저에서 아직 얼굴을 등록한 적이 없습니다.')
         return
@@ -572,7 +876,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         grp.forEach((idx, i) => {
           const p = landmarks![idx]
           if (!p) return
-          const px = (1 - p.x) * w, py = p.y * h
+          const { x: px, y: py } = pointFor(p)
           if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
         })
         ctx.stroke()
@@ -581,25 +885,28 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       ctx.fillStyle = '#ff3355'
       for (const p of landmarks) {
         ctx.beginPath()
-        ctx.arc((1 - p.x) * w, p.y * h, 1.3, 0, Math.PI * 2)
+        const point = pointFor(p)
+        ctx.arc(point.x, point.y, 1.3, 0, Math.PI * 2)
         ctx.fill()
       }
       setAlignCheckMsg(`landmark ${landmarks.length}개 · 초록 윤곽선이 눈/입/얼굴선에 겹치면 정상입니다`)
     }
     img.onerror = () => setAlignCheckMsg('등록된 얼굴 이미지를 불러올 수 없습니다.')
-    img.src = `${API}/avatar/face?t=${Date.now()}`
-  }, [])
+    img.src = getTextureFaceUrl()
+  }, [getTextureFaceUrl, detectImageLandmarks, preferRegisteredFace])
 
   useEffect(() => {
     if (showAlignCheck) drawAlignCheck()
   }, [showAlignCheck, drawAlignCheck])
 
   const stopTracking = useCallback(() => {
-    captureAndPersistSnapshot()
+    resetVideoTrackingState(false)
+    if (mirroredInputRef.current) captureAndPersistSnapshot()
     streamRef.current?.getTracks().forEach(t => t.stop())
     streamRef.current = null
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.pause() }
     setHasLiveVideo(false)
+    motionSourceOnlyRef.current = false
     wireRef.current?.geometry.setDrawRange(0, 0)
     videoTexRef.current?.dispose()
     videoTexRef.current = null
@@ -608,30 +915,29 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     setStatus('idle'); setStatusMsg('')
     onBlendshapesRef.current?.(null)
     onHeadPoseRef.current?.(null)
-  }, [captureAndPersistSnapshot])
+  }, [captureAndPersistSnapshot, resetVideoTrackingState])
 
   // 마운트 시 기본 얼굴 텍스처는 영상 탭에서 저장한 서버 등록 얼굴을 사용한다.
   useEffect(() => {
-    const landmarksRaw = localStorage.getItem(LS_LANDMARKS)
-    let landmarks: LM[] | null = null
-    if (landmarksRaw) {
-      try { landmarks = JSON.parse(landmarksRaw) } catch { landmarks = null }
-    }
-
     let cancelled = false
+    const initializationToken = trackingLoopTokenRef.current
     ;(async () => {
+      const textureUrl = getTextureFaceUrl()
+      const detectedLandmarks = preferRegisteredFace ? await detectImageLandmarks(textureUrl) : null
+      const landmarks = preferRegisteredFace ? detectedLandmarks : readFaceLandmarks()
       if (landmarks?.length) await ensureFaceIndex()
-      if (cancelled) return
+      if (cancelled || initializationToken !== trackingLoopTokenRef.current) return
+      textureMirroredRef.current = !detectedLandmarks
       if (landmarks?.length) {
         lastLandmarksRef.current = landmarks
         textureLandmarksRef.current = landmarks
-        updateFaceMesh(landmarks)
+        if (!motionSourceOnlyRef.current) updateFaceMesh(landmarks)
       } else {
         textureLandmarksRef.current = null
       }
       if (faceMeshRef.current) {
         const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
-        const tex = new THREE.TextureLoader().load(`${API}/avatar/face?t=${Date.now()}`)
+        const tex = new THREE.TextureLoader().load(textureUrl)
         tex.minFilter = THREE.LinearFilter
         tex.magFilter = THREE.LinearFilter
         tex.generateMipmaps = false
@@ -644,7 +950,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       setHasSavedFace(true)
     })()
     return () => { cancelled = true }
-  }, [ensureFaceIndex, updateFaceMesh])
+  }, [ensureFaceIndex, updateFaceMesh, getTextureFaceUrl, detectImageLandmarks, preferRegisteredFace])
 
   // ── 녹화 → 립싱크 영상 생성 ──
   const startRecording = useCallback(async () => {
@@ -716,7 +1022,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       style={{ aspectRatio: videoAspect, overflow: 'hidden' }}>
       <video ref={videoRef}
         className={`absolute inset-0 z-10 h-full w-full bg-black transition-opacity ${hasLiveVideo ? 'opacity-100' : 'opacity-0'}`}
-        style={{ transform: 'scaleX(-1)', objectFit: 'contain' }}
+        style={{ transform: mirroredInput ? 'scaleX(-1)' : 'none', objectFit: 'contain' }}
         playsInline muted />
       <canvas ref={canvasRef}
         className="pointer-events-none absolute inset-0 z-20 w-full h-full"
@@ -727,14 +1033,14 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         {status === 'tracking' ? (
           <button onClick={stopTracking}
             className="px-2.5 py-1 text-xs rounded-lg border border-red-600 bg-red-900/80 text-red-300 hover:bg-red-800 transition backdrop-blur">
-            ■ 웹캠 중지
+            {preferRegisteredFace ? '■ 영상 추적 중지' : '■ 웹캠 중지'}
           </button>
         ) : (
           <button onClick={startTracking} disabled={status === 'loading'}
             className={`px-2.5 py-1 text-xs rounded-lg border transition backdrop-blur
               ${status === 'loading' ? 'bg-gray-700/80 border-gray-600 text-gray-400'
                                      : 'bg-gray-800/80 text-gray-100 hover:bg-gray-700 border-gray-500'}`}>
-            {status === 'loading' ? '⟳ 로딩…' : '▶ 웹캠 시작'}
+            {status === 'loading' ? '⟳ 로딩…' : preferRegisteredFace ? '▶ 영상 추적 시작' : '▶ 웹캠 시작'}
           </button>
         )}
         {!compact && (
@@ -784,8 +1090,10 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       {!hasLiveVideo && !hasSavedFace && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center text-gray-500 pointer-events-none gap-1 bg-black">
           <span className="text-3xl">◈</span>
-          <p className="text-xs">웹캠 시작을 눌러주세요</p>
-          <p className="text-[11px] text-gray-600">시작 전에는 카메라와 마이크를 사용하지 않습니다</p>
+          <p className="text-xs">{preferRegisteredFace ? '영상 추적 시작을 눌러주세요' : '웹캠 시작을 눌러주세요'}</p>
+          <p className="text-[11px] text-gray-600">
+            {preferRegisteredFace ? '등록된 영상의 얼굴 움직임을 추적합니다' : '시작 전에는 카메라와 마이크를 사용하지 않습니다'}
+          </p>
         </div>
       )}
 

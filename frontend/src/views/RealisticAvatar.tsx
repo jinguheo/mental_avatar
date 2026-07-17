@@ -12,10 +12,12 @@ import type { ChatMsg, Settings } from '@/types'
 import { API_BASE } from '@/config'
 import VoiceServiceBanner from '@/components/VoiceServiceBanner'
 import { type Emotion, type LipCue, MORPH_GROUPS, RHUBARB_SHAPE_TARGETS, EMOTION_WEIGHTS, classifyEmotion } from '@/avatarMorph'
+import { FACE_ALIGNED_PATCH_KEY, FACE_SNAPSHOT_KEY, getRegisteredFaceImageUrl } from '@/faceAlignment'
 
 const API = API_BASE
 const CHAT_SINCE_KEY = 'mental-avatar-realistic-chat-since'
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
+const FACE_OVERLAY_KEY = 'mental-avatar-face-overlay'
 
 // SQLite의 created_at(datetime('now','localtime'))과 동일한 'YYYY-MM-DD HH:MM:SS' 형식(로컬시간)
 function localTimestamp(): string {
@@ -170,6 +172,229 @@ const VIEW_PRESETS: Record<ViewMode, { pos: [number, number, number]; target: [n
   upper: { pos: [0, 1.5, 1.3], target: [0, 1.45, 0], fov: 45 },
   full:  { pos: [0, 0.9, 3.0], target: [0, 0.8, 0], fov: 45 },
 }
+const FACE_TEXTURE_SIZE = 512
+const FACE_MATERIAL_RE = /face|head|skin|body|wolf3d_head|wolf3d_skin|avatar_head|avatar_face/i
+const FACE_MATERIAL_EXCLUDE_RE = /hair|eye|iris|lash|brow|teeth|tooth|mouth|tongue|gum|cloth|shirt|pant|shoe|sock|accessory|glass|lens/i
+
+interface FaceTextureData {
+  texture: THREE.CanvasTexture
+  color: THREE.Color
+}
+
+interface FaceOverlayConfig {
+  enabled: boolean
+  x: number
+  y: number
+  scale: number
+  opacity: number
+}
+
+interface FaceMeshDiagnostic {
+  mesh: string
+  material: string
+  vertices: number
+  uvCount: number
+  uvRange: string
+  matched: boolean
+}
+
+function loadFaceOverlayConfig(): FaceOverlayConfig {
+  try {
+    const raw = localStorage.getItem(FACE_OVERLAY_KEY)
+    if (raw) return { enabled: true, x: 50, y: 43, scale: 1, opacity: 0.72, ...JSON.parse(raw) }
+  } catch { /* ignore */ }
+  return { enabled: true, x: 50, y: 43, scale: 1, opacity: 0.72 }
+}
+
+function loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img) }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('face image load failed')) }
+    img.src = url
+  })
+}
+
+function drawCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, size: number) {
+  const scale = Math.max(size / img.width, size / img.height)
+  const sw = size / scale
+  const sh = size / scale
+  const sx = Math.max(0, (img.width - sw) / 2)
+  const sy = Math.max(0, (img.height - sh) * 0.38)
+  ctx.drawImage(img, sx, sy, Math.min(sw, img.width), Math.min(sh, img.height), 0, 0, size, size)
+}
+
+function sampleFaceColor(ctx: CanvasRenderingContext2D, size: number): THREE.Color {
+  const image = ctx.getImageData(0, 0, size, size).data
+  let r = 0, g = 0, b = 0, total = 0
+  const cx = size * 0.5
+  const cy = size * 0.43
+  const rx = size * 0.24
+  const ry = size * 0.32
+  for (let y = Math.floor(size * 0.18); y < Math.floor(size * 0.72); y += 4) {
+    for (let x = Math.floor(size * 0.28); x < Math.floor(size * 0.72); x += 4) {
+      const nx = (x - cx) / rx
+      const ny = (y - cy) / ry
+      if (nx * nx + ny * ny > 1) continue
+      const i = (y * size + x) * 4
+      const pr = image[i], pg = image[i + 1], pb = image[i + 2]
+      if (pr < 35 || pg < 25 || pb < 20 || pr > 245 || pg > 245 || pb > 245) continue
+      r += pr; g += pg; b += pb; total += 1
+    }
+  }
+  if (!total) return new THREE.Color(0xd8a98e)
+  return new THREE.Color(r / total / 255, g / total / 255, b / total / 255)
+}
+
+function makeSoftSkinTexture(base: THREE.Color): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = FACE_TEXTURE_SIZE
+  canvas.height = FACE_TEXTURE_SIZE
+  const ctx = canvas.getContext('2d')!
+  const baseStyle = `rgb(${Math.round(base.r * 255)}, ${Math.round(base.g * 255)}, ${Math.round(base.b * 255)})`
+  ctx.fillStyle = baseStyle
+  ctx.fillRect(0, 0, FACE_TEXTURE_SIZE, FACE_TEXTURE_SIZE)
+
+  const light = base.clone().lerp(new THREE.Color(0xffffff), 0.22)
+  const shade = base.clone().lerp(new THREE.Color(0x5a3226), 0.16)
+  const grad = ctx.createRadialGradient(
+    FACE_TEXTURE_SIZE * 0.48, FACE_TEXTURE_SIZE * 0.34, FACE_TEXTURE_SIZE * 0.08,
+    FACE_TEXTURE_SIZE * 0.5, FACE_TEXTURE_SIZE * 0.52, FACE_TEXTURE_SIZE * 0.72,
+  )
+  grad.addColorStop(0, `rgba(${Math.round(light.r * 255)}, ${Math.round(light.g * 255)}, ${Math.round(light.b * 255)}, 0.55)`)
+  grad.addColorStop(0.58, 'rgba(255,255,255,0)')
+  grad.addColorStop(1, `rgba(${Math.round(shade.r * 255)}, ${Math.round(shade.g * 255)}, ${Math.round(shade.b * 255)}, 0.2)`)
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, FACE_TEXTURE_SIZE, FACE_TEXTURE_SIZE)
+
+  const noise = ctx.getImageData(0, 0, FACE_TEXTURE_SIZE, FACE_TEXTURE_SIZE)
+  for (let i = 0; i < noise.data.length; i += 4) {
+    const n = (Math.random() - 0.5) * 5
+    noise.data[i] = Math.max(0, Math.min(255, noise.data[i] + n))
+    noise.data[i + 1] = Math.max(0, Math.min(255, noise.data[i + 1] + n))
+    noise.data[i + 2] = Math.max(0, Math.min(255, noise.data[i + 2] + n))
+  }
+  ctx.putImageData(noise, 0, 0)
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.flipY = false
+  tex.minFilter = THREE.LinearMipmapLinearFilter
+  tex.magFilter = THREE.LinearFilter
+  tex.generateMipmaps = true
+  tex.needsUpdate = true
+  return tex
+}
+
+async function buildRegisteredFaceTexture(): Promise<FaceTextureData | null> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 2500)
+  try {
+    const res = await fetch(`${API}/avatar/face?t=${Date.now()}`, { cache: 'no-store', signal: controller.signal })
+    if (!res.ok) return null
+    const img = await loadImageFromBlob(await res.blob())
+    const sampleCanvas = document.createElement('canvas')
+    sampleCanvas.width = FACE_TEXTURE_SIZE
+    sampleCanvas.height = FACE_TEXTURE_SIZE
+    const ctx = sampleCanvas.getContext('2d')
+    if (!ctx) return null
+    drawCover(ctx, img, FACE_TEXTURE_SIZE)
+    const color = sampleFaceColor(ctx, FACE_TEXTURE_SIZE)
+    return { texture: makeSoftSkinTexture(color), color }
+  } catch {
+    return null
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+function materialLabel(mesh: THREE.Mesh, material: THREE.Material) {
+  return `${mesh.name || ''} ${material.name || ''}`
+}
+
+function isFaceMaterial(mesh: THREE.Mesh, material: THREE.Material) {
+  const label = materialLabel(mesh, material)
+  return FACE_MATERIAL_RE.test(label) && !FACE_MATERIAL_EXCLUDE_RE.test(label)
+}
+
+function withFaceTexture(material: THREE.Material, face: FaceTextureData): THREE.Material {
+  const next = material.clone() as THREE.MeshStandardMaterial
+  const original = next.color?.clone?.() ?? new THREE.Color(0xffffff)
+  next.color = original.lerp(face.color, next.map ? 0.35 : 0.7)
+  if (!next.map) next.map = face.texture
+  next.roughness = Math.max(0.62, next.roughness ?? 0.7)
+  next.metalness = Math.min(0.03, next.metalness ?? 0)
+  next.needsUpdate = true
+  return next
+}
+
+function applyRegisteredFaceTexture(root: THREE.Object3D, face: FaceTextureData): number {
+  let applied = 0
+  root.traverse(obj => {
+    const mesh = obj as THREE.Mesh
+    if (!mesh.isMesh || !mesh.material) return
+    if (Array.isArray(mesh.material)) {
+      let changed = false
+      const materials = mesh.material.map(mat => {
+        if (!isFaceMaterial(mesh, mat)) return mat
+        changed = true
+        applied += 1
+        return withFaceTexture(mat, face)
+      })
+      if (changed) mesh.material = materials
+      return
+    }
+    if (isFaceMaterial(mesh, mesh.material)) {
+      mesh.material = withFaceTexture(mesh.material, face)
+      applied += 1
+    }
+  })
+  return applied
+}
+
+function inspectFaceMeshes(root: THREE.Object3D): FaceMeshDiagnostic[] {
+  const diagnostics: FaceMeshDiagnostic[] = []
+  root.traverse(obj => {
+    const mesh = obj as THREE.Mesh
+    if (!mesh.isMesh || !mesh.geometry) return
+    const geometry = mesh.geometry as THREE.BufferGeometry
+    const position = geometry.getAttribute('position')
+    const uv = geometry.getAttribute('uv')
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material].filter(Boolean)
+    const materialNames = materials.map(mat => mat?.name || '(unnamed)').join(', ')
+    const label = `${mesh.name || '(unnamed mesh)'} ${materialNames}`
+    const matched = FACE_MATERIAL_RE.test(label) && !FACE_MATERIAL_EXCLUDE_RE.test(label)
+    if (!matched && !/head|face|skin|wolf3d/i.test(label)) return
+
+    let uvRange = 'none'
+    if (uv?.count) {
+      let minU = Number.POSITIVE_INFINITY
+      let maxU = Number.NEGATIVE_INFINITY
+      let minV = Number.POSITIVE_INFINITY
+      let maxV = Number.NEGATIVE_INFINITY
+      for (let i = 0; i < uv.count; i += 1) {
+        const u = uv.getX(i)
+        const v = uv.getY(i)
+        minU = Math.min(minU, u)
+        maxU = Math.max(maxU, u)
+        minV = Math.min(minV, v)
+        maxV = Math.max(maxV, v)
+      }
+      uvRange = `u ${minU.toFixed(2)}-${maxU.toFixed(2)}, v ${minV.toFixed(2)}-${maxV.toFixed(2)}`
+    }
+
+    diagnostics.push({
+      mesh: mesh.name || '(unnamed mesh)',
+      material: materialNames || '(no material)',
+      vertices: position?.count ?? 0,
+      uvCount: uv?.count ?? 0,
+      uvRange,
+      matched,
+    })
+  })
+  return diagnostics.sort((a, b) => Number(b.matched) - Number(a.matched) || b.vertices - a.vertices)
+}
 
 interface Props {
   settings: Settings
@@ -188,6 +413,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const animFrameRef = useRef<number>(0)
   const objectUrlRef = useRef<string | null>(null)
   const envTextureRef = useRef<THREE.Texture | null>(null)
+  const faceTextureRef = useRef<THREE.Texture | null>(null)
   const morphMapRef = useRef<Record<string, MorphRef[]>>({})
   const morphGroupsRef = useRef<Record<string, string[]>>({})
   const morphValuesRef = useRef<Record<string, number>>({})
@@ -210,9 +436,35 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const [showList, setShowList] = useState(false)
   const [showGuide, setShowGuide] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>(() => viewModeRef.current)
+  const [faceTextureStatus, setFaceTextureStatus] = useState('')
+  const [faceOverlay, setFaceOverlay] = useState<FaceOverlayConfig>(loadFaceOverlayConfig)
+  const [faceOverlayUrl, setFaceOverlayUrl] = useState('')
+  const [faceMeshDiagnostics, setFaceMeshDiagnostics] = useState<FaceMeshDiagnostic[]>([])
 
-  const setView = useCallback((mode: ViewMode) => {
-    setViewMode(mode); viewModeRef.current = mode
+  const updateFaceOverlay = useCallback((patch: Partial<FaceOverlayConfig>) => {
+    setFaceOverlay(prev => {
+      const next = { ...prev, ...patch }
+      localStorage.setItem(FACE_OVERLAY_KEY, JSON.stringify(next))
+      return next
+    })
+  }, [])
+
+  const resetFaceOverlay = useCallback(() => {
+    updateFaceOverlay({ enabled: true, x: 50, y: 43, scale: 1, opacity: 0.72 })
+  }, [updateFaceOverlay])
+
+  const refreshFaceOverlayUrl = useCallback(async (force = false) => {
+    if (force) localStorage.removeItem(FACE_ALIGNED_PATCH_KEY)
+    if (force) localStorage.removeItem(FACE_SNAPSHOT_KEY)
+    setFaceOverlayUrl(getRegisteredFaceImageUrl())
+  }, [])
+
+  useEffect(() => {
+    if (!avatarLoaded) return
+    refreshFaceOverlayUrl()
+  }, [avatarLoaded, fileName, refreshFaceOverlayUrl])
+
+  const setView = useCallback((mode: ViewMode) => {    setViewMode(mode); viewModeRef.current = mode
     localStorage.setItem(VIEW_MODE_KEY, mode)
     const preset = VIEW_PRESETS[mode]
     if (cameraRef.current && controlsRef.current) {
@@ -462,9 +714,11 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const loadGLB = useCallback((url: string) => {
     const container = containerRef.current
     if (!container) return
-    setLoading(true); setError(''); setAvatarLoaded(false)
+    setLoading(true); setError(''); setAvatarLoaded(false); setFaceTextureStatus('')
+    setFaceMeshDiagnostics([])
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
     if (rendererRef.current) { rendererRef.current.dispose(); container.innerHTML = '' }
+    faceTextureRef.current?.dispose(); faceTextureRef.current = null
 
     const rect = container.getBoundingClientRect()
     const w = rect.width || container.offsetWidth || 800
@@ -515,6 +769,15 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
       gltf.scene.position.sub(center.multiplyScalar(scale))
       gltf.scene.position.y += size.y * scale * 0.5 - 0.1
       scene.add(gltf.scene)
+      setFaceMeshDiagnostics(inspectFaceMeshes(gltf.scene))
+      buildRegisteredFaceTexture().then(face => {
+        if (!face) { setFaceTextureStatus('Face photo not registered'); return }
+        faceTextureRef.current?.dispose()
+        faceTextureRef.current = face.texture
+        const count = applyRegisteredFaceTexture(gltf.scene, face)
+        setFaceTextureStatus(count > 0 ? `Face tone blended (${count})` : 'Face material not found')
+        if (count === 0) face.texture.dispose()
+      }).catch(() => setFaceTextureStatus('Face tone failed'))
       if (gltf.animations.length > 0) {
         const mixer = new THREE.AnimationMixer(gltf.scene); mixerRef.current = mixer
         const idle = gltf.animations.find(a => /idle|stand|wait/i.test(a.name)) ?? gltf.animations[0]
@@ -697,6 +960,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
     rendererRef.current?.dispose()
     envTextureRef.current?.dispose()
+    faceTextureRef.current?.dispose()
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
   }, [])
 
@@ -796,6 +1060,24 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
       >
         <div ref={containerRef} className="w-full h-full" />
+        {faceOverlay.enabled && avatarLoaded && faceOverlayUrl && (
+          <img
+            src={faceOverlayUrl}
+            alt="registered face overlay"
+            className="face-overlay-image pointer-events-none absolute z-10 select-none rounded-[42%] object-cover shadow-[0_0_32px_rgba(0,0,0,0.28)]"
+            style={{
+              left: `${faceOverlay.x}%`,
+              top: `${faceOverlay.y}%`,
+              width: `${Math.round(190 * faceOverlay.scale)}px`,
+              height: `${Math.round(245 * faceOverlay.scale)}px`,
+              opacity: faceOverlay.opacity,
+              transform: 'translate(-50%, -50%)',
+              clipPath: 'ellipse(42% 48% at 50% 47%)',
+              mixBlendMode: 'normal',
+            }}
+            onError={() => updateFaceOverlay({ enabled: false })}
+          />
+        )}
 
         {/* 파일 선택 + 목록 (좌상단) */}
         <div className="absolute top-3 left-3 z-20 flex flex-col gap-1">
@@ -816,6 +1098,105 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
           </div>
           {avatarLoaded && fileName && (
             <p className="text-[10px] text-gray-400 px-1 truncate max-w-[220px]">현재: {fileName}</p>
+          )}
+          {faceTextureStatus && (
+            <p className="text-[10px] text-purple-200/90 px-1 truncate max-w-[260px]">{faceTextureStatus}</p>
+          )}
+          {avatarLoaded && (
+            <div className="mt-1 w-[220px] rounded-xl border border-gray-700 bg-black/60 p-2 text-[10px] text-gray-300 backdrop-blur">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="font-medium text-gray-200">Face align</span>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => updateFaceOverlay({ enabled: !faceOverlay.enabled })}
+                    className="rounded border border-gray-600 px-1.5 py-0.5 text-gray-300 hover:border-gray-400 hover:text-white"
+                  >
+                    {faceOverlay.enabled ? 'Hide' : 'Show'}
+                  </button>
+                  <button
+                    onClick={resetFaceOverlay}
+                    className="rounded border border-gray-600 px-1.5 py-0.5 text-gray-300 hover:border-gray-400 hover:text-white"
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={() => refreshFaceOverlayUrl(true)}
+                    className="rounded border border-gray-600 px-1.5 py-0.5 text-gray-300 hover:border-gray-400 hover:text-white"
+                  >
+                    Reload
+                  </button>
+                </div>
+              </div>
+              <label className="mb-1 block">
+                X {faceOverlay.x.toFixed(1)}%
+                <input
+                  type="range"
+                  min="30"
+                  max="70"
+                  step="0.2"
+                  value={faceOverlay.x}
+                  onChange={e => updateFaceOverlay({ x: Number(e.target.value) })}
+                  className="mt-0.5 w-full accent-purple-500"
+                />
+              </label>
+              <label className="mb-1 block">
+                Y {faceOverlay.y.toFixed(1)}%
+                <input
+                  type="range"
+                  min="20"
+                  max="65"
+                  step="0.2"
+                  value={faceOverlay.y}
+                  onChange={e => updateFaceOverlay({ y: Number(e.target.value) })}
+                  className="mt-0.5 w-full accent-purple-500"
+                />
+              </label>
+              <label className="mb-1 block">
+                Size {faceOverlay.scale.toFixed(2)}
+                <input
+                  type="range"
+                  min="0.45"
+                  max="1.6"
+                  step="0.01"
+                  value={faceOverlay.scale}
+                  onChange={e => updateFaceOverlay({ scale: Number(e.target.value) })}
+                  className="mt-0.5 w-full accent-purple-500"
+                />
+              </label>
+              <label className="block">
+                Opacity {faceOverlay.opacity.toFixed(2)}
+                <input
+                  type="range"
+                  min="0.15"
+                  max="1"
+                  step="0.01"
+                  value={faceOverlay.opacity}
+                  onChange={e => updateFaceOverlay({ opacity: Number(e.target.value) })}
+                  className="mt-0.5 w-full accent-purple-500"
+                />
+              </label>
+            </div>
+          )}
+          {avatarLoaded && faceMeshDiagnostics.length > 0 && (
+            <div className="mt-1 w-[260px] rounded-xl border border-gray-700 bg-black/60 p-2 text-[10px] text-gray-300 backdrop-blur">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="font-medium text-gray-200">GLB face UV</span>
+                <span className="text-gray-500">{faceMeshDiagnostics.length}</span>
+              </div>
+              <div className="max-h-28 space-y-1 overflow-y-auto pr-1">
+                {faceMeshDiagnostics.slice(0, 6).map((item, index) => (
+                  <div key={`${item.mesh}-${index}`} className={item.matched ? 'text-purple-100' : 'text-gray-400'}>
+                    <div className="truncate">
+                      {item.matched ? 'target ' : 'candidate '}
+                      {item.mesh}
+                    </div>
+                    <div className="truncate text-gray-500">
+                      {item.material} · vtx {item.vertices} · uv {item.uvCount} · {item.uvRange}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
           <button
             onClick={() => setShowGuide(v => !v)}
