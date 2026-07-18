@@ -97,9 +97,14 @@ def list_nodes(source_type: str = "", limit: int = 50) -> list[dict]:
 
 # ── 엣지 ──────────────────────────────────────────────
 
-def search_nodes(type: str = "", source_type: str = "", view: str = "",
-                 q: str = "", limit: int = 50, offset: int = 0) -> dict:
-    """데이터 관리 화면용 노드 조회. {nodes, total}.
+def search_nodes_admin(type: str = "", source_type: str = "", view: str = "",
+                       q: str = "", limit: int = 50, offset: int = 0) -> dict:
+    """데이터 관리 화면(KgDataManager)용 노드 조회. {nodes, total}.
+
+    ⚠️ 예전엔 이름이 search_nodes()였는데, 그러면 위쪽(73번째 줄)의 키워드 검색용
+    search_nodes(query, limit)를 덮어써서 /search 엔드포인트가 500으로 죽었다
+    (반환형이 list→dict로 바뀌어 호출부가 dict를 list처럼 순회/인덱싱하며 크래시).
+    이름을 분리해 그 충돌을 없앤다.
 
     기존 list_nodes()는 link_similar가 쓰고 있어 시그니처를 못 바꾸므로 별도 함수로 둔다.
     view(대화의 화면 구분)는 별도 컬럼이 아니라 file_path에 'conversation://<view>/<id>'
