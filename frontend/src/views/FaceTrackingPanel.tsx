@@ -164,8 +164,8 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
 
   const [status, setStatus]           = useState<'idle' | 'loading' | 'tracking' | 'error'>('idle')
   const [statusMsg, setStatusMsg]     = useState('')
-  const [showWire, setShowWire]       = useState(true)
-  const [showMesh, setShowMesh]       = useState(true)
+  const [showWire, setShowWire]       = useState(false)
+  const [showMesh, setShowMesh]       = useState(false)
   const [videoAspect, setVideoAspect] = useState('4/3')
   const [hasLiveVideo, setHasLiveVideo] = useState(false)
   const [mirroredInput, setMirroredInput] = useState(true)
@@ -174,11 +174,13 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const [resultUrl, setResultUrl]     = useState<string | null>(null)
   const [hasSavedFace, setHasSavedFace] = useState(false)
   const [localImageUrl, setLocalImageUrl] = useState<string | null>(() => {
-    try { return sessionStorage.getItem(localImageSessionKey) }
+    // File/blob URLs die when the page or computer restarts. The FileReader
+    // copy in localStorage is the durable source for the last selected image.
+    try { return localStorage.getItem(localImageSessionKey) || sessionStorage.getItem(localImageSessionKey) }
     catch { return null }
   })
   const [localImageName, setLocalImageName] = useState(() => {
-    try { return sessionStorage.getItem(localImageNameSessionKey) || '' }
+    try { return localStorage.getItem(localImageNameSessionKey) || sessionStorage.getItem(localImageNameSessionKey) || '' }
     catch { return '' }
   })
   const [alignedFaceDisplayUrl, setAlignedFaceDisplayUrl] = useState<string | null>(() => {
@@ -290,12 +292,23 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     } catch { /* storage quota */ }
     setLocalImageUrl(url)
     setLocalImageName(file.name)
-    try { sessionStorage.removeItem(localImageSessionKey); sessionStorage.setItem(localImageNameSessionKey, file.name) } catch { /* storage quota */ }
+    try {
+      sessionStorage.removeItem(localImageSessionKey)
+      localStorage.setItem(localImageNameSessionKey, file.name)
+      sessionStorage.setItem(localImageNameSessionKey, file.name)
+    } catch { /* storage quota */ }
     const reader = new FileReader()
     reader.onload = () => {
       if (typeof reader.result === 'string') {
-        try { localStorage.setItem(localImageSessionKey, reader.result) } catch {
-          try { sessionStorage.setItem(localImageSessionKey, reader.result) } catch { /* storage quota */ }
+        try {
+          localStorage.setItem(localImageSessionKey, reader.result)
+          localStorage.setItem(localImageNameSessionKey, file.name)
+          sessionStorage.removeItem(localImageSessionKey)
+        } catch {
+          try {
+            sessionStorage.setItem(localImageSessionKey, reader.result)
+            sessionStorage.setItem(localImageNameSessionKey, file.name)
+          } catch { /* storage quota */ }
         }
       }
     }
@@ -950,8 +963,12 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
 
       // landmark는 원본(비거울) 좌표, 사진은 거울모드로 저장되므로 x를 뒤집어서 겹쳐야 한다.
       // 윤곽선(초록) — 사진 속 이목구비 위치에 landmark가 실제로 겹치는지 확인
-      ctx.strokeStyle = '#22ff88'
-      ctx.lineWidth = 1.5
+      ctx.save()
+      ctx.globalAlpha = 0
+      ctx.strokeStyle = '#39ff9a'
+      ctx.lineWidth = Math.max(2.5, Math.min(w, h) / 180)
+      ctx.shadowColor = '#061a12'
+      ctx.shadowBlur = Math.max(2, Math.min(w, h) / 90)
       for (const grp of FACE_CONTOUR_GROUPS) {
         ctx.beginPath()
         grp.forEach((idx, i) => {
@@ -963,13 +980,20 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         ctx.stroke()
       }
       // 점(빨강) — 전체 landmark
+      ctx.restore()
+      ctx.save()
+      ctx.globalAlpha = 0
       ctx.fillStyle = '#ff3355'
+      ctx.strokeStyle = '#fff'
+      ctx.lineWidth = Math.max(0.8, Math.min(w, h) / 420)
       for (const p of landmarks) {
         ctx.beginPath()
         const point = pointFor(p)
-        ctx.arc(point.x, point.y, 1.3, 0, Math.PI * 2)
+        ctx.arc(point.x, point.y, Math.max(2, Math.min(w, h) / 150), 0, Math.PI * 2)
         ctx.fill()
+        ctx.stroke()
       }
+      ctx.restore()
       setAlignCheckMsg(`landmark ${landmarks.length}개 · 초록 윤곽선이 눈/입/얼굴선에 겹치면 정상입니다`)
     }
     img.onerror = () => setAlignCheckMsg(isolatedVideo ? '선택한 영상을 불러올 수 없습니다.' : '등록된 얼굴 이미지를 불러올 수 없습니다.')

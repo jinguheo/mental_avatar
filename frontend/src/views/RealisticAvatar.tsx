@@ -21,6 +21,8 @@ const THREE_D_ALIGNED_FACE_KEY = 'mental-avatar-3d-aligned-face-display'
 const THREE_D_ORIGINAL_FACE_KEY = 'mental-avatar-3d-face-image'
 const THREE_D_ALIGNED_LANDMARKS_KEY = 'mental-avatar-3d-aligned-landmarks'
 const UV_WARP_WEIGHT_KEY = 'mental-avatar-uv-warp-weight'
+const FACE_TEXTURE_EXACTNESS_KEY = 'mental-avatar-face-texture-exactness'
+const FACE_TEXTURE_BRIGHTNESS_KEY = 'mental-avatar-face-texture-brightness'
 const MP_WASM = '/mediapipe/wasm'
 const MP_MODEL = '/mediapipe/models/face_landmarker.task'
 
@@ -247,6 +249,16 @@ function readUvWarpWeight() {
   return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1
 }
 
+function readFaceTextureExactness() {
+  const value = Number(localStorage.getItem(FACE_TEXTURE_EXACTNESS_KEY) ?? '1')
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1
+}
+
+function readFaceTextureBrightness() {
+  const value = Number(localStorage.getItem(FACE_TEXTURE_BRIGHTNESS_KEY) ?? '1')
+  return Number.isFinite(value) ? Math.max(0.5, Math.min(1.25, value)) : 1
+}
+
 function read3dFaceInputSignature() {
   const original = localStorage.getItem(THREE_D_ORIGINAL_FACE_KEY) || sessionStorage.getItem(THREE_D_ORIGINAL_FACE_KEY) || ''
   const aligned = localStorage.getItem(THREE_D_ALIGNED_FACE_KEY) || ''
@@ -270,7 +282,7 @@ interface IntermediateTextureStages {
   projection: string
   uvAligned: string
   final: string
-  sourceMode: 'selected-aligned' | 'selected-image' | 'jingu-front' | 'original-local' | 'original-session' | 'aligned-crop-fallback' | 'api-face'
+  sourceMode: 'selected-aligned' | 'selected-image' | 'selected-detected' | 'aligned-display-fallback' | 'jingu-front' | 'original-local' | 'original-session' | 'aligned-crop-fallback' | 'api-face'
   landmarkCount: number
   featureWarpCount: number
   textureLandmarkCount: number
@@ -391,7 +403,6 @@ function loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
 function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
-    img.crossOrigin = 'anonymous'
     img.onload = () => resolve(img)
     img.onerror = () => reject(new Error('face image load failed'))
     img.src = url
@@ -543,11 +554,35 @@ async function buildRegisteredFaceTexture(): Promise<FaceTextureData | null> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), 2500)
   try {
-    const selectedImage = localStorage.getItem('mental-avatar-3d-face-image') || sessionStorage.getItem('mental-avatar-3d-face-image')
-    if (!selectedImage) return null
-    const sourceMode: IntermediateTextureStages['sourceMode'] = 'selected-aligned'
-    const img = await loadImageFromUrl(selectedImage)
-    const alignedLandmarks = readAlignedLandmarks()
+    // Prefer the untouched selected source. The aligned display is a recovery
+    // source only for older sessions where the original data URL was evicted
+    // but its paired landmark payload is still available.
+    const selectedImage = localStorage.getItem(THREE_D_ORIGINAL_FACE_KEY)
+      || sessionStorage.getItem(THREE_D_ORIGINAL_FACE_KEY)
+    const alignedDisplay = localStorage.getItem(THREE_D_ALIGNED_FACE_KEY)
+      || sessionStorage.getItem(THREE_D_ALIGNED_FACE_KEY)
+    const imageUrl = selectedImage || alignedDisplay
+    if (!imageUrl) return null
+    const img = await loadImageFromUrl(imageUrl)
+    // The selected source image is authoritative. If the alignment panel has
+    // not persisted its landmark payload yet (or an older payload is invalid),
+    // recover it directly from that same image instead of abandoning UV apply.
+    let alignedLandmarks = readAlignedLandmarks()
+    let sourceMode: IntermediateTextureStages['sourceMode'] = selectedImage
+      ? (alignedLandmarks ? 'selected-aligned' : 'selected-detected')
+      : 'aligned-display-fallback'
+    if (!alignedLandmarks && selectedImage) {
+      alignedLandmarks = await detectNormalizedLandmarks(img)
+      if (alignedLandmarks?.length) {
+        const serialized = JSON.stringify(alignedLandmarks)
+        try {
+          localStorage.setItem(THREE_D_ALIGNED_LANDMARKS_KEY, serialized)
+          sessionStorage.removeItem(THREE_D_ALIGNED_LANDMARKS_KEY)
+        } catch {
+          try { sessionStorage.setItem(THREE_D_ALIGNED_LANDMARKS_KEY, serialized) } catch { /* storage quota */ }
+        }
+      }
+    }
     if (!alignedLandmarks?.length) return null
     const sampleCanvas = document.createElement('canvas')
     sampleCanvas.width = FACE_TEXTURE_SIZE
@@ -582,6 +617,29 @@ function isSkinPixel(r: number, g: number, b: number, a: number) {
   const max = Math.max(r, g, b)
   const min = Math.min(r, g, b)
   return r >= g * 0.92 && r > b * 1.04 && max - min > 8 && Math.abs(r - g) < 105
+}
+
+function harmonizeRemainingSkinTone(ctx: CanvasRenderingContext2D, target: THREE.Color, strength = 0.72) {
+  const image = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height)
+  const targetR = target.r * 255
+  const targetG = target.g * 255
+  const targetB = target.b * 255
+  const targetLuma = Math.max(1, targetR * 0.299 + targetG * 0.587 + targetB * 0.114)
+  for (let i = 0; i < image.data.length; i += 4) {
+    const r = image.data[i], g = image.data[i + 1], b = image.data[i + 2], a = image.data[i + 3]
+    if (!isSkinPixel(r, g, b, a)) continue
+    // Match hue/chroma to the selected person's skin while preserving the
+    // original GLB pixel luminance so shadows and facial depth remain intact.
+    const luma = r * 0.299 + g * 0.587 + b * 0.114
+    const scale = luma / targetLuma
+    const mappedR = Math.min(255, targetR * scale)
+    const mappedG = Math.min(255, targetG * scale)
+    const mappedB = Math.min(255, targetB * scale)
+    image.data[i] = r + (mappedR - r) * strength
+    image.data[i + 1] = g + (mappedG - g) * strength
+    image.data[i + 2] = b + (mappedB - b) * strength
+  }
+  ctx.putImageData(image, 0, 0)
 }
 
 type Point2 = { x: number; y: number }
@@ -1146,10 +1204,12 @@ async function transferFaceAppearance(
   try { ctx.drawImage(image, 0, 0, width, height) } catch { return null }
   const originalDataUrl = canvas.toDataURL('image/png')
 
-  // Keep the selected image pixels unchanged. Only the landmark-driven UV
-  // warp below is allowed to modify the texture.
+  // Keep stage 1 as the untouched GLB map. For the final composite, bring
+  // only the remaining skin-like base pixels toward the selected skin tone;
+  // dark details and facial features retain their original luminance.
   const projectionDataUrl = face.projection.toDataURL('image/png')
   const textureLandmarks = await detectTextureLandmarks(source)
+  harmonizeRemainingSkinTone(ctx, face.color)
   // Stage 2 is a pure UV image made from the registered source image only.
   // Keep it separate from the final GLB texture so the diagnostic preview
   // cannot hide the actual feature-level mapping under the base texture.
@@ -1171,7 +1231,10 @@ async function transferFaceAppearance(
 
   const texture = new THREE.CanvasTexture(canvas)
   texture.name = `${source.name || 'glb-face'}-personalized`
-  texture.colorSpace = source.colorSpace || THREE.SRGBColorSpace
+  // Stage 4 is an sRGB canvas export. Keep the same color interpretation in
+  // the 3D material instead of inheriting a GLB color-space flag that can
+  // brighten or wash out the selected texture.
+  texture.colorSpace = THREE.SRGBColorSpace
   texture.flipY = source.flipY
   texture.wrapS = source.wrapS
   texture.wrapT = source.wrapT
@@ -1203,28 +1266,48 @@ async function withFaceTexture(
   generated: THREE.Texture[],
   onStages?: (stages: IntermediateTextureStages) => void,
 ): Promise<THREE.Material> {
-  const next = material.clone() as THREE.MeshStandardMaterial
-  const original = next.color?.clone?.() ?? new THREE.Color(0xffffff)
-  if (next.map) {
-    const cacheKey = `${next.map.uuid}:${mesh.uuid}`
+  // The stage-4 preview is the final pixel result. A PBR material would apply
+  // scene lights, environment reflections and the original GLB tint again,
+  // making the avatar visibly brighter/different from that preview. Use an
+  // unlit material for face maps so the pixels shown in stage 4 are the pixels
+  // rendered on the avatar.
+  const exactness = readFaceTextureExactness()
+  const brightness = readFaceTextureBrightness()
+  const exactTextureMode = exactness >= 0.999
+  const next = exactTextureMode
+    ? new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: material.transparent,
+      opacity: material.opacity,
+      alphaTest: material.alphaTest,
+      side: material.side,
+      vertexColors: material.vertexColors,
+    })
+    : material.clone() as THREE.MeshStandardMaterial
+  next.name = material.name
+  // MeshBasicMaterial is still tone-mapped by default. Disable that second
+  // color transform so 100% exactness matches the stage-4 sRGB canvas pixels.
+  if (exactTextureMode) next.toneMapped = false
+  if (exactTextureMode) next.color.setScalar(brightness)
+  const originalMap = (material as THREE.MeshStandardMaterial).map
+  if (originalMap) {
+    const cacheKey = `${(material as THREE.MeshStandardMaterial).map?.uuid ?? 'map'}:${mesh.uuid}`
     let transferred = cache.get(cacheKey)
     if (!transferred) {
-      transferred = await transferFaceAppearance(next.map, face, mesh, onStages) ?? undefined
+      transferred = await transferFaceAppearance((material as THREE.MeshStandardMaterial).map!, face, mesh, onStages) ?? undefined
       if (transferred) {
         cache.set(cacheKey, transferred)
         generated.push(transferred)
       }
     }
     if (transferred) next.map = transferred
-    // Preserve the GLB material color; do not apply a global tint over the
-    // selected texture after its pixels have already been kept unchanged.
-    next.color = original
+    if (next instanceof THREE.MeshStandardMaterial) {
+      next.roughness = Math.max(0.62, next.roughness ?? 0.7)
+      next.metalness = Math.min(0.03, next.metalness ?? 0)
+    }
   } else {
     next.map = face.texture
-    next.color = original
   }
-  next.roughness = Math.max(0.62, next.roughness ?? 0.7)
-  next.metalness = Math.min(0.03, next.metalness ?? 0)
   next.needsUpdate = true
   return next
 }
@@ -1347,6 +1430,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const [faceTextureStatus, setFaceTextureStatus] = useState('')
   const [intermediateTextureStages, setIntermediateTextureStages] = useState<IntermediateTextureStages | null>(null)
   const [uvWarpWeight, setUvWarpWeight] = useState(readUvWarpWeight)
+  const [faceTextureExactness, setFaceTextureExactness] = useState(readFaceTextureExactness)
+  const [faceTextureBrightness, setFaceTextureBrightness] = useState(readFaceTextureBrightness)
   const [showDebugDetails, setShowDebugDetails] = useState(false)
   const [alignedFeatureGeometry, setAlignedFeatureGeometry] = useState<AlignedFeatureGeometry | null>(readAlignedFeatureGeometry)
   const [faceMeshDiagnostics, setFaceMeshDiagnostics] = useState<FaceMeshDiagnostic[]>([])
@@ -1985,7 +2070,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         <div ref={containerRef} className="w-full h-full" />
         {/* 3D 탭 전용 얼굴 이미지 선택·정렬·웹캠 추적 패널 */}
         <FaceTrackingPanel
-          className="absolute bottom-20 left-3 z-30 w-[20rem] max-w-[calc(100%-1rem)] rounded-xl border border-gray-700 bg-black shadow-2xl overflow-hidden"
+          className="absolute bottom-2 left-3 z-30 w-[20rem] max-w-[calc(100%-1rem)] rounded-xl border border-gray-700 bg-black shadow-2xl overflow-hidden"
           preferRegisteredFace
           isolatedVideo
           storageScope="3d"
@@ -2056,7 +2141,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
                 <button onClick={() => setShowDebugDetails(v => !v)} className="text-gray-400 hover:text-white">{showDebugDetails ? '간단히' : '상세'}</button>
               </div>
               <div className="mb-1.5 rounded bg-gray-950/90 px-1.5 py-1 text-[9px] leading-relaxed">
-                <div>source: <span className={intermediateTextureStages.sourceMode === 'selected-aligned' || intermediateTextureStages.sourceMode === 'selected-image' || intermediateTextureStages.sourceMode === 'jingu-front' || intermediateTextureStages.sourceMode.startsWith('original') ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.sourceMode}</span></div>
+                <div>source: <span className={intermediateTextureStages.sourceMode === 'selected-aligned' || intermediateTextureStages.sourceMode === 'selected-image' || intermediateTextureStages.sourceMode === 'selected-detected' || intermediateTextureStages.sourceMode === 'aligned-display-fallback' || intermediateTextureStages.sourceMode === 'jingu-front' || intermediateTextureStages.sourceMode.startsWith('original') ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.sourceMode}</span></div>
                 <div>landmarks: <span className="text-cyan-200">{intermediateTextureStages.landmarkCount}</span></div>
                 <div>existing texture landmarks: <span className={intermediateTextureStages.textureLandmarkCount > 0 ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.textureLandmarkCount || 'geometry UV fallback'}</span></div>
                 <div>whole-face UV triangles: <span className={intermediateTextureStages.uvTriangleCount > 0 ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.uvTriangleCount || 'feature fallback'}</span></div>
@@ -2079,6 +2164,50 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
                     aria-label="warped UV texture weight"
                   />
                   <div className="flex justify-between text-[8px] text-gray-500"><span>기존 texture</span><span>warped UV</span></div>
+                </div>
+                <div className="mt-1 border-t border-gray-800 pt-1">
+                  <div className="flex items-center justify-between">
+                    <span>3D texture exactness</span>
+                    <span className="text-cyan-200">{Math.round(faceTextureExactness * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={faceTextureExactness}
+                    onChange={event => {
+                      const value = Number(event.target.value)
+                      setFaceTextureExactness(value)
+                      localStorage.setItem(FACE_TEXTURE_EXACTNESS_KEY, String(value))
+                      if (objectUrlRef.current) loadGLB(objectUrlRef.current)
+                    }}
+                    className="mt-1 w-full accent-purple-400"
+                    aria-label="3D texture exactness"
+                  />
+                  <div className="flex justify-between text-[8px] text-gray-500"><span>3D 조명</span><span>4 최종 texture 그대로</span></div>
+                </div>
+                <div className="mt-1 border-t border-gray-800 pt-1">
+                  <div className="flex items-center justify-between">
+                    <span>3D texture brightness</span>
+                    <span className="text-cyan-200">{Math.round(faceTextureBrightness * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="1.25"
+                    step="0.01"
+                    value={faceTextureBrightness}
+                    onChange={event => {
+                      const value = Number(event.target.value)
+                      setFaceTextureBrightness(value)
+                      localStorage.setItem(FACE_TEXTURE_BRIGHTNESS_KEY, String(value))
+                      if (objectUrlRef.current) loadGLB(objectUrlRef.current)
+                    }}
+                    className="mt-1 w-full accent-amber-400"
+                    aria-label="3D texture brightness"
+                  />
+                  <div className="flex justify-between text-[8px] text-gray-500"><span>어둡게</span><span>밝게</span></div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
