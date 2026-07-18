@@ -322,7 +322,7 @@ def nodes_list():
         offset = max(0, int(request.args.get("offset", 0)))
     except ValueError:
         return jsonify({"error": "limit/offset은 숫자여야 합니다"}), 400
-    return jsonify(graph.search_nodes(
+    return jsonify(graph.search_nodes_admin(
         type=request.args.get("type", ""),
         source_type=request.args.get("source_type", ""),
         view=request.args.get("view", ""),
@@ -1400,15 +1400,32 @@ def watcher_restart():
     return jsonify(_ensure_watcher())
 
 
+def _active_background_jobs() -> list:
+    """얼굴교체·아바타 영상 생성·YouTube 다운로드·발표 자료 처리 중 아직 끝나지 않은 작업을
+    전부 모은다. 서버 재시작이 이 중 하나라도 중간에 끊어버리지 않도록 확인하는 용도."""
+    active = []
+    for job_id, job in _faceswap_jobs.items():
+        if job.get("stage") not in ("done", "error", "canceled"):
+            active.append(("얼굴교체", job_id))
+    for job_id, job in _avatar_jobs.items():
+        if job.get("stage") not in ("done", "error"):
+            active.append(("아바타 영상 생성", job_id))
+    for job_id, job in _ytdl_jobs.items():
+        if job.get("stage") not in ("done", "error"):
+            active.append(("YouTube 다운로드", job_id))
+    for job_id, job in _presenter_jobs.items():
+        if job.get("stage") not in ("done", "error"):
+            active.append(("발표 자료 처리", job_id))
+    return active
+
+
 @app.route("/server/restart", methods=["POST"])
 def server_restart():
     """현재 API 프로세스를 안전하게 종료하고 같은 인터프리터로 재시작한다."""
-    active_jobs = [
-        job for job in _faceswap_jobs.values()
-        if job.get("stage") not in ("done", "error", "canceled")
-    ]
+    active_jobs = _active_background_jobs()
     if active_jobs:
-        return jsonify({"error": "얼굴교체 작업이 진행 중입니다. 작업 완료 후 서버를 재시작해주세요."}), 409
+        kinds = ", ".join(sorted({kind for kind, _ in active_jobs}))
+        return jsonify({"error": f"다음 작업이 진행 중입니다: {kinds}. 작업 완료 후 서버를 재시작해주세요."}), 409
     server_script = str(Path(__file__).resolve())
 
     def _restart_later():
@@ -1480,21 +1497,8 @@ def backup():
                     files_meta.append({"name": f.name, "size": f.stat().st_size, "error": str(e)})
     result["data_files"] = files_meta
 
-    avatar_dir = Path(__file__).parent.parent / "tmp" / "avatar"
-    avatar_files = []
-    avatar_ext = {".mp4", ".webm", ".jpg", ".jpeg", ".png", ".wav", ".json"}
-    if avatar_dir.exists():
-        for f in avatar_dir.rglob("*"):
-            if f.is_file() and f.suffix.lower() in avatar_ext:
-                try:
-                    avatar_files.append({
-                        "path": f.relative_to(avatar_dir).as_posix(),
-                        "size": f.stat().st_size,
-                        "content_base64": _base64.b64encode(f.read_bytes()).decode(),
-                    })
-                except Exception as e:
-                    avatar_files.append({"path": f.relative_to(avatar_dir).as_posix(), "size": f.stat().st_size, "error": str(e)})
-    result["avatar_files"] = avatar_files
+    # tmp/avatar(얼굴교체·TTS·발표녹화 결과)는 재생성 가능한 산출물이라 백업 대상에서 제외한다.
+    # 대신 _cleanup_tmp()의 history 용량 상한(AVATAR_HISTORY_MAX_BYTES)으로 디스크만 관리한다.
 
     return jsonify(result)
 
@@ -1535,24 +1539,6 @@ def restore():
             restored.append(f"data/{name}")
         except Exception as e:
             return jsonify({"success": False, "error": f"미디어 복원 실패: {e}"}), 500
-
-    avatar_files = payload.get("avatar_files") or []
-    avatar_dir = Path(__file__).parent.parent / "tmp" / "avatar"
-    allowed_avatar_ext = {".mp4", ".webm", ".jpg", ".jpeg", ".png", ".wav", ".json"}
-    for item in avatar_files:
-        try:
-            rel = Path(str(item.get("path", "")))
-            if not rel.parts or rel.is_absolute() or ".." in rel.parts or rel.suffix.lower() not in allowed_avatar_ext:
-                continue
-            content = item.get("content_base64")
-            if not content:
-                continue
-            target = avatar_dir.joinpath(*rel.parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(_base64.b64decode(content))
-            restored.append(f"tmp/avatar/{rel.as_posix()}")
-        except Exception as e:
-            return jsonify({"success": False, "error": f"아바타 미디어 복원 실패: {e}"}), 500
 
     return jsonify({"success": True, "restored": restored})
 
@@ -1942,6 +1928,13 @@ def avatar_face():
         return jsonify({"error": "not registered"}), 404
     return send_file(str(FACE_FILE), mimetype="image/jpeg")
 
+@app.route("/avatar/jingu_front.jpg", methods=["GET"])
+def avatar_jingu_front():
+    source = Path(__file__).resolve().parents[1] / "jingu_front.jpg"
+    if not source.exists():
+        return jsonify({"error": "jingu_front.jpg not found"}), 404
+    return send_file(str(source), mimetype="image/jpeg")
+
 @app.route("/avatar/register_face", methods=["POST"])
 def avatar_register_face():
     f = request.files.get("face")
@@ -1966,26 +1959,18 @@ def avatar_tts_only():
     if template_speaker is None and not VOICE_SAMPLE.exists():
         return jsonify({"error": "voice sample not registered"}), 400
 
-    # ① 상주 XTTS 워커(8768)로 우선 시도 — 모델이 이미 떠 있어 2~3초
+    # 상주 XTTS 워커(8768) 사용 — 꺼져 있으면 기동을 기다렸다가(최대 180초) 재시도
     try:
-        import json, urllib.request
-        payload = json.dumps({
-            "text": text,
-            "speaker": template_speaker,
-            "speaker_wav": None if template_speaker else str(VOICE_SAMPLE),
-            "language": "ko",
-        }).encode()
-        wreq = urllib.request.Request(
-            "http://127.0.0.1:8768/tts", data=payload,
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(wreq, timeout=180) as wr:
-            if wr.status == 200:
-                wav_bytes = wr.read()
-                return app.response_class(wav_bytes, mimetype="audio/wav")
+        wav_bytes = _xtts_synthesize(
+            text, speaker=template_speaker,
+            speaker_wav=None if template_speaker else str(VOICE_SAMPLE),
+            timeout=180,
+        )
+        if wav_bytes:
+            return app.response_class(wav_bytes, mimetype="audio/wav")
     except Exception as _e:
-        print(f"[tts_only] 워커 미응답, subprocess 폴백: {_e}", flush=True)
+        print(f"[tts_only] TTS 실패: {_e}", flush=True)
 
-    # ② 폴백: 워커가 꺼져 있으면 기존 subprocess 방식(매번 모델 로드, 느림)
     return jsonify({"error": "XTTS worker is not ready", "retryable": True}), 503
 
 
@@ -2488,78 +2473,7 @@ def avatar_ytdl():
             _ytdl_jobs[job_id]["stage"] = "error"
             _ytdl_jobs[job_id]["error"] = str(e)
 
-    # 실제 CUDA/ONNX 처리는 API와 분리된 worker 프로세스에서 실행한다.
-    # 네이티브 GPU 충돌이 발생해도 API 서버는 계속 살아 있도록 한다.
-    return jsonify({"job_id": job_id})
-
-    def _run_worker_process():
-        xtts_paused = False
-        worker_proc = None
-        state_file = job_dir / "faceswap_worker_state.json"
-        cancel_file = job_dir / "faceswap_worker.cancel"
-        worker_script = Path(__file__).resolve().parent.parent / "core" / "faceswap_worker.py"
-
-        def run_worker(gpu: bool) -> int:
-            nonlocal worker_proc
-            state_file.unlink(missing_ok=True)
-            worker_proc = subprocess.Popen(
-                [PYTHON_EXE, str(worker_script), str(face_path), str(video_path), output_path,
-                 str(state_file), str(cancel_file), "1" if gpu else "0"],
-                cwd=str(worker_script.parent.parent),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            while worker_proc.poll() is None:
-                try:
-                    state = _json.loads(state_file.read_text(encoding="utf-8"))
-                    job = _faceswap_jobs.get(job_id)
-                    if job:
-                        job.update({k: state[k] for k in ("stage", "progress", "processed_frames", "total_frames") if k in state})
-                        if state.get("error"):
-                            job["error"] = state["error"]
-                except (OSError, ValueError, KeyError):
-                    pass
-                if _faceswap_jobs.get(job_id, {}).get("cancel_requested"):
-                    cancel_file.touch(exist_ok=True)
-                time.sleep(0.4)
-            return worker_proc.returncode or 0
-
-        try:
-            if use_gpu:
-                xtts_paused = _pause_xtts_for_gpu()
-            code = run_worker(use_gpu)
-            state = {}
-            try:
-                state = _json.loads(state_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
-            if code != 0 or state.get("stage") == "error":
-                if not use_gpu:
-                    raise RuntimeError(state.get("error") or f"face-swap worker exit code {code}")
-                job = _faceswap_jobs[job_id]
-                job.update({"stage": "GPU worker 실패 - CPU 전환 중", "progress": 0,
-                            "processed_frames": 0, "total_frames": 0, "error": ""})
-                Path(output_path).unlink(missing_ok=True)
-                Path(f"{output_path}_tmp.mp4").unlink(missing_ok=True)
-                cancel_file.unlink(missing_ok=True)
-                code = run_worker(False)
-                state = _json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
-                if code != 0 or state.get("stage") == "error":
-                    raise RuntimeError(state.get("error") or f"CPU face-swap worker exit code {code}")
-            if _faceswap_jobs[job_id].get("cancel_requested") or state.get("stage") == "canceled":
-                _faceswap_jobs[job_id]["stage"] = "canceled"
-            else:
-                _faceswap_jobs[job_id].update({"stage": "done", "progress": 100, "mp4_path": output_path})
-        except Exception as e:
-            _faceswap_jobs[job_id]["stage"] = "error"
-            _faceswap_jobs[job_id]["error"] = str(e)
-        finally:
-            if worker_proc is not None and worker_proc.poll() is None:
-                worker_proc.terminate()
-            cancel_file.unlink(missing_ok=True)
-            if xtts_paused:
-                _resume_xtts_after_gpu()
-
-    _threading.Thread(target=_run_worker_process, daemon=True).start()
+    _threading.Thread(target=_run, daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
@@ -3296,32 +3210,43 @@ def presenter_session_delete(session_id: str):
 
 
 # ── tmp 자동 정리 ────────────────────────────────────────────
+AVATAR_HISTORY_MAX_BYTES = 300 * 1024 * 1024  # 완료된 얼굴교체/아바타 영상 이력 총 용량 상한 — 넘으면 오래된 것부터 삭제
+
 def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24,
                   presenter_max_age_h: float = 6) -> dict:
     """누적되는 tmp 산출물 + 죽은 job_id를 참조하는 메모리 잡 딕셔너리를 함께 정리한다.
     - tmp/avatar: 최종 영상(result/**/*.mp4 또는 faceswap_result.mp4)이 없는 잡 폴더(tts_only speech.wav·실패 잡)만
-      나이 기준으로 삭제. 영상이 있는 폴더는 /avatar/history, /avatar/faceswap/history의 영구 저장소이므로 절대 건드리지 않는다.
+      나이 기준으로 삭제. 영상이 있는 폴더는 /avatar/history, /avatar/faceswap/history의 영구 저장소라 나이로는
+      안 지우지만, 총 용량이 AVATAR_HISTORY_MAX_BYTES를 넘으면 오래된 것부터 지운다(무한 증가 방지).
+      youtube_downloads/ 는 job 폴더가 아니라 YouTube 다운로드 캐시 전용 디렉터리라 이 스캔에서 제외한다
+      (예전엔 여기에 포함돼서, 6시간 넘게 새 다운로드가 없으면 통째로 삭제될 수 있었다).
     - tmp/stt: STT 임시 파일(크래시로 finally를 못 탄 잔여물)을 나이 기준으로 삭제.
     - tmp/presenter: slides.json(저장 완료 표시)이 없는 세션(업로드만 하고 저장 전 이탈/실패)을 나이 기준으로 삭제.
     - _avatar_jobs/_faceswap_jobs/_ytdl_jobs/_presenter_jobs: 위 정리로 폴더가 사라진 job_id는
       메모리에서도 함께 제거(서버 수명 내내 무한 누적되는 것 방지).
-    반환: {"avatar_removed", "avatar_freed_mb", "stt_removed", "presenter_removed", "jobs_pruned"}"""
+    반환: {"avatar_removed", "avatar_freed_mb", "stt_removed", "presenter_removed", "jobs_pruned",
+           "history_removed", "history_freed_mb"}"""
     now = time.time()
     removed_dirs = 0
     freed = 0
+    history_dirs = []  # 최종 영상이 있어 나이로는 안 지워진 폴더 — (path, mtime, size)
     if AVATAR_TMP.exists():
         for job_dir in AVATAR_TMP.iterdir():
-            if not job_dir.is_dir():
+            if not job_dir.is_dir() or job_dir.name == "youtube_downloads":
                 continue
             try:
-                if (now - job_dir.stat().st_mtime) / 3600 < avatar_job_max_age_h:
-                    continue
-                # 최종 영상이 하나라도 있으면 이력이므로 보존 (temp_/​_full.mp4는 중간 산출물이라 제외)
+                # 최종 영상이 하나라도 있으면 이력 — 나이와 무관하게 보존 대상 후보로 모아둔다
+                # (temp_/​_full.mp4는 중간 산출물이라 제외)
                 has_video = (job_dir / "faceswap_result.mp4").exists() or any(
                     not f.name.startswith("temp_") and not f.name.endswith("_full.mp4")
                     for f in job_dir.glob("result/**/*.mp4")
                 )
+                mtime = job_dir.stat().st_mtime
                 if has_video:
+                    sz = sum(f.stat().st_size for f in job_dir.rglob("*") if f.is_file())
+                    history_dirs.append((job_dir, mtime, sz))
+                    continue
+                if (now - mtime) / 3600 < avatar_job_max_age_h:
                     continue
                 sz = sum(f.stat().st_size for f in job_dir.rglob("*") if f.is_file())
                 _shutil.rmtree(job_dir, ignore_errors=True)
@@ -3329,6 +3254,23 @@ def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24,
                 freed += sz
             except OSError:
                 continue
+
+    history_removed = 0
+    history_freed = 0
+    total_history_bytes = sum(sz for _, _, sz in history_dirs)
+    if total_history_bytes > AVATAR_HISTORY_MAX_BYTES:
+        history_dirs.sort(key=lambda item: item[1])  # 오래된 것부터
+        for job_dir, _, sz in history_dirs:
+            if total_history_bytes <= AVATAR_HISTORY_MAX_BYTES:
+                break
+            try:
+                _shutil.rmtree(job_dir, ignore_errors=True)
+                history_removed += 1
+                history_freed += sz
+                total_history_bytes -= sz
+            except OSError:
+                continue
+
     stt_removed = 0
     if STT_TMP.exists():
         for f in STT_TMP.iterdir():
@@ -3365,7 +3307,9 @@ def _cleanup_tmp(avatar_job_max_age_h: float = 6, stt_max_age_h: float = 24,
             "avatar_freed_mb": round(freed / 1e6, 1),
             "stt_removed": stt_removed,
             "presenter_removed": presenter_removed,
-            "jobs_pruned": jobs_pruned}
+            "jobs_pruned": jobs_pruned,
+            "history_removed": history_removed,
+            "history_freed_mb": round(history_freed / 1e6, 1)}
 
 
 def _cleanup_tmp_loop(interval_h: float = 6):
@@ -3374,10 +3318,11 @@ def _cleanup_tmp_loop(interval_h: float = 6):
         try:
             time.sleep(interval_h * 3600)
             stats = _cleanup_tmp()
-            if stats["avatar_removed"] or stats["stt_removed"] or stats["presenter_removed"] or stats["jobs_pruned"]:
+            if stats["avatar_removed"] or stats["stt_removed"] or stats["presenter_removed"] or stats["jobs_pruned"] or stats["history_removed"]:
                 print(f"[cleanup] avatar {stats['avatar_removed']}개"
                       f"({stats['avatar_freed_mb']}MB) / stt {stats['stt_removed']}개"
-                      f" / presenter {stats['presenter_removed']}개 / jobs {stats['jobs_pruned']}개 정리", flush=True)
+                      f" / presenter {stats['presenter_removed']}개 / jobs {stats['jobs_pruned']}개"
+                      f" / history {stats['history_removed']}개({stats['history_freed_mb']}MB) 정리", flush=True)
         except Exception as e:
             print(f"[cleanup] 오류: {e}", flush=True)
 
@@ -3463,10 +3408,11 @@ if __name__ == "__main__":
     # 시작 시 1회 정리 + 6시간마다 주기 정리 (영상 이력은 보존)
     try:
         _boot_stats = _cleanup_tmp()
-        if _boot_stats["avatar_removed"] or _boot_stats["stt_removed"] or _boot_stats["presenter_removed"] or _boot_stats["jobs_pruned"]:
+        if _boot_stats["avatar_removed"] or _boot_stats["stt_removed"] or _boot_stats["presenter_removed"] or _boot_stats["jobs_pruned"] or _boot_stats["history_removed"]:
             print(f"[cleanup] 시작 정리: avatar {_boot_stats['avatar_removed']}개"
                   f"({_boot_stats['avatar_freed_mb']}MB) / stt {_boot_stats['stt_removed']}개"
-                  f" / presenter {_boot_stats['presenter_removed']}개 / jobs {_boot_stats['jobs_pruned']}개", flush=True)
+                  f" / presenter {_boot_stats['presenter_removed']}개 / jobs {_boot_stats['jobs_pruned']}개"
+                  f" / history {_boot_stats['history_removed']}개({_boot_stats['history_freed_mb']}MB)", flush=True)
     except Exception as _e:
         print(f"[cleanup] 시작 정리 오류: {_e}", flush=True)
     _threading.Thread(target=_cleanup_tmp_loop, daemon=True).start()

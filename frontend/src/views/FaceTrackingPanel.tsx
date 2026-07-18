@@ -121,10 +121,9 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const localImageSessionKey = `mental-avatar-${storageScope}-face-image`
   const localImageNameSessionKey = `mental-avatar-${storageScope}-face-image-name`
   const alignedFaceDisplaySessionKey = `mental-avatar-${storageScope}-aligned-face-display`
+  const alignedLandmarksSessionKey = `mental-avatar-${storageScope}-aligned-landmarks`
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoRef  = useRef<HTMLVideoElement>(null)
-  const localVideoInputRef = useRef<HTMLInputElement>(null)
-  const localVideoUrlRef = useRef<string | null>(null)
   const localImageInputRef = useRef<HTMLInputElement>(null)
   const localImageUrlRef = useRef<string | null>(null)
 
@@ -144,7 +143,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const streamRef     = useRef<MediaStream | null>(null)
   const lastTsRef     = useRef(0)
   const lastLandmarksRef = useRef<LM[] | null>(null)
-  const fixedImageLandmarksRef = useRef<LM[] | null>(null)
   const trackingNeutralLandmarksRef = useRef<LM[] | null>(null)
   const trackingBaseLandmarksRef = useRef<LM[] | null>(null)
   const trackingLoopTokenRef = useRef(0)
@@ -202,7 +200,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     trackingLoopTokenRef.current += 1
     lastTsRef.current = 0
     lastLandmarksRef.current = null
-    fixedImageLandmarksRef.current = null
     trackingNeutralLandmarksRef.current = null
     trackingBaseLandmarksRef.current = null
     trackingFrameReadyRef.current = false
@@ -276,14 +273,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     setStatus('idle')
   }, [isolatedVideo, resetVideoTrackingState])
 
-  const selectLocalVideo = useCallback((file: File | null) => {
-    if (!file) return
-    if (localVideoUrlRef.current) URL.revokeObjectURL(localVideoUrlRef.current)
-    const url = URL.createObjectURL(file)
-    localVideoUrlRef.current = url
-    applyTrackingVideoSource({ url, name: file.name, savedAt: new Date().toISOString(), manual: true })
-  }, [applyTrackingVideoSource])
-
   const selectLocalImage = useCallback((file: File | null) => {
     if (!file) return
     if (localImageUrlRef.current) URL.revokeObjectURL(localImageUrlRef.current)
@@ -293,8 +282,11 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     alignedVideoSourceRef.current = null
     setAlignedFaceDisplayUrl(null)
     try {
+      localStorage.removeItem(localImageSessionKey)
       localStorage.removeItem(alignedFaceDisplaySessionKey)
+      localStorage.removeItem(alignedLandmarksSessionKey)
       sessionStorage.removeItem(alignedFaceDisplaySessionKey)
+      sessionStorage.removeItem(alignedLandmarksSessionKey)
     } catch { /* storage quota */ }
     setLocalImageUrl(url)
     setLocalImageName(file.name)
@@ -302,17 +294,18 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     const reader = new FileReader()
     reader.onload = () => {
       if (typeof reader.result === 'string') {
-        try { sessionStorage.setItem(localImageSessionKey, reader.result) } catch { /* storage quota */ }
+        try { localStorage.setItem(localImageSessionKey, reader.result) } catch {
+          try { sessionStorage.setItem(localImageSessionKey, reader.result) } catch { /* storage quota */ }
+        }
       }
     }
     reader.readAsDataURL(file)
     setShowAlignCheck(true)
-  }, [alignedFaceDisplaySessionKey, localImageNameSessionKey, localImageSessionKey])
+  }, [alignedFaceDisplaySessionKey, alignedLandmarksSessionKey, localImageNameSessionKey, localImageSessionKey])
 
   useEffect(() => {
     applyTrackingVideoSource()
     if (isolatedVideo) return () => {
-      if (localVideoUrlRef.current) URL.revokeObjectURL(localVideoUrlRef.current)
       if (localImageUrlRef.current) URL.revokeObjectURL(localImageUrlRef.current)
     }
     const onTrackingVideoChange = (event: Event) => {
@@ -677,7 +670,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   }, [applyTrackingMotion, hideTrackedFace, preferRegisteredFace, updateFaceMesh])
 
   const startTracking = useCallback(async () => {
-    const registeredSource = trackingVideoSource ?? readTrackingVideoSource()
+    const registeredSource = isolatedVideo ? null : (trackingVideoSource ?? readTrackingVideoSource())
     if (preferRegisteredFace && !registeredSource && !isolatedVideo) {
       setStatus('error')
       setStatusMsg('등록된 추적 영상이 없습니다')
@@ -827,7 +820,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     const textureUrl = getTextureFaceUrl()
     const detectedTextureLandmarks = preferRegisteredFace ? await detectImageLandmarks(textureUrl) : null
     const savedLandmarks = detectedTextureLandmarks?.length ? detectedTextureLandmarks : readFaceLandmarks()
-    fixedImageLandmarksRef.current = null
 
     if (savedLandmarks?.length) {
       textureLandmarksRef.current = savedLandmarks
@@ -870,49 +862,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     setStatusMsg('트래킹 중')
     trackLoop(lm, trackingLoopTokenRef.current)
   }, [status, trackingVideoSource, initLandmarker, trackLoop, detectImageLandmarks, getTextureFaceUrl, isolatedVideo, localImageUrl, preferRegisteredFace, resetVideoTrackingState])
-
-  // 마지막 프레임을 정지 이미지로 캡처해 저장 + 메시에 계속 표시(웹캠 꺼도 외형 유지)
-  const captureAndPersistSnapshot = useCallback(() => {
-    const video = videoRef.current
-    const landmarks = lastLandmarksRef.current
-    if (!video || !landmarks || video.videoWidth === 0) return
-
-    const canvas = document.createElement('canvas')
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    drawMirrored(ctx, video, canvas.width, canvas.height)
-
-    // 검은 프레임이면 등록/저장하지 않는다. 그대로 두면 기존 정상 얼굴을 검게 덮어쓴다.
-    if (isFrameTooDark(canvas)) return
-
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
-
-    try {
-      saveFaceAlignmentSnapshot(dataUrl, landmarks, canvas.width, canvas.height)
-    } catch { /* 용량 초과 등은 무시 */ }
-    textureLandmarksRef.current = landmarks
-    // 사진이 거울모드로 저장됐으므로, 이미 그려져 있던 uv(비거울 기준)를 다시 계산해야 한다.
-    updateFaceMesh(landmarks)
-
-    if (faceMeshRef.current) {
-      const mat = faceMeshRef.current.material as THREE.MeshBasicMaterial
-      staticTexRef.current?.dispose()
-      const tex = new THREE.TextureLoader().load(dataUrl)
-      tex.minFilter = THREE.LinearFilter
-      tex.magFilter = THREE.LinearFilter
-      tex.generateMipmaps = false
-      tex.colorSpace = THREE.SRGBColorSpace
-      staticTexRef.current = tex
-      mat.map = tex
-      mat.opacity = 0
-      mat.needsUpdate = true
-    }
-    setHasSavedFace(true)
-
-    // 서버에도 등록(다른 화면/재시작 후에도 얼굴 이미지 재사용 가능하도록)
-  }, [updateFaceMesh])
 
   // 저장된 얼굴 사진 위에 저장된 landmark를 그려서, 카메라를 켜지 않고도
   // "사진과 landmark가 실제로 맞물리는지"를 눈으로 바로 확인할 수 있게 한다.
@@ -960,6 +909,12 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       // 정렬 확인 결과는 tracking용 landmark/video와 분리된 결과 공간에만 저장한다.
       alignedLandmarksRef.current = landmarks.map(point => ({ ...point }))
       alignedVideoSourceRef.current = img.src
+      try {
+        localStorage.setItem(alignedLandmarksSessionKey, JSON.stringify(alignedLandmarksRef.current))
+        sessionStorage.removeItem(alignedLandmarksSessionKey)
+      } catch {
+        try { sessionStorage.setItem(alignedLandmarksSessionKey, JSON.stringify(alignedLandmarksRef.current)) } catch { /* storage quota */ }
+      }
 
       const facePoints = landmarks.map(pointFor)
       const faceMinX = Math.min(...facePoints.map(point => point.x))
@@ -1034,7 +989,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     } else {
       img.src = getTextureFaceUrl()
     }
-  }, [alignedFaceDisplaySessionKey, getTextureFaceUrl, detectImageLandmarks, isolatedVideo, localImageUrl, preferRegisteredFace])
+  }, [alignedFaceDisplaySessionKey, alignedLandmarksSessionKey, getTextureFaceUrl, detectImageLandmarks, isolatedVideo, localImageUrl, preferRegisteredFace])
 
   useEffect(() => {
     if (showAlignCheck) drawAlignCheck()

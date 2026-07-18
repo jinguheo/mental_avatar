@@ -13,12 +13,77 @@ import { API_BASE } from '@/config'
 import VoiceServiceBanner from '@/components/VoiceServiceBanner'
 import FaceTrackingPanel from './FaceTrackingPanel'
 import { type Emotion, type LipCue, MORPH_GROUPS, RHUBARB_SHAPE_TARGETS, EMOTION_WEIGHTS, classifyEmotion } from '@/avatarMorph'
-import { FACE_ALIGNED_PATCH_KEY, FACE_SNAPSHOT_KEY, getRegisteredFaceImageUrl } from '@/faceAlignment'
 
 const API = API_BASE
 const CHAT_SINCE_KEY = 'mental-avatar-realistic-chat-since'
 const AVATAR_FILE_KEY = 'mental-avatar-avaturn-filename'
-const FACE_OVERLAY_KEY = 'mental-avatar-face-overlay'
+const THREE_D_ALIGNED_FACE_KEY = 'mental-avatar-3d-aligned-face-display'
+const THREE_D_ORIGINAL_FACE_KEY = 'mental-avatar-3d-face-image'
+const THREE_D_ALIGNED_LANDMARKS_KEY = 'mental-avatar-3d-aligned-landmarks'
+const UV_WARP_WEIGHT_KEY = 'mental-avatar-uv-warp-weight'
+const MP_WASM = '/mediapipe/wasm'
+const MP_MODEL = '/mediapipe/models/face_landmarker.task'
+
+let textureLandmarkerPromise: Promise<any> | null = null
+
+async function detectTextureLandmarks(texture: THREE.Texture): Promise<Point2[] | null> {
+  try {
+    const image = texture.image as CanvasImageSource & { width?: number; height?: number; naturalWidth?: number; naturalHeight?: number }
+    const width = image?.naturalWidth || image?.width || 0
+    const height = image?.naturalHeight || image?.height || 0
+    if (!image || !width || !height) return null
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(image, 0, 0, width, height)
+    if (!textureLandmarkerPromise) {
+      textureLandmarkerPromise = (async () => {
+        const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision')
+        const vision = await FilesetResolver.forVisionTasks(MP_WASM)
+        return FaceLandmarker.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: MP_MODEL, delegate: 'CPU' },
+          runningMode: 'IMAGE', numFaces: 1,
+          minFaceDetectionConfidence: 0.3,
+          minFacePresenceConfidence: 0.3,
+        })
+      })()
+    }
+    const detector = await textureLandmarkerPromise
+    const result = detector.detect(canvas)
+    const landmarks = result.faceLandmarks?.[0]
+    if (!landmarks?.length) return null
+    return landmarks.map((point: { x: number; y: number }) => ({
+      x: point.x * width,
+      y: (texture.flipY ? 1 - point.y : point.y) * height,
+    }))
+  } catch {
+    return null
+  }
+}
+
+async function detectNormalizedLandmarks(image: CanvasImageSource): Promise<StoredLandmark[] | null> {
+  try {
+    if (!textureLandmarkerPromise) {
+      textureLandmarkerPromise = (async () => {
+        const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision')
+        const vision = await FilesetResolver.forVisionTasks(MP_WASM)
+        return FaceLandmarker.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: MP_MODEL, delegate: 'CPU' },
+          runningMode: 'IMAGE', numFaces: 1,
+          minFaceDetectionConfidence: 0.3,
+          minFacePresenceConfidence: 0.3,
+        })
+      })()
+    }
+    const detector = await textureLandmarkerPromise
+    const landmarks = detector.detect(image).faceLandmarks?.[0]
+    return landmarks?.map((point: { x: number; y: number; z?: number }) => ({ x: point.x, y: point.y, z: point.z })) as StoredLandmark[] || null
+  } catch {
+    return null
+  }
+}
 
 // SQLite의 created_at(datetime('now','localtime'))과 동일한 'YYYY-MM-DD HH:MM:SS' 형식(로컬시간)
 function localTimestamp(): string {
@@ -177,17 +242,39 @@ const FACE_TEXTURE_SIZE = 512
 const FACE_MATERIAL_RE = /face|head|skin|body|wolf3d_head|wolf3d_skin|avatar_head|avatar_face/i
 const FACE_MATERIAL_EXCLUDE_RE = /hair|eye|iris|lash|brow|teeth|tooth|mouth|tongue|gum|cloth|shirt|pant|shoe|sock|accessory|glass|lens/i
 
+function readUvWarpWeight() {
+  const value = Number(localStorage.getItem(UV_WARP_WEIGHT_KEY) ?? '1')
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1
+}
+
+function read3dFaceInputSignature() {
+  const original = localStorage.getItem(THREE_D_ORIGINAL_FACE_KEY) || sessionStorage.getItem(THREE_D_ORIGINAL_FACE_KEY) || ''
+  const aligned = localStorage.getItem(THREE_D_ALIGNED_FACE_KEY) || ''
+  const landmarks = localStorage.getItem(THREE_D_ALIGNED_LANDMARKS_KEY) || sessionStorage.getItem(THREE_D_ALIGNED_LANDMARKS_KEY) || ''
+  return [original, aligned, landmarks].map(value => `${value.length}:${value.slice(-64)}`).join('|')
+}
+
 interface FaceTextureData {
   texture: THREE.CanvasTexture
   color: THREE.Color
+  lipColor: THREE.Color
+  fullSource: HTMLCanvasElement
+  original: HTMLCanvasElement
+  projection: HTMLCanvasElement
+  landmarks: StoredLandmark[] | null
+  sourceMode: IntermediateTextureStages['sourceMode']
 }
 
-interface FaceOverlayConfig {
-  enabled: boolean
-  x: number
-  y: number
-  scale: number
-  opacity: number
+interface IntermediateTextureStages {
+  original: string
+  projection: string
+  uvAligned: string
+  final: string
+  sourceMode: 'selected-aligned' | 'selected-image' | 'jingu-front' | 'original-local' | 'original-session' | 'aligned-crop-fallback' | 'api-face'
+  landmarkCount: number
+  featureWarpCount: number
+  textureLandmarkCount: number
+  uvTriangleCount: number
 }
 
 interface FaceMeshDiagnostic {
@@ -199,12 +286,96 @@ interface FaceMeshDiagnostic {
   matched: boolean
 }
 
-function loadFaceOverlayConfig(): FaceOverlayConfig {
+interface GlbFeatureSupport {
+  leftEye: boolean
+  rightEye: boolean
+  brows: boolean
+  nose: boolean
+  mouth: boolean
+}
+
+interface FeatureBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface AlignedFeatureGeometry {
+  leftEye: FeatureBox
+  rightEye: FeatureBox
+  brows: FeatureBox
+  nose: FeatureBox
+  mouth: FeatureBox
+  landmarkCount: number
+}
+
+type StoredLandmark = { x: number; y: number; z?: number }
+
+function readAlignedLandmarks(): StoredLandmark[] | null {
+  const raw = localStorage.getItem(THREE_D_ALIGNED_LANDMARKS_KEY)
+    || sessionStorage.getItem(THREE_D_ALIGNED_LANDMARKS_KEY)
+  if (!raw) return null
   try {
-    const raw = localStorage.getItem(FACE_OVERLAY_KEY)
-    if (raw) return { enabled: true, x: 50, y: 43, scale: 1, opacity: 0.72, ...JSON.parse(raw) }
-  } catch { /* ignore */ }
-  return { enabled: true, x: 50, y: 43, scale: 1, opacity: 0.72 }
+    const landmarks = JSON.parse(raw) as StoredLandmark[]
+    return Array.isArray(landmarks) && landmarks.length >= 468 ? landmarks : null
+  } catch {
+    return null
+  }
+}
+
+function featureBox(landmarks: StoredLandmark[], indices: number[]): FeatureBox {
+  const points = indices.map(index => landmarks[index]).filter(Boolean)
+  if (!points.length) return { x: 0, y: 0, width: 0, height: 0 }
+  const minX = Math.min(...points.map(point => point.x))
+  const maxX = Math.max(...points.map(point => point.x))
+  const minY = Math.min(...points.map(point => point.y))
+  const maxY = Math.max(...points.map(point => point.y))
+  return {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2,
+    width: maxX - minX,
+    height: maxY - minY,
+  }
+}
+
+function featureGeometryFromLandmarks(landmarks: StoredLandmark[]): AlignedFeatureGeometry {
+  return {
+    leftEye: featureBox(landmarks, [362, 263, 386, 374, 385, 380]),
+    rightEye: featureBox(landmarks, [33, 133, 159, 145, 160, 144]),
+    brows: featureBox(landmarks, [70, 63, 105, 66, 107, 336, 296, 334, 293, 300]),
+    nose: featureBox(landmarks, [1, 2, 98, 327, 168, 195]),
+    mouth: featureBox(landmarks, [61, 291, 13, 14, 78, 308, 82, 312]),
+    landmarkCount: landmarks.length,
+  }
+}
+
+function readAlignedFeatureGeometry(): AlignedFeatureGeometry | null {
+  const landmarks = readAlignedLandmarks()
+  if (!landmarks) return null
+  return featureGeometryFromLandmarks(landmarks)
+}
+
+function inspectGlbFeatureSupport(root: THREE.Object3D): GlbFeatureSupport {
+  const names = new Set<string>()
+  let nose = false
+  root.traverse(obj => {
+    const mesh = obj as THREE.Mesh
+    if (!mesh.isMesh) return
+    Object.keys(mesh.morphTargetDictionary ?? {}).forEach(name => names.add(name.toLowerCase()))
+    if (/head|face|wolf3d_head|avatar_head|avatar_face/i.test(mesh.name || '')) {
+      const geometry = mesh.geometry as THREE.BufferGeometry
+      nose ||= Boolean(geometry.getAttribute('position')?.count && geometry.getAttribute('uv')?.count)
+    }
+  })
+  const has = (pattern: RegExp) => Array.from(names).some(name => pattern.test(name))
+  return {
+    leftEye: has(/eye.*(left|l$)|blink.*(left|l$)|squint.*(left|l$)/i),
+    rightEye: has(/eye.*(right|r$)|blink.*(right|r$)|squint.*(right|r$)/i),
+    brows: has(/brow/i),
+    nose,
+    mouth: has(/mouth|jaw|viseme|phoneme/i),
+  }
 }
 
 function loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
@@ -213,6 +384,16 @@ function loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
     const img = new Image()
     img.onload = () => { URL.revokeObjectURL(url); resolve(img) }
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('face image load failed')) }
+    img.src = url
+  })
+}
+
+function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('face image load failed'))
     img.src = url
   })
 }
@@ -240,12 +421,82 @@ function sampleFaceColor(ctx: CanvasRenderingContext2D, size: number): THREE.Col
       if (nx * nx + ny * ny > 1) continue
       const i = (y * size + x) * 4
       const pr = image[i], pg = image[i + 1], pb = image[i + 2]
+      if (image[i + 3] < 20) continue
       if (pr < 35 || pg < 25 || pb < 20 || pr > 245 || pg > 245 || pb > 245) continue
       r += pr; g += pg; b += pb; total += 1
     }
   }
   if (!total) return new THREE.Color(0xd8a98e)
   return new THREE.Color(r / total / 255, g / total / 255, b / total / 255)
+}
+
+function sampleLipColor(ctx: CanvasRenderingContext2D, size: number, skin: THREE.Color): THREE.Color {
+  const image = ctx.getImageData(0, 0, size, size).data
+  let r = 0, g = 0, b = 0, total = 0
+  for (let y = Math.floor(size * 0.48); y < Math.floor(size * 0.72); y += 2) {
+    for (let x = Math.floor(size * 0.34); x < Math.floor(size * 0.66); x += 2) {
+      const i = (y * size + x) * 4
+      const pr = image[i], pg = image[i + 1], pb = image[i + 2]
+      if (image[i + 3] < 20) continue
+      if (pr < 35 || pg < 20 || pb < 20) continue
+      if (pr < pg * 1.12 || pr < pb * 1.08) continue
+      r += pr; g += pg; b += pb; total += 1
+    }
+  }
+  if (!total) return skin.clone().lerp(new THREE.Color(0x9d4f55), 0.38)
+  return new THREE.Color(r / total / 255, g / total / 255, b / total / 255)
+}
+
+function makeFaceProjection(source: HTMLCanvasElement, alignmentMask?: HTMLCanvasElement | null): HTMLCanvasElement {
+  const canvas = document.createElement('canvas')
+  canvas.width = source.width
+  canvas.height = source.height
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(source, 0, 0)
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const maskPixels = alignmentMask
+    ? alignmentMask.getContext('2d')?.getImageData(0, 0, alignmentMask.width, alignmentMask.height).data
+    : null
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    const r = maskPixels?.[i] ?? pixels.data[i]
+    const g = maskPixels?.[i + 1] ?? pixels.data[i + 1]
+    const b = maskPixels?.[i + 2] ?? pixels.data[i + 2]
+    const brightness = Math.max(r, g, b)
+    if (brightness <= 28) {
+      pixels.data[i + 3] = 0
+    } else if (brightness < 58) {
+      pixels.data[i + 3] = Math.round(((brightness - 28) / 30) * pixels.data[i + 3])
+    }
+  }
+  ctx.putImageData(pixels, 0, 0)
+  return canvas
+}
+
+function makeOriginalLandmarkSource(source: HTMLCanvasElement, landmarks: StoredLandmark[] | null): HTMLCanvasElement {
+  const canvas = document.createElement('canvas')
+  canvas.width = source.width
+  canvas.height = source.height
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(source, 0, 0)
+  if (!landmarks?.length) return canvas
+  const xs = landmarks.map(point => point.x), ys = landmarks.map(point => point.y)
+  const minX = Math.min(...xs) * canvas.width, maxX = Math.max(...xs) * canvas.width
+  const minY = Math.min(...ys) * canvas.height, maxY = Math.max(...ys) * canvas.height
+  ctx.globalCompositeOperation = 'destination-in'
+  ctx.fillStyle = '#fff'
+  ctx.beginPath()
+  ctx.ellipse(
+    (minX + maxX) / 2,
+    (minY + maxY) / 2,
+    Math.max(1, (maxX - minX) * 0.72),
+    Math.max(1, (maxY - minY) * 0.82),
+    0,
+    0,
+    Math.PI * 2,
+  )
+  ctx.fill()
+  ctx.globalCompositeOperation = 'source-over'
+  return canvas
 }
 
 function makeSoftSkinTexture(base: THREE.Color): THREE.CanvasTexture {
@@ -292,22 +543,647 @@ async function buildRegisteredFaceTexture(): Promise<FaceTextureData | null> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), 2500)
   try {
-    const res = await fetch(`${API}/avatar/face?t=${Date.now()}`, { cache: 'no-store', signal: controller.signal })
-    if (!res.ok) return null
-    const img = await loadImageFromBlob(await res.blob())
+    const selectedImage = localStorage.getItem('mental-avatar-3d-face-image') || sessionStorage.getItem('mental-avatar-3d-face-image')
+    if (!selectedImage) return null
+    const sourceMode: IntermediateTextureStages['sourceMode'] = 'selected-aligned'
+    const img = await loadImageFromUrl(selectedImage)
+    const alignedLandmarks = readAlignedLandmarks()
+    if (!alignedLandmarks?.length) return null
     const sampleCanvas = document.createElement('canvas')
     sampleCanvas.width = FACE_TEXTURE_SIZE
     sampleCanvas.height = FACE_TEXTURE_SIZE
     const ctx = sampleCanvas.getContext('2d')
     if (!ctx) return null
-    drawCover(ctx, img, FACE_TEXTURE_SIZE)
-    const color = sampleFaceColor(ctx, FACE_TEXTURE_SIZE)
-    return { texture: makeSoftSkinTexture(color), color }
+    ctx.drawImage(img, 0, 0, FACE_TEXTURE_SIZE, FACE_TEXTURE_SIZE)
+    const projection = makeFaceProjection(sampleCanvas, null)
+    const projectionCtx = projection.getContext('2d')
+    if (!projectionCtx) return null
+    const color = sampleFaceColor(projectionCtx, FACE_TEXTURE_SIZE)
+    const lipColor = sampleLipColor(projectionCtx, FACE_TEXTURE_SIZE, color)
+    return {
+      texture: makeSoftSkinTexture(color),
+      color,
+      lipColor,
+      fullSource: sampleCanvas,
+      original: makeOriginalLandmarkSource(sampleCanvas, alignedLandmarks),
+      projection,
+      landmarks: alignedLandmarks,
+      sourceMode,
+    }
   } catch {
     return null
   } finally {
     window.clearTimeout(timer)
   }
+}
+
+function isSkinPixel(r: number, g: number, b: number, a: number) {
+  if (a < 24 || r < 35 || g < 22 || b < 16) return false
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  return r >= g * 0.92 && r > b * 1.04 && max - min > 8 && Math.abs(r - g) < 105
+}
+
+type Point2 = { x: number; y: number }
+
+function drawMappedTriangle(
+  ctx: CanvasRenderingContext2D,
+  image: CanvasImageSource,
+  sourcePoints: [Point2, Point2, Point2],
+  targetPoints: [Point2, Point2, Point2],
+) {
+  const [s0, s1, s2] = sourcePoints
+  const [d0, d1, d2] = targetPoints
+  const det = s0.x * (s1.y - s2.y) + s1.x * (s2.y - s0.y) + s2.x * (s0.y - s1.y)
+  if (Math.abs(det) < 0.0001) return
+  const a = (d0.x * (s1.y - s2.y) + d1.x * (s2.y - s0.y) + d2.x * (s0.y - s1.y)) / det
+  const b = (d0.y * (s1.y - s2.y) + d1.y * (s2.y - s0.y) + d2.y * (s0.y - s1.y)) / det
+  const c = (d0.x * (s2.x - s1.x) + d1.x * (s0.x - s2.x) + d2.x * (s1.x - s0.x)) / det
+  const d = (d0.y * (s2.x - s1.x) + d1.y * (s0.x - s2.x) + d2.y * (s1.x - s0.x)) / det
+  const e = (d0.x * (s1.x * s2.y - s2.x * s1.y) + d1.x * (s2.x * s0.y - s0.x * s2.y) + d2.x * (s0.x * s1.y - s1.x * s0.y)) / det
+  const f = (d0.y * (s1.x * s2.y - s2.x * s1.y) + d1.y * (s2.x * s0.y - s0.x * s2.y) + d2.y * (s0.x * s1.y - s1.x * s0.y)) / det
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.moveTo(d0.x, d0.y)
+  ctx.lineTo(d1.x, d1.y)
+  ctx.lineTo(d2.x, d2.y)
+  ctx.closePath()
+  ctx.clip()
+  ctx.transform(a, b, c, d, e, f)
+  ctx.drawImage(image, 0, 0)
+  ctx.restore()
+}
+
+function projectFaceToGlbUv(
+  ctx: CanvasRenderingContext2D,
+  projection: HTMLCanvasElement,
+  mesh: THREE.Mesh,
+  texture: THREE.Texture,
+  width: number,
+  height: number,
+) {
+  if (!/head|face|wolf3d_head|avatar_head|avatar_face/i.test(mesh.name || '')) return false
+  const geometry = mesh.geometry as THREE.BufferGeometry
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+  const uv = geometry.getAttribute('uv') as THREE.BufferAttribute | undefined
+  if (!position?.count || !uv?.count || position.count !== uv.count) return false
+  const normal = geometry.getAttribute('normal') as THREE.BufferAttribute | undefined
+
+  let minX = Number.POSITIVE_INFINITY, maxX = Number.NEGATIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY
+  for (let i = 0; i < position.count; i += 1) {
+    if (normal && normal.getZ(i) < 0.05) continue
+    const x = position.getX(i), y = position.getY(i)
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+  }
+  if (!Number.isFinite(minX) || maxX - minX < 0.0001 || maxY - minY < 0.0001) return false
+
+  const sourcePixels = projection.getContext('2d')!.getImageData(0, 0, projection.width, projection.height).data
+  let faceMinX = projection.width, faceMaxX = 0, faceMinY = projection.height, faceMaxY = 0
+  for (let y = 0; y < projection.height; y += 3) {
+    for (let x = 0; x < projection.width; x += 3) {
+      if (sourcePixels[(y * projection.width + x) * 4 + 3] < 20) continue
+      faceMinX = Math.min(faceMinX, x); faceMaxX = Math.max(faceMaxX, x)
+      faceMinY = Math.min(faceMinY, y); faceMaxY = Math.max(faceMaxY, y)
+    }
+  }
+  if (faceMaxX <= faceMinX || faceMaxY <= faceMinY) return false
+
+  const index = geometry.index
+  const triangleCount = index ? Math.floor(index.count / 3) : Math.floor(position.count / 3)
+  const textureY = (v: number) => (texture.flipY ? 1 - v : v) * height
+  const sourcePoint = (vertex: number): Point2 => ({
+    x: faceMinX + ((position.getX(vertex) - minX) / (maxX - minX)) * (faceMaxX - faceMinX),
+    y: faceMinY + ((maxY - position.getY(vertex)) / (maxY - minY)) * (faceMaxY - faceMinY),
+  })
+  const targetPoint = (vertex: number): Point2 => ({
+    x: uv.getX(vertex) * width,
+    y: textureY(uv.getY(vertex)),
+  })
+
+  let projected = 0
+  ctx.save()
+  ctx.globalAlpha = 0.82
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const i0 = index ? index.getX(triangle * 3) : triangle * 3
+    const i1 = index ? index.getX(triangle * 3 + 1) : triangle * 3 + 1
+    const i2 = index ? index.getX(triangle * 3 + 2) : triangle * 3 + 2
+    const front = normal
+      ? (normal.getZ(i0) + normal.getZ(i1) + normal.getZ(i2)) / 3
+      : 1
+    if (front < 0.12) continue
+    drawMappedTriangle(
+      ctx,
+      projection,
+      [sourcePoint(i0), sourcePoint(i1), sourcePoint(i2)],
+      [targetPoint(i0), targetPoint(i1), targetPoint(i2)],
+    )
+    projected += 1
+  }
+  ctx.restore()
+  return projected > 0
+}
+
+interface PixelBox { x: number; y: number; width: number; height: number }
+
+function uvPixelBox(
+  mesh: THREE.Mesh,
+  texture: THREE.Texture,
+  width: number,
+  height: number,
+  indices: number[],
+): PixelBox | null {
+  const uv = (mesh.geometry as THREE.BufferGeometry).getAttribute('uv') as THREE.BufferAttribute | undefined
+  if (!uv?.count || !indices.length) return null
+  const points = indices.filter(index => index < uv.count).map(index => ({
+    x: uv.getX(index) * width,
+    y: (texture.flipY ? 1 - uv.getY(index) : uv.getY(index)) * height,
+  }))
+  if (!points.length) return null
+  const minX = Math.min(...points.map(point => point.x)), maxX = Math.max(...points.map(point => point.x))
+  const minY = Math.min(...points.map(point => point.y)), maxY = Math.max(...points.map(point => point.y))
+  if (maxX - minX < 2 || maxY - minY < 2 || maxX - minX > width * 0.58 || maxY - minY > height * 0.58) return null
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+}
+
+function uvPixelPoints(mesh: THREE.Mesh, texture: THREE.Texture, width: number, height: number, indices: number[]): Point2[] {
+  const uv = (mesh.geometry as THREE.BufferGeometry).getAttribute('uv') as THREE.BufferAttribute | undefined
+  if (!uv?.count) return []
+  return indices.filter(index => index < uv.count).map(index => ({
+    x: uv.getX(index) * width,
+    y: (texture.flipY ? 1 - uv.getY(index) : uv.getY(index)) * height,
+  }))
+}
+
+function convexHull(points: Point2[]): Point2[] {
+  const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y)
+  if (sorted.length < 3) return sorted
+  const cross = (o: Point2, a: Point2, b: Point2) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+  const lower: Point2[] = []
+  for (const point of sorted) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) lower.pop(); lower.push(point) }
+  const upper: Point2[] = []
+  for (const point of [...sorted].reverse()) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) upper.pop(); upper.push(point) }
+  return lower.slice(0, -1).concat(upper.slice(0, -1))
+}
+
+function morphFeatureUvBox(
+  mesh: THREE.Mesh,
+  texture: THREE.Texture,
+  width: number,
+  height: number,
+  pattern: RegExp,
+): PixelBox | null {
+  const geometry = mesh.geometry as THREE.BufferGeometry
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+  const morphs = geometry.morphAttributes.position as THREE.BufferAttribute[] | undefined
+  const dictionary = mesh.morphTargetDictionary ?? {}
+  if (!position?.count || !morphs?.length) return null
+  const matchedMorphs = Object.entries(dictionary)
+    .filter(([name]) => pattern.test(name))
+    .map(([, index]) => morphs[index])
+    .filter(Boolean)
+  if (!matchedMorphs.length) return null
+
+  const strengths = new Float32Array(position.count)
+  let maxStrength = 0
+  for (const morph of matchedMorphs) {
+    for (let i = 0; i < Math.min(position.count, morph.count); i += 1) {
+      const dx = geometry.morphTargetsRelative ? morph.getX(i) : morph.getX(i) - position.getX(i)
+      const dy = geometry.morphTargetsRelative ? morph.getY(i) : morph.getY(i) - position.getY(i)
+      const dz = geometry.morphTargetsRelative ? morph.getZ(i) : morph.getZ(i) - position.getZ(i)
+      const strength = Math.hypot(dx, dy, dz)
+      strengths[i] = Math.max(strengths[i], strength)
+      maxStrength = Math.max(maxStrength, strength)
+    }
+  }
+  if (maxStrength <= 0) return null
+  const indices: number[] = []
+  const threshold = maxStrength * 0.1
+  for (let i = 0; i < strengths.length; i += 1) if (strengths[i] >= threshold) indices.push(i)
+  return uvPixelBox(mesh, texture, width, height, indices)
+}
+
+function morphFeatureUvPoints(mesh: THREE.Mesh, texture: THREE.Texture, width: number, height: number, pattern: RegExp): Point2[] {
+  const geometry = mesh.geometry as THREE.BufferGeometry
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+  const morphs = geometry.morphAttributes.position as THREE.BufferAttribute[] | undefined
+  const dictionary = mesh.morphTargetDictionary ?? {}
+  if (!position?.count || !morphs?.length) return []
+  const matchedMorphs = Object.entries(dictionary).filter(([name]) => pattern.test(name)).map(([, index]) => morphs[index]).filter(Boolean)
+  if (!matchedMorphs.length) return []
+  const strengths = new Float32Array(position.count)
+  let maxStrength = 0
+  for (const morph of matchedMorphs) for (let i = 0; i < Math.min(position.count, morph.count); i += 1) {
+    const dx = geometry.morphTargetsRelative ? morph.getX(i) : morph.getX(i) - position.getX(i)
+    const dy = geometry.morphTargetsRelative ? morph.getY(i) : morph.getY(i) - position.getY(i)
+    const dz = geometry.morphTargetsRelative ? morph.getZ(i) : morph.getZ(i) - position.getZ(i)
+    strengths[i] = Math.max(strengths[i], Math.hypot(dx, dy, dz)); maxStrength = Math.max(maxStrength, strengths[i])
+  }
+  if (maxStrength <= 0) return []
+  const indices: number[] = []
+  for (let i = 0; i < strengths.length; i += 1) if (strengths[i] >= maxStrength * 0.1) indices.push(i)
+  return uvPixelPoints(mesh, texture, width, height, indices)
+}
+
+function noseFeatureUvBox(mesh: THREE.Mesh, texture: THREE.Texture, width: number, height: number): PixelBox | null {
+  const geometry = mesh.geometry as THREE.BufferGeometry
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+  const normal = geometry.getAttribute('normal') as THREE.BufferAttribute | undefined
+  if (!position?.count) return null
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
+  for (let i = 0; i < position.count; i += 1) {
+    if (normal && normal.getZ(i) < 0.08) continue
+    minX = Math.min(minX, position.getX(i)); maxX = Math.max(maxX, position.getX(i))
+    minY = Math.min(minY, position.getY(i)); maxY = Math.max(maxY, position.getY(i))
+    minZ = Math.min(minZ, position.getZ(i)); maxZ = Math.max(maxZ, position.getZ(i))
+  }
+  const indices: number[] = []
+  for (let i = 0; i < position.count; i += 1) {
+    if (normal && normal.getZ(i) < 0.08) continue
+    const nx = (position.getX(i) - minX) / Math.max(0.0001, maxX - minX)
+    const ny = (maxY - position.getY(i)) / Math.max(0.0001, maxY - minY)
+    const nz = (position.getZ(i) - minZ) / Math.max(0.0001, maxZ - minZ)
+    if (nx > 0.35 && nx < 0.65 && ny > 0.30 && ny < 0.70 && nz > 0.48) indices.push(i)
+  }
+  return uvPixelBox(mesh, texture, width, height, indices)
+}
+
+function noseFeatureUvPoints(mesh: THREE.Mesh, texture: THREE.Texture, width: number, height: number): Point2[] {
+  const geometry = mesh.geometry as THREE.BufferGeometry
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+  const normal = geometry.getAttribute('normal') as THREE.BufferAttribute | undefined
+  if (!position?.count) return []
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
+  for (let i = 0; i < position.count; i += 1) { if (normal && normal.getZ(i) < 0.08) continue; minX = Math.min(minX, position.getX(i)); maxX = Math.max(maxX, position.getX(i)); minY = Math.min(minY, position.getY(i)); maxY = Math.max(maxY, position.getY(i)); minZ = Math.min(minZ, position.getZ(i)); maxZ = Math.max(maxZ, position.getZ(i)) }
+  const indices: number[] = []
+  for (let i = 0; i < position.count; i += 1) {
+    if (normal && normal.getZ(i) < 0.08) continue
+    const nx = (position.getX(i) - minX) / Math.max(0.0001, maxX - minX), ny = (maxY - position.getY(i)) / Math.max(0.0001, maxY - minY), nz = (position.getZ(i) - minZ) / Math.max(0.0001, maxZ - minZ)
+    if (nx > 0.35 && nx < 0.65 && ny > 0.30 && ny < 0.70 && nz > 0.48) indices.push(i)
+  }
+  return uvPixelPoints(mesh, texture, width, height, indices)
+}
+
+function drawFeaturePatch(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  sourceBox: FeatureBox,
+  targetBox: PixelBox | null,
+  round = true,
+) {
+  // One independent source-feature -> target-UV warp. This is intentionally
+  // not derived from a global face transform: each feature gets its own scale,
+  // padding, clip shape, and UV destination.
+  if (!targetBox || sourceBox.width <= 0 || sourceBox.height <= 0) return false
+  const sourcePadX = sourceBox.width * 0.48
+  const sourcePadY = sourceBox.height * 0.65
+  const sx = Math.max(0, (sourceBox.x - sourceBox.width / 2 - sourcePadX) * source.width)
+  const sy = Math.max(0, (sourceBox.y - sourceBox.height / 2 - sourcePadY) * source.height)
+  const sw = Math.min(source.width - sx, (sourceBox.width + sourcePadX * 2) * source.width)
+  const sh = Math.min(source.height - sy, (sourceBox.height + sourcePadY * 2) * source.height)
+  const padX = targetBox.width * 0.28
+  const padY = targetBox.height * 0.4
+  const dx = targetBox.x - padX, dy = targetBox.y - padY
+  const dw = targetBox.width + padX * 2, dh = targetBox.height + padY * 2
+  ctx.save()
+  ctx.globalAlpha = 0.94
+  ctx.beginPath()
+  if (round) ctx.ellipse(dx + dw / 2, dy + dh / 2, dw / 2, dh / 2, 0, 0, Math.PI * 2)
+  else ctx.rect(dx, dy, dw, dh)
+  ctx.clip()
+  ctx.drawImage(source, sx, sy, sw, sh, dx, dy, dw, dh)
+  ctx.restore()
+  return true
+}
+
+function drawPiecewiseFeatureWarp(ctx: CanvasRenderingContext2D, source: HTMLCanvasElement, sourceBox: FeatureBox, targetPoints: Point2[]) {
+  const hull = convexHull(targetPoints)
+  if (hull.length < 3 || sourceBox.width <= 0 || sourceBox.height <= 0) return false
+  const minX = Math.min(...hull.map(point => point.x)), maxX = Math.max(...hull.map(point => point.x))
+  const minY = Math.min(...hull.map(point => point.y)), maxY = Math.max(...hull.map(point => point.y))
+  const targetCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
+  const sourcePadX = sourceBox.width * 0.48, sourcePadY = sourceBox.height * 0.65
+  const sx = sourceBox.x - sourceBox.width / 2 - sourcePadX
+  const sy = sourceBox.y - sourceBox.height / 2 - sourcePadY
+  const sw = sourceBox.width + sourcePadX * 2, sh = sourceBox.height + sourcePadY * 2
+  const sourcePoint = (target: Point2): Point2 => ({
+    x: (sx + ((target.x - minX) / Math.max(1, maxX - minX)) * sw) * source.width,
+    y: (sy + ((target.y - minY) / Math.max(1, maxY - minY)) * sh) * source.height,
+  })
+  const sourceCenter = sourcePoint(targetCenter)
+  ctx.save(); ctx.globalAlpha = readUvWarpWeight()
+  for (let i = 0; i < hull.length; i += 1) {
+    const next = hull[(i + 1) % hull.length]
+    drawMappedTriangle(ctx, source, [sourceCenter, sourcePoint(hull[i]), sourcePoint(next)], [targetCenter, hull[i], next])
+  }
+  ctx.restore()
+  return true
+}
+
+function detectedFeaturePoints(landmarks: Point2[] | null, indices: number[]) {
+  if (!landmarks?.length) return []
+  return indices.map(index => landmarks[index]).filter((point): point is Point2 => Boolean(point))
+}
+
+function drawCorrespondedFeatureWarp(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  sourceLandmarks: StoredLandmark[],
+  targetLandmarks: Point2[],
+  indices: number[],
+) {
+  const pairs = indices.map(index => {
+    const sourcePoint = sourceLandmarks[index]
+    const targetPoint = targetLandmarks[index]
+    if (!sourcePoint || !targetPoint) return null
+    return {
+      source: { x: sourcePoint.x * source.width, y: sourcePoint.y * source.height },
+      target: targetPoint,
+    }
+  }).filter((pair): pair is { source: Point2; target: Point2 } => Boolean(pair))
+  if (pairs.length < 3) return false
+  const sourceCenter = pairs.reduce((sum, pair) => ({ x: sum.x + pair.source.x, y: sum.y + pair.source.y }), { x: 0, y: 0 })
+  sourceCenter.x /= pairs.length; sourceCenter.y /= pairs.length
+  const targetCenter = pairs.reduce((sum, pair) => ({ x: sum.x + pair.target.x, y: sum.y + pair.target.y }), { x: 0, y: 0 })
+  targetCenter.x /= pairs.length; targetCenter.y /= pairs.length
+  const ordered = [...pairs].sort((a, b) => Math.atan2(a.source.y - sourceCenter.y, a.source.x - sourceCenter.x) - Math.atan2(b.source.y - sourceCenter.y, b.source.x - sourceCenter.x))
+  ctx.save(); ctx.globalAlpha = readUvWarpWeight()
+  for (let i = 0; i < ordered.length; i += 1) {
+    const next = ordered[(i + 1) % ordered.length]
+    drawMappedTriangle(ctx, source, [sourceCenter, ordered[i].source, next.source], [targetCenter, ordered[i].target, next.target])
+  }
+  ctx.restore()
+  return true
+}
+
+type WarpTriangle = [number, number, number]
+
+function delaunayTriangles(points: Point2[]): WarpTriangle[] {
+  if (points.length < 3) return []
+  const bounds = points.reduce((box, point) => ({
+    minX: Math.min(box.minX, point.x), maxX: Math.max(box.maxX, point.x),
+    minY: Math.min(box.minY, point.y), maxY: Math.max(box.maxY, point.y),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity })
+  const span = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 1)
+  const center = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 }
+  const work = [...points,
+    { x: center.x - span * 20, y: center.y - span * 3 },
+    { x: center.x, y: center.y + span * 20 },
+    { x: center.x + span * 20, y: center.y - span * 3 },
+  ]
+  let triangles: WarpTriangle[] = [[points.length, points.length + 1, points.length + 2]]
+  const circumcircleContains = (triangle: WarpTriangle, point: Point2) => {
+    const a = work[triangle[0]], b = work[triangle[1]], c = work[triangle[2]]
+    const ax = a.x - point.x, ay = a.y - point.y
+    const bx = b.x - point.x, by = b.y - point.y
+    const cx = c.x - point.x, cy = c.y - point.y
+    const determinant = (ax * ax + ay * ay) * (bx * cy - cx * by)
+      - (bx * bx + by * by) * (ax * cy - cx * ay)
+      + (cx * cx + cy * cy) * (ax * by - bx * ay)
+    const orientation = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    return orientation > 0 ? determinant > 0 : determinant < 0
+  }
+  for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+    const bad = triangles.filter(triangle => circumcircleContains(triangle, work[pointIndex]))
+    const edges: Array<[number, number]> = []
+    bad.forEach(triangle => {
+      for (let i = 0; i < 3; i += 1) {
+        const edge: [number, number] = [triangle[i], triangle[(i + 1) % 3]]
+        const reverse = edges.findIndex(existing => existing[0] === edge[1] && existing[1] === edge[0])
+        if (reverse >= 0) edges.splice(reverse, 1)
+        else edges.push(edge)
+      }
+    })
+    triangles = triangles.filter(triangle => !bad.includes(triangle))
+    edges.forEach(([a, b]) => triangles.push([a, b, pointIndex]))
+  }
+  return triangles.filter(triangle => triangle.every(index => index < points.length))
+}
+
+function drawDenseCorrespondedWarp(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  sourceLandmarks: StoredLandmark[],
+  targetLandmarks: Point2[],
+) {
+  const pairs = sourceLandmarks.map((point, index) => {
+    const target = targetLandmarks[index]
+    return target ? {
+      source: { x: point.x * source.width, y: point.y * source.height },
+      target,
+    } : null
+  }).filter((pair): pair is { source: Point2; target: Point2 } => Boolean(pair))
+  if (pairs.length < 50) return 0
+  const triangles = delaunayTriangles(pairs.map(pair => pair.source))
+  ctx.save(); ctx.globalAlpha = readUvWarpWeight()
+  triangles.forEach(([a, b, c]) => drawMappedTriangle(
+    ctx,
+    source,
+    [pairs[a].source, pairs[b].source, pairs[c].source],
+    [pairs[a].target, pairs[b].target, pairs[c].target],
+  ))
+  ctx.restore()
+  return triangles.length
+}
+
+function alignFaceFeaturesInUv(
+  ctx: CanvasRenderingContext2D,
+  face: FaceTextureData,
+  mesh: THREE.Mesh,
+  texture: THREE.Texture,
+  width: number,
+  height: number,
+  textureLandmarks: Point2[] | null = null,
+) {
+  // This function is called only for a material already identified as a face
+  // material. Do not reject unnamed GLB head meshes here; that made the pure
+  // UV preview silently become fully transparent.
+  if (!face.landmarks?.length) return 0
+  const leftEye = featureBox(face.landmarks, [362, 263, 386, 374, 385, 380])
+  const rightEye = featureBox(face.landmarks, [33, 133, 159, 145, 160, 144])
+  const brows = featureBox(face.landmarks, [70, 63, 105, 66, 107, 336, 296, 334, 293, 300])
+  const nose = featureBox(face.landmarks, [1, 2, 98, 327, 168, 195])
+  const mouth = featureBox(face.landmarks, [61, 291, 13, 14, 78, 308, 82, 312])
+  let aligned = 0
+  // When both images have landmarks, use the same landmark IDs and triangulate
+  // each feature independently. Geometry UV regions are only a fallback for
+  // an existing texture where a face detector cannot find a frontal face.
+  const warp = (indices: number[], sourceBox: FeatureBox, fallback: Point2[]) => {
+    if (textureLandmarks && drawCorrespondedFeatureWarp(ctx, face.original, face.landmarks!, textureLandmarks, indices)) return true
+    return drawPiecewiseFeatureWarp(ctx, face.original, sourceBox, fallback)
+  }
+  if (warp([362, 263, 386, 374, 385, 380], leftEye, morphFeatureUvPoints(mesh, texture, width, height, /eye.*(left|_l|\.l)|blink.*(left|_l|\.l)|squint.*(left|_l|\.l)/i))) aligned += 1
+  if (warp([33, 133, 159, 145, 160, 144], rightEye, morphFeatureUvPoints(mesh, texture, width, height, /eye.*(right|_r|\.r)|blink.*(right|_r|\.r)|squint.*(right|_r|\.r)/i))) aligned += 1
+  if (warp([70, 63, 105, 66, 107, 336, 296, 334, 293, 300], brows, morphFeatureUvPoints(mesh, texture, width, height, /brow/i))) aligned += 1
+  if (warp([1, 2, 98, 327, 168, 195], nose, noseFeatureUvPoints(mesh, texture, width, height))) aligned += 1
+  if (warp([61, 291, 13, 14, 78, 308, 82, 312], mouth, morphFeatureUvPoints(mesh, texture, width, height, /mouth|jaw|viseme|phoneme/i))) aligned += 1
+  return aligned
+}
+
+function solveAffineLeastSquares(source: Point2[], target: Point2[]) {
+  if (source.length !== target.length || source.length < 3) return null
+  // Solve [x y 1] * [a c e; b d f] = [u v] using normal equations.
+  const ata = Array.from({ length: 3 }, () => [0, 0, 0])
+  const atx = [0, 0, 0]
+  const aty = [0, 0, 0]
+  source.forEach((point, index) => {
+    const row = [point.x, point.y, 1]
+    for (let r = 0; r < 3; r += 1) {
+      for (let c = 0; c < 3; c += 1) ata[r][c] += row[r] * row[c]
+      atx[r] += row[r] * target[index].x
+      aty[r] += row[r] * target[index].y
+    }
+  })
+  const solve = (matrix: number[][], rhs: number[]) => {
+    const m = matrix.map((row, i) => [...row, rhs[i]])
+    for (let col = 0; col < 3; col += 1) {
+      let pivot = col
+      for (let row = col + 1; row < 3; row += 1) if (Math.abs(m[row][col]) > Math.abs(m[pivot][col])) pivot = row
+      if (Math.abs(m[pivot][col]) < 0.000001) return null
+      ;[m[col], m[pivot]] = [m[pivot], m[col]]
+      const divisor = m[col][col]
+      for (let c = col; c < 4; c += 1) m[col][c] /= divisor
+      for (let row = 0; row < 3; row += 1) {
+        if (row === col) continue
+        const factor = m[row][col]
+        for (let c = col; c < 4; c += 1) m[row][c] -= factor * m[col][c]
+      }
+    }
+    return [m[0][3], m[1][3], m[2][3]]
+  }
+  const x = solve(ata, atx), y = solve(ata, aty)
+  if (!x || !y) return null
+  return { a: x[0], c: x[1], e: x[2], b: y[0], d: y[1], f: y[2] }
+}
+
+function center(box: FeatureBox | PixelBox): Point2 {
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+}
+
+function drawLandmarkAlignedFaceToUv(
+  ctx: CanvasRenderingContext2D,
+  face: FaceTextureData,
+  mesh: THREE.Mesh,
+  texture: THREE.Texture,
+  width: number,
+  height: number,
+) {
+  if (!face.landmarks || !/head|face|wolf3d_head|avatar_head|avatar_face/i.test(mesh.name || '')) return false
+  // Keep the landmark set paired with this exact original image. Reading storage
+  // again here can mix a previous crop/alignment session into the UV transform.
+  const sourceFeatures = featureGeometryFromLandmarks(face.landmarks)
+  if (!sourceFeatures) return false
+  const leftTarget = morphFeatureUvBox(mesh, texture, width, height, /eye.*(left|_l|\.l)|blink.*(left|_l|\.l)|squint.*(left|_l|\.l)/i)
+  const rightTarget = morphFeatureUvBox(mesh, texture, width, height, /eye.*(right|_r|\.r)|blink.*(right|_r|\.r)|squint.*(right|_r|\.r)/i)
+  const mouthTarget = morphFeatureUvBox(mesh, texture, width, height, /mouth|jaw|viseme|phoneme/i)
+  const noseTarget = noseFeatureUvBox(mesh, texture, width, height)
+  const browsTarget = morphFeatureUvBox(mesh, texture, width, height, /brow/i)
+  const targets = [leftTarget, rightTarget, browsTarget, noseTarget, mouthTarget]
+  const sourceBoxes = [sourceFeatures.leftEye, sourceFeatures.rightEye, sourceFeatures.brows, sourceFeatures.nose, sourceFeatures.mouth]
+  const sourcePoints: Point2[] = []
+  const targetPoints: Point2[] = []
+  targets.forEach((target, index) => {
+    if (!target) return
+    sourcePoints.push({ x: sourceBoxes[index].x * face.projection.width, y: sourceBoxes[index].y * face.projection.height })
+    targetPoints.push(center(target))
+  })
+  const transform = solveAffineLeastSquares(sourcePoints, targetPoints)
+  if (!transform) return false
+
+  const geometry = mesh.geometry as THREE.BufferGeometry
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+  const uv = geometry.getAttribute('uv') as THREE.BufferAttribute | undefined
+  const normal = geometry.getAttribute('normal') as THREE.BufferAttribute | undefined
+  if (!position?.count || !uv?.count) return false
+  const index = geometry.index
+  const triangleCount = index ? Math.floor(index.count / 3) : Math.floor(position.count / 3)
+  const textureY = (v: number) => (texture.flipY ? 1 - v : v) * height
+  ctx.save()
+  ctx.globalAlpha = 0.72
+  ctx.beginPath()
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const i0 = index ? index.getX(triangle * 3) : triangle * 3
+    const i1 = index ? index.getX(triangle * 3 + 1) : triangle * 3 + 1
+    const i2 = index ? index.getX(triangle * 3 + 2) : triangle * 3 + 2
+    if (normal && (normal.getZ(i0) + normal.getZ(i1) + normal.getZ(i2)) / 3 < 0.12) continue
+    ctx.moveTo(uv.getX(i0) * width, textureY(uv.getY(i0)))
+    ctx.lineTo(uv.getX(i1) * width, textureY(uv.getY(i1)))
+    ctx.lineTo(uv.getX(i2) * width, textureY(uv.getY(i2)))
+    ctx.closePath()
+  }
+  ctx.clip()
+  ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f)
+  ctx.drawImage(face.projection, 0, 0)
+  ctx.restore()
+  return true
+}
+
+async function transferFaceAppearance(
+  source: THREE.Texture,
+  face: FaceTextureData,
+  mesh: THREE.Mesh,
+  onStages?: (stages: IntermediateTextureStages) => void,
+): Promise<THREE.CanvasTexture | null> {
+  const image = source.image as CanvasImageSource & {
+    width?: number
+    height?: number
+    naturalWidth?: number
+    naturalHeight?: number
+    videoWidth?: number
+    videoHeight?: number
+  }
+  const width = image?.naturalWidth || image?.videoWidth || image?.width || 0
+  const height = image?.naturalHeight || image?.videoHeight || image?.height || 0
+  if (!width || !height) return null
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  try { ctx.drawImage(image, 0, 0, width, height) } catch { return null }
+  const originalDataUrl = canvas.toDataURL('image/png')
+
+  // Keep the selected image pixels unchanged. Only the landmark-driven UV
+  // warp below is allowed to modify the texture.
+  const projectionDataUrl = face.projection.toDataURL('image/png')
+  const textureLandmarks = await detectTextureLandmarks(source)
+  // Stage 2 is a pure UV image made from the registered source image only.
+  // Keep it separate from the final GLB texture so the diagnostic preview
+  // cannot hide the actual feature-level mapping under the base texture.
+  const uvCanvas = document.createElement('canvas')
+  uvCanvas.width = width
+  uvCanvas.height = height
+  const uvCtx = uvCanvas.getContext('2d')
+  if (!uvCtx) return null
+  const uvTriangleCount = textureLandmarks?.length && face.landmarks?.length
+    ? drawDenseCorrespondedWarp(uvCtx, face.original, face.landmarks, textureLandmarks)
+    : 0
+  const featureWarpCount = uvTriangleCount > 0 ? 5 : alignFaceFeaturesInUv(uvCtx, face, mesh, source, width, height, textureLandmarks)
+  // The same piecewise mapping is then composited onto the existing GLB map.
+  if (uvTriangleCount > 0) drawDenseCorrespondedWarp(ctx, face.original, face.landmarks!, textureLandmarks!)
+  else alignFaceFeaturesInUv(ctx, face, mesh, source, width, height, textureLandmarks)
+  const featureUvDataUrl = uvCanvas.toDataURL('image/png')
+  const finalDataUrl = canvas.toDataURL('image/png')
+  onStages?.({ original: originalDataUrl, projection: projectionDataUrl, uvAligned: featureUvDataUrl, final: finalDataUrl, sourceMode: face.sourceMode, landmarkCount: face.landmarks?.length ?? 0, featureWarpCount, textureLandmarkCount: textureLandmarks?.length ?? 0, uvTriangleCount })
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.name = `${source.name || 'glb-face'}-personalized`
+  texture.colorSpace = source.colorSpace || THREE.SRGBColorSpace
+  texture.flipY = source.flipY
+  texture.wrapS = source.wrapS
+  texture.wrapT = source.wrapT
+  texture.magFilter = source.magFilter
+  texture.minFilter = source.minFilter
+  texture.generateMipmaps = source.generateMipmaps
+  texture.repeat.copy(source.repeat)
+  texture.offset.copy(source.offset)
+  texture.center.copy(source.center)
+  texture.rotation = source.rotation
+  texture.needsUpdate = true
+  return texture
 }
 
 function materialLabel(mesh: THREE.Mesh, material: THREE.Material) {
@@ -319,39 +1195,68 @@ function isFaceMaterial(mesh: THREE.Mesh, material: THREE.Material) {
   return FACE_MATERIAL_RE.test(label) && !FACE_MATERIAL_EXCLUDE_RE.test(label)
 }
 
-function withFaceTexture(material: THREE.Material, face: FaceTextureData): THREE.Material {
+async function withFaceTexture(
+  mesh: THREE.Mesh,
+  material: THREE.Material,
+  face: FaceTextureData,
+  cache: Map<string, THREE.CanvasTexture>,
+  generated: THREE.Texture[],
+  onStages?: (stages: IntermediateTextureStages) => void,
+): Promise<THREE.Material> {
   const next = material.clone() as THREE.MeshStandardMaterial
   const original = next.color?.clone?.() ?? new THREE.Color(0xffffff)
-  next.color = original.lerp(face.color, next.map ? 0.35 : 0.7)
-  if (!next.map) next.map = face.texture
+  if (next.map) {
+    const cacheKey = `${next.map.uuid}:${mesh.uuid}`
+    let transferred = cache.get(cacheKey)
+    if (!transferred) {
+      transferred = await transferFaceAppearance(next.map, face, mesh, onStages) ?? undefined
+      if (transferred) {
+        cache.set(cacheKey, transferred)
+        generated.push(transferred)
+      }
+    }
+    if (transferred) next.map = transferred
+    // Preserve the GLB material color; do not apply a global tint over the
+    // selected texture after its pixels have already been kept unchanged.
+    next.color = original
+  } else {
+    next.map = face.texture
+    next.color = original
+  }
   next.roughness = Math.max(0.62, next.roughness ?? 0.7)
   next.metalness = Math.min(0.03, next.metalness ?? 0)
   next.needsUpdate = true
   return next
 }
 
-function applyRegisteredFaceTexture(root: THREE.Object3D, face: FaceTextureData): number {
+async function applyRegisteredFaceTexture(root: THREE.Object3D, face: FaceTextureData, onStages?: (stages: IntermediateTextureStages) => void) {
   let applied = 0
+  const generated: THREE.Texture[] = [face.texture]
+  const cache = new Map<string, THREE.CanvasTexture>()
+  const meshes: THREE.Mesh[] = []
   root.traverse(obj => {
     const mesh = obj as THREE.Mesh
-    if (!mesh.isMesh || !mesh.material) return
+    if (mesh.isMesh && mesh.material) meshes.push(mesh)
+  })
+  for (const mesh of meshes) {
     if (Array.isArray(mesh.material)) {
       let changed = false
-      const materials = mesh.material.map(mat => {
-        if (!isFaceMaterial(mesh, mat)) return mat
+      const materials: THREE.Material[] = []
+      for (const mat of mesh.material) {
+        if (!isFaceMaterial(mesh, mat)) { materials.push(mat); continue }
         changed = true
         applied += 1
-        return withFaceTexture(mat, face)
-      })
+        materials.push(await withFaceTexture(mesh, mat, face, cache, generated, onStages))
+      }
       if (changed) mesh.material = materials
-      return
+      continue
     }
     if (isFaceMaterial(mesh, mesh.material)) {
-      mesh.material = withFaceTexture(mesh.material, face)
+      mesh.material = await withFaceTexture(mesh, mesh.material, face, cache, generated, onStages)
       applied += 1
     }
-  })
-  return applied
+  }
+  return { applied, generated }
 }
 
 function inspectFaceMeshes(root: THREE.Object3D): FaceMeshDiagnostic[] {
@@ -413,8 +1318,10 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const clockRef = useRef(new THREE.Clock())
   const animFrameRef = useRef<number>(0)
   const objectUrlRef = useRef<string | null>(null)
+  const loadGenerationRef = useRef(0)
   const envTextureRef = useRef<THREE.Texture | null>(null)
-  const faceTextureRef = useRef<THREE.Texture | null>(null)
+  const faceTextureRefsRef = useRef<THREE.Texture[]>([])
+  const alignedFaceTextureRef = useRef(read3dFaceInputSignature())
   const morphMapRef = useRef<Record<string, MorphRef[]>>({})
   const morphGroupsRef = useRef<Record<string, string[]>>({})
   const morphValuesRef = useRef<Record<string, number>>({})
@@ -438,32 +1345,12 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const [showGuide, setShowGuide] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>(() => viewModeRef.current)
   const [faceTextureStatus, setFaceTextureStatus] = useState('')
-  const [faceOverlay, setFaceOverlay] = useState<FaceOverlayConfig>(loadFaceOverlayConfig)
-  const [faceOverlayUrl, setFaceOverlayUrl] = useState('')
+  const [intermediateTextureStages, setIntermediateTextureStages] = useState<IntermediateTextureStages | null>(null)
+  const [uvWarpWeight, setUvWarpWeight] = useState(readUvWarpWeight)
+  const [showDebugDetails, setShowDebugDetails] = useState(false)
+  const [alignedFeatureGeometry, setAlignedFeatureGeometry] = useState<AlignedFeatureGeometry | null>(readAlignedFeatureGeometry)
   const [faceMeshDiagnostics, setFaceMeshDiagnostics] = useState<FaceMeshDiagnostic[]>([])
-
-  const updateFaceOverlay = useCallback((patch: Partial<FaceOverlayConfig>) => {
-    setFaceOverlay(prev => {
-      const next = { ...prev, ...patch }
-      localStorage.setItem(FACE_OVERLAY_KEY, JSON.stringify(next))
-      return next
-    })
-  }, [])
-
-  const resetFaceOverlay = useCallback(() => {
-    updateFaceOverlay({ enabled: true, x: 50, y: 43, scale: 1, opacity: 0.72 })
-  }, [updateFaceOverlay])
-
-  const refreshFaceOverlayUrl = useCallback(async (force = false) => {
-    if (force) localStorage.removeItem(FACE_ALIGNED_PATCH_KEY)
-    if (force) localStorage.removeItem(FACE_SNAPSHOT_KEY)
-    setFaceOverlayUrl(getRegisteredFaceImageUrl())
-  }, [])
-
-  useEffect(() => {
-    if (!avatarLoaded) return
-    refreshFaceOverlayUrl()
-  }, [avatarLoaded, fileName, refreshFaceOverlayUrl])
+  const [glbFeatureSupport, setGlbFeatureSupport] = useState<GlbFeatureSupport | null>(null)
 
   const setView = useCallback((mode: ViewMode) => {    setViewMode(mode); viewModeRef.current = mode
     localStorage.setItem(VIEW_MODE_KEY, mode)
@@ -715,11 +1602,15 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const loadGLB = useCallback((url: string) => {
     const container = containerRef.current
     if (!container) return
-    setLoading(true); setError(''); setAvatarLoaded(false); setFaceTextureStatus('')
+    const generation = loadGenerationRef.current + 1
+    loadGenerationRef.current = generation
+    setLoading(true); setError(''); setAvatarLoaded(false); setFaceTextureStatus(''); setIntermediateTextureStages(null)
     setFaceMeshDiagnostics([])
+    setGlbFeatureSupport(null)
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
     if (rendererRef.current) { rendererRef.current.dispose(); container.innerHTML = '' }
-    faceTextureRef.current?.dispose(); faceTextureRef.current = null
+    faceTextureRefsRef.current.forEach(texture => texture.dispose())
+    faceTextureRefsRef.current = []
 
     const rect = container.getBoundingClientRect()
     const w = rect.width || container.offsetWidth || 800
@@ -762,6 +1653,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     cameraRef.current = camera; controlsRef.current = controls
 
     new GLTFLoader().load(url, (gltf) => {
+      if (generation !== loadGenerationRef.current) return
       const box = new THREE.Box3().setFromObject(gltf.scene)
       const size = box.getSize(new THREE.Vector3())
       const center = box.getCenter(new THREE.Vector3())
@@ -771,13 +1663,22 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
       gltf.scene.position.y += size.y * scale * 0.5 - 0.1
       scene.add(gltf.scene)
       setFaceMeshDiagnostics(inspectFaceMeshes(gltf.scene))
-      buildRegisteredFaceTexture().then(face => {
-        if (!face) { setFaceTextureStatus('Face photo not registered'); return }
-        faceTextureRef.current?.dispose()
-        faceTextureRef.current = face.texture
-        const count = applyRegisteredFaceTexture(gltf.scene, face)
-        setFaceTextureStatus(count > 0 ? `Face tone blended (${count})` : 'Face material not found')
-        if (count === 0) face.texture.dispose()
+      setGlbFeatureSupport(inspectGlbFeatureSupport(gltf.scene))
+      buildRegisteredFaceTexture().then(async face => {
+        if (generation !== loadGenerationRef.current) return
+        if (!face) { setFaceTextureStatus('선택된 원본 이미지의 landmark/UV source unavailable'); return }
+        faceTextureRefsRef.current.forEach(texture => texture.dispose())
+        const result = await applyRegisteredFaceTexture(gltf.scene, face, stages => setIntermediateTextureStages(stages))
+        if (generation !== loadGenerationRef.current) {
+          result.generated.forEach(texture => texture.dispose())
+          return
+        }
+        faceTextureRefsRef.current = result.generated
+        setFaceTextureStatus(result.applied > 0 ? `Face texture transferred (${result.applied})` : 'Face material not found')
+        if (result.applied === 0) {
+          result.generated.forEach(texture => texture.dispose())
+          faceTextureRefsRef.current = []
+        }
       }).catch(() => setFaceTextureStatus('Face tone failed'))
       if (gltf.animations.length > 0) {
         const mixer = new THREE.AnimationMixer(gltf.scene); mixerRef.current = mixer
@@ -917,6 +1818,26 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     }, undefined, (err) => { setError(String(err)); setLoading(false) })
   }, [])
 
+  // 3D 탭에서 새 이미지의 정렬 확인이 끝나면 저장된 얼굴 텍스처가 바뀐다.
+  // 공유 tracking 코드는 건드리지 않고 현재 GLB만 다시 로드해 새 texture 정보를 자동 반영한다.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const current = read3dFaceInputSignature()
+      if (current === alignedFaceTextureRef.current) return
+      alignedFaceTextureRef.current = current
+      setAlignedFeatureGeometry(readAlignedFeatureGeometry())
+      if (current && objectUrlRef.current) {
+        loadGLB(objectUrlRef.current)
+      } else if (current) {
+        buildRegisteredFaceTexture().then(face => {
+          if (!face) return
+          face.texture.dispose()
+        }).catch(() => {})
+      }
+    }, 500)
+    return () => window.clearInterval(timer)
+  }, [loadGLB])
+
   // 마운트 시 마지막 GLB 자동 로드
   useEffect(() => {
     const lastName = localStorage.getItem(AVATAR_FILE_KEY)
@@ -961,7 +1882,8 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
     rendererRef.current?.dispose()
     envTextureRef.current?.dispose()
-    faceTextureRef.current?.dispose()
+    faceTextureRefsRef.current.forEach(texture => texture.dispose())
+    faceTextureRefsRef.current = []
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
   }, [])
 
@@ -1061,32 +1983,38 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
       >
         <div ref={containerRef} className="w-full h-full" />
-        {faceOverlay.enabled && avatarLoaded && faceOverlayUrl && (
-          <img
-            src={faceOverlayUrl}
-            alt="registered face overlay"
-            className="face-overlay-image pointer-events-none absolute z-10 select-none rounded-[42%] object-cover shadow-[0_0_32px_rgba(0,0,0,0.28)]"
-            style={{
-              left: `${faceOverlay.x}%`,
-              top: `${faceOverlay.y}%`,
-              width: `${Math.round(190 * faceOverlay.scale)}px`,
-              height: `${Math.round(245 * faceOverlay.scale)}px`,
-              opacity: faceOverlay.opacity,
-              transform: 'translate(-50%, -50%)',
-              clipPath: 'ellipse(42% 48% at 50% 47%)',
-              mixBlendMode: 'normal',
-            }}
-            onError={() => updateFaceOverlay({ enabled: false })}
-          />
-        )}
-
         {/* 3D 탭 전용 얼굴 이미지 선택·정렬·웹캠 추적 패널 */}
         <FaceTrackingPanel
-          className="absolute bottom-3 left-3 z-30 w-[26rem] max-w-[calc(100%-1.5rem)] rounded-xl border border-gray-700 bg-black shadow-2xl overflow-hidden"
+          className="absolute bottom-20 left-3 z-30 w-[20rem] max-w-[calc(100%-1rem)] rounded-xl border border-gray-700 bg-black shadow-2xl overflow-hidden"
           preferRegisteredFace
           isolatedVideo
           storageScope="3d"
           imageOnly />
+
+        {showDebugDetails && alignedFeatureGeometry && (
+          <div className="absolute bottom-3 right-3 z-30 w-64 rounded-xl border border-cyan-600/70 bg-black/85 p-2 shadow-2xl backdrop-blur">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-cyan-100">Feature align 진단</span>
+              <span className="text-[9px] text-gray-500">landmark {alignedFeatureGeometry.landmarkCount}</span>
+            </div>
+            <div className="space-y-1 text-[9px] text-gray-300">
+              {([
+                ['왼쪽 눈', alignedFeatureGeometry.leftEye, glbFeatureSupport?.leftEye],
+                ['오른쪽 눈', alignedFeatureGeometry.rightEye, glbFeatureSupport?.rightEye],
+                ['눈썹', alignedFeatureGeometry.brows, glbFeatureSupport?.brows],
+                ['코', alignedFeatureGeometry.nose, glbFeatureSupport?.nose],
+                ['입', alignedFeatureGeometry.mouth, glbFeatureSupport?.mouth],
+              ] as Array<[string, FeatureBox, boolean | undefined]>).map(([label, box, supported]) => (
+                <div key={label} className="grid grid-cols-[3.2rem_1fr_auto] items-center gap-1.5 rounded bg-gray-900/70 px-1.5 py-1">
+                  <span>{label}</span>
+                  <span className="truncate text-gray-500">x {box.x.toFixed(3)} · y {box.y.toFixed(3)} · {box.width.toFixed(3)}×{box.height.toFixed(3)}</span>
+                  <span className={supported ? 'text-emerald-300' : 'text-amber-300'}>{supported ? 'UV 가능' : '확인 필요'}</span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[9px] leading-tight text-gray-400">영상 landmark와 GLB feature UV를 각각 대응시켜 정렬합니다.</p>
+          </div>
+        )}
 
         {/* 파일 선택 + 목록 (좌상단) */}
         <div className="absolute top-3 left-3 z-20 flex flex-col gap-1">
@@ -1109,84 +2037,66 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
             <p className="text-[10px] text-gray-400 px-1 truncate max-w-[220px]">현재: {fileName}</p>
           )}
           {faceTextureStatus && (
-            <p className="text-[10px] text-purple-200/90 px-1 truncate max-w-[260px]">{faceTextureStatus}</p>
-          )}
-          {avatarLoaded && (
-            <div className="mt-1 w-[220px] rounded-xl border border-gray-700 bg-black/60 p-2 text-[10px] text-gray-300 backdrop-blur">
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="font-medium text-gray-200">Face align</span>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => updateFaceOverlay({ enabled: !faceOverlay.enabled })}
-                    className="rounded border border-gray-600 px-1.5 py-0.5 text-gray-300 hover:border-gray-400 hover:text-white"
-                  >
-                    {faceOverlay.enabled ? 'Hide' : 'Show'}
-                  </button>
-                  <button
-                    onClick={resetFaceOverlay}
-                    className="rounded border border-gray-600 px-1.5 py-0.5 text-gray-300 hover:border-gray-400 hover:text-white"
-                  >
-                    Reset
-                  </button>
-                  <button
-                    onClick={() => refreshFaceOverlayUrl(true)}
-                    className="rounded border border-gray-600 px-1.5 py-0.5 text-gray-300 hover:border-gray-400 hover:text-white"
-                  >
-                    Reload
-                  </button>
-                </div>
-              </div>
-              <label className="mb-1 block">
-                X {faceOverlay.x.toFixed(1)}%
-                <input
-                  type="range"
-                  min="30"
-                  max="70"
-                  step="0.2"
-                  value={faceOverlay.x}
-                  onChange={e => updateFaceOverlay({ x: Number(e.target.value) })}
-                  className="mt-0.5 w-full accent-purple-500"
-                />
-              </label>
-              <label className="mb-1 block">
-                Y {faceOverlay.y.toFixed(1)}%
-                <input
-                  type="range"
-                  min="20"
-                  max="65"
-                  step="0.2"
-                  value={faceOverlay.y}
-                  onChange={e => updateFaceOverlay({ y: Number(e.target.value) })}
-                  className="mt-0.5 w-full accent-purple-500"
-                />
-              </label>
-              <label className="mb-1 block">
-                Size {faceOverlay.scale.toFixed(2)}
-                <input
-                  type="range"
-                  min="0.45"
-                  max="1.6"
-                  step="0.01"
-                  value={faceOverlay.scale}
-                  onChange={e => updateFaceOverlay({ scale: Number(e.target.value) })}
-                  className="mt-0.5 w-full accent-purple-500"
-                />
-              </label>
-              <label className="block">
-                Opacity {faceOverlay.opacity.toFixed(2)}
-                <input
-                  type="range"
-                  min="0.15"
-                  max="1"
-                  step="0.01"
-                  value={faceOverlay.opacity}
-                  onChange={e => updateFaceOverlay({ opacity: Number(e.target.value) })}
-                  className="mt-0.5 w-full accent-purple-500"
-                />
-              </label>
+            <div className="flex items-center gap-1 px-1">
+              <p className="min-w-0 flex-1 truncate text-[10px] text-purple-200/90">{faceTextureStatus}</p>
+              {avatarLoaded && objectUrlRef.current && (
+                <button
+                  onClick={() => loadGLB(objectUrlRef.current || '')}
+                  className="shrink-0 rounded border border-purple-400/60 px-1.5 py-0.5 text-[9px] text-purple-200 hover:bg-purple-500/20"
+                >
+                  원본 UV 다시 적용
+                </button>
+              )}
             </div>
           )}
-          {avatarLoaded && faceMeshDiagnostics.length > 0 && (
+          {intermediateTextureStages && (
+            <div className="mt-1 w-[300px] rounded-xl border border-purple-500/40 bg-black/75 p-2 text-[10px] text-gray-300 backdrop-blur">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="font-medium text-purple-100">Texture stages</span>
+                <button onClick={() => setShowDebugDetails(v => !v)} className="text-gray-400 hover:text-white">{showDebugDetails ? '간단히' : '상세'}</button>
+              </div>
+              <div className="mb-1.5 rounded bg-gray-950/90 px-1.5 py-1 text-[9px] leading-relaxed">
+                <div>source: <span className={intermediateTextureStages.sourceMode === 'selected-aligned' || intermediateTextureStages.sourceMode === 'selected-image' || intermediateTextureStages.sourceMode === 'jingu-front' || intermediateTextureStages.sourceMode.startsWith('original') ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.sourceMode}</span></div>
+                <div>landmarks: <span className="text-cyan-200">{intermediateTextureStages.landmarkCount}</span></div>
+                <div>existing texture landmarks: <span className={intermediateTextureStages.textureLandmarkCount > 0 ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.textureLandmarkCount || 'geometry UV fallback'}</span></div>
+                <div>whole-face UV triangles: <span className={intermediateTextureStages.uvTriangleCount > 0 ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.uvTriangleCount || 'feature fallback'}</span></div>
+                <div>feature UV warps: <span className={intermediateTextureStages.featureWarpCount > 0 ? 'text-emerald-300' : 'text-red-300'}>{intermediateTextureStages.featureWarpCount} / 5</span></div>
+                <div className="mt-1 border-t border-gray-800 pt-1">
+                  <div className="flex items-center justify-between"><span>warped UV weight</span><span className="text-cyan-200">{Math.round(uvWarpWeight * 100)}%</span></div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={uvWarpWeight}
+                    onChange={event => {
+                      const value = Number(event.target.value)
+                      setUvWarpWeight(value)
+                      localStorage.setItem(UV_WARP_WEIGHT_KEY, String(value))
+                      if (objectUrlRef.current) loadGLB(objectUrlRef.current)
+                    }}
+                    className="mt-1 w-full accent-cyan-400"
+                    aria-label="warped UV texture weight"
+                  />
+                  <div className="flex justify-between text-[8px] text-gray-500"><span>기존 texture</span><span>warped UV</span></div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {([
+                  ['original', '기존 texture - 저장'],
+                  ['uvAligned', '2 정렬 영상 · warped UV only'],
+                  ['projection', '3 정렬 source'],
+                  ['final', '4 최종 texture'],
+                ] as const).map(([key, label]) => (
+                  <a key={key} href={intermediateTextureStages[key]} download={`avatar-${key}.png`} className="group rounded-lg border border-gray-700 bg-gray-950/80 p-1 hover:border-purple-400">
+                    <img src={intermediateTextureStages[key]} alt={label} className="h-20 w-full rounded object-contain bg-black" />
+                    <span className="mt-1 block truncate text-center text-[9px] text-gray-400 group-hover:text-purple-200">{key === 'original' ? label : `${label} · 저장`}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {showDebugDetails && avatarLoaded && faceMeshDiagnostics.length > 0 && (
             <div className="mt-1 w-[260px] rounded-xl border border-gray-700 bg-black/60 p-2 text-[10px] text-gray-300 backdrop-blur">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="font-medium text-gray-200">GLB face UV</span>
