@@ -826,7 +826,7 @@ AVATAR_SYSTEM = """당신은 {name}의 디지털 아바타입니다.
 - 항상 1인칭("나는", "내가", "제 생각에는")으로 답하세요
 - 모르는 것은 "내 지식 범위 밖이에요" 라고 솔직하게 말하세요
 - 내 전문 분야({expertise})에 대해서는 깊이 있게 답하세요
-- 짧고 명확하게, 내 스타일({work_style})로 답하세요
+- {length_rule}
 - 위에 설정된 말투와 성격을 일관되게 유지하세요
 - 답변/추천을 할 때는 위 MBTI/성격/선호도와 "말하기 방식" 지침을 반영해서 그 사람에게 맞는 방식으로 답하세요
 - 단, "개방성", "성실성", "MBTI", "INTJ" 같은 특성 이름·점수·소제목을 답변 본문에 절대 직접 언급하거나 노출하지 마세요 — 그 지침은 말투에 자연스럽게 녹아있어야 하며, 사용자에게는 보이지 않는 배경 설정입니다"""
@@ -885,8 +885,15 @@ def _graphify_community_context(query: str) -> str:
         return ""
 
 
-def build_avatar_context(query: str = "") -> dict:
-    """아바타 채팅용 시스템 프롬프트 + 검색 결과 조합"""
+LENGTH_RULES = {
+    "concise": "짧고 명확하게, 2~3문장 이내로 내 스타일({work_style})로 답하세요",
+    "full": "필요한 만큼 충분히 자세하고 완결되게 답하세요. 짧게 요약하거나 문장 수를 스스로 제한하지 마세요. 다만 같은 말을 장황하게 반복하지는 마세요",
+}
+
+
+def build_avatar_context(query: str = "", verbosity: str = "concise") -> dict:
+    """아바타 채팅용 시스템 프롬프트 + 검색 결과 조합.
+    verbosity: "concise"(기본, 2~3문장) 또는 "full"(길이 제한 없이 충분히 답변) — 프론트 토글에서 전달."""
     profile = get_profile()
     interests = pattern.core_interests(6)
     trends = pattern.topic_trends(30)
@@ -970,6 +977,7 @@ def build_avatar_context(query: str = "") -> dict:
         f"- [{r['source']}] {r['title']}" for r in recent[:6]
     ]) or "(동기화된 항목 없음)"
 
+    length_rule = LENGTH_RULES.get(verbosity, LENGTH_RULES["concise"]).format(work_style=work_style)
     system = AVATAR_SYSTEM.format(
         name=name,
         memory_section=memory_section,
@@ -981,6 +989,7 @@ def build_avatar_context(query: str = "") -> dict:
         style_section=style_section,
         preference_section=preference_section,
         behavior_section=behavior_section,
+        length_rule=length_rule,
     )
 
     # 관련 컨텍스트가 있으면 추가

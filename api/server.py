@@ -7,6 +7,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import hashlib
 import uuid, subprocess, time, json
+import shutil as _shutil
 import re as _re
 from pathlib import Path
 
@@ -901,7 +902,8 @@ def interview_delete(sid):
 @app.route("/avatar/context", methods=["GET"])
 def avatar_context():
     q = request.args.get("q", "")
-    return jsonify(avatar_core.build_avatar_context(q))
+    verbosity = request.args.get("verbosity", "concise")
+    return jsonify(avatar_core.build_avatar_context(q, verbosity=verbosity))
 
 
 @app.route("/conversation/log", methods=["POST"])

@@ -23,6 +23,8 @@ const THREE_D_ALIGNED_LANDMARKS_KEY = 'mental-avatar-3d-aligned-landmarks'
 const UV_WARP_WEIGHT_KEY = 'mental-avatar-uv-warp-weight'
 const FACE_TEXTURE_EXACTNESS_KEY = 'mental-avatar-face-texture-exactness'
 const FACE_TEXTURE_BRIGHTNESS_KEY = 'mental-avatar-face-texture-brightness'
+const ANSWER_LENGTH_KEY = 'mental-avatar-answer-length'
+type AnswerLength = 'concise' | 'full'
 const MP_WASM = '/mediapipe/wasm'
 const MP_MODEL = '/mediapipe/models/face_landmarker.task'
 
@@ -94,38 +96,11 @@ function localTimestamp(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
-// TTS로 읽을 텍스트를 만든다 — 답변이 길면(XTTS 한국어 95자 제한 근처) 첫 문장만 읽고
-// 나머지는 채팅창의 전체 텍스트를 참고하도록 안내한다. 길게 읽으려다 느려지거나
-// 실패하는 것보다, 짧게라도 확실히 들리는 쪽을 우선한다.
-const SPOKEN_TEXT_LIMIT = 92
-const SPOKEN_FALLBACK_PHRASES = [
-  '핵심만요.',
-  '짧게 읽을게요.',
-  '요점만 말씀드릴게요.',
-  '핵심만 말씀드릴게요.',
-  '나머지는 화면에서 볼게요.',
-  '중요한 부분만 읽을게요.',
-  '길이를 줄여서 말할게요.',
-  '이어지는 내용은 채팅에 남길게요.',
-  '자세한 맥락은 화면에서 확인해 주세요.',
-  '자세한 내용은 채팅을 봐 주세요.',
-  '더 궁금하시면 이어서 말씀해 주세요.',
-  '또 궁금한 점 있으세요?',
-  '혹시 다른 질문도 있으세요?',
-  '이어서 물어보셔도 좋아요.',
-  '궁금한 점 있으면 바로 말씀해 주세요.',
-  '다음 질문도 편하게 해 주세요.',
-  '원하시면 더 이어서 답할게요.',
-  '할 일이 있으면 바로 말씀해 주세요.',
-]
-
-function pickFallbackPhrase(seed: string, room: number): string {
-  const candidates = SPOKEN_FALLBACK_PHRASES.filter(phrase => phrase.length <= room)
-  if (!candidates.length) return ''
-  let hash = 0
-  for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0
-  return candidates[hash % candidates.length]
-}
+// XTTS v2의 한국어 문자 제한은 실제로 95자다 (xtts 콘다 환경의
+// TTS/tts/layers/xtts/tokenizer.py VoiceBpeTokenizer.char_limits["ko"] = 95 확인됨).
+// 넘겨도 에러는 안 나지만 그 지점부터 음성이 잘려 들린다 — 몇 글자 여유를 두고 문장
+// 단위로 쪼개 순서대로 재생하면 답변 전체를 끝까지 들을 수 있다.
+const TTS_CHUNK_LIMIT = 90
 
 function stripParentheticalText(text: string): string {
   let result = text
@@ -154,23 +129,34 @@ function stripParentheticalText(text: string): string {
     .trim()
 }
 
-function buildSpokenText(text: string): string {
+// 답변 전체를 TTS_CHUNK_LIMIT 이하 조각으로 문장 단위로 나눈다. 한 문장 자체가 제한을
+// 넘으면(쉼표 없는 긴 문장 등) 마지막 공백 기준으로 강제로 자른다.
+function splitForTts(text: string, limit: number = TTS_CHUNK_LIMIT): string[] {
   const trimmed = stripParentheticalText(text)
-  if (trimmed.length <= SPOKEN_TEXT_LIMIT) return trimmed
-  const match = trimmed.match(/^[\s\S]*?[.!?](?=\s|$)/)
-  let firstSentence = (match ? match[0] : trimmed).trim()
-  if (!firstSentence) return trimmed.slice(0, SPOKEN_TEXT_LIMIT).trim()
-
-  const room = SPOKEN_TEXT_LIMIT - firstSentence.length - 1
-  const fallback = pickFallbackPhrase(trimmed, room)
-  if (fallback) return `${firstSentence} ${fallback}`
-
-  if (firstSentence.length > SPOKEN_TEXT_LIMIT) {
-    firstSentence = firstSentence.slice(0, SPOKEN_TEXT_LIMIT).trim()
+  if (!trimmed) return []
+  const sentences = trimmed.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) ?? [trimmed]
+  const chunks: string[] = []
+  let current = ''
+  for (const raw of sentences) {
+    let sentence = raw.trim()
+    while (sentence.length > limit) {
+      let cut = sentence.lastIndexOf(' ', limit)
+      if (cut < limit * 0.5) cut = limit
+      if (current) { chunks.push(current); current = '' }
+      chunks.push(sentence.slice(0, cut).trim())
+      sentence = sentence.slice(cut).trim()
+    }
+    if (!sentence) continue
+    const candidate = current ? `${current} ${sentence}` : sentence
+    if (candidate.length > limit) {
+      if (current) chunks.push(current)
+      current = sentence
+    } else {
+      current = candidate
+    }
   }
-  return firstSentence.endsWith('.') || firstSentence.endsWith('!') || firstSentence.endsWith('?')
-    ? firstSentence
-    : `${firstSentence}...`
+  if (current) chunks.push(current)
+  return chunks
 }
 const IDB_NAME = 'mental-avatar-glb'
 const IDB_STORE = 'glb-files'
@@ -387,6 +373,36 @@ function inspectGlbFeatureSupport(root: THREE.Object3D): GlbFeatureSupport {
     brows: has(/brow/i),
     nose,
     mouth: has(/mouth|jaw|viseme|phoneme/i),
+  }
+}
+
+// RPM/Avaturn 계열 리그는 Head/Neck/Spine2(가슴) 본 이름이 표준화되어 있다 — 얼굴 blendshape가
+// 없어도 이 본들만 있으면 고개 움직임/호흡을 코드로 구동할 수 있다.
+function findBoneByName(root: THREE.Object3D, names: string[]): THREE.Object3D | null {
+  const lower = names.map(n => n.toLowerCase())
+  let found: THREE.Object3D | null = null
+  root.traverse(obj => {
+    if (found) return
+    if (lower.includes(obj.name.toLowerCase())) found = obj
+  })
+  return found
+}
+
+// baked idle 클립이 이 본을 이미 애니메이션하고 있으면 절대값으로 덮어쓰지 않고(클립이 만든
+// 자세가 지워짐) 현재 쿼터니언 위에 작은 회전을 곱해서 얹는다. 클립이 건드리지 않는 본만
+// 캡처해둔 bind pose(rest) 기준 절대값으로 설정한다 — 이 경우엔 절대값 대입이 안전하고
+// (아무도 안 건드리므로 드리프트 없음), animated 본에 절대값을 쓰면 클립 결과를 지워버린다.
+function applyBoneOffset(
+  bone: THREE.Object3D | null,
+  rest: { x: number; y: number; z: number } | undefined,
+  animated: boolean,
+  x: number, y: number, z: number,
+) {
+  if (!bone) return
+  if (animated) {
+    bone.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z)))
+  } else if (rest) {
+    bone.rotation.set(rest.x + x, rest.y + y, rest.z + z)
   }
 }
 
@@ -652,6 +668,22 @@ function drawMappedTriangle(
 ) {
   const [s0, s1, s2] = sourcePoints
   const [d0, d1, d2] = targetPoints
+  // Canvas anti-aliasing can leave a one-pixel gap between independently
+  // clipped UV triangles. That gap exposes the base texture as a mesh-like
+  // triangular seam, especially when the UV warp is composited with alpha.
+  // Expand only the destination clip polygon; the affine source mapping still
+  // comes from the original triangle, so neighboring triangles cover the seam.
+  const targetCenter = targetPoints.reduce(
+    (sum, point) => ({ x: sum.x + point.x / 3, y: sum.y + point.y / 3 }),
+    { x: 0, y: 0 },
+  )
+  const overlap = Math.max(0.75, Math.min(ctx.canvas.width, ctx.canvas.height) * 0.002)
+  const expandedTargetPoints = targetPoints.map((point) => {
+    const dx = point.x - targetCenter.x
+    const dy = point.y - targetCenter.y
+    const length = Math.max(Math.hypot(dx, dy), 1)
+    return { x: point.x + (dx / length) * overlap, y: point.y + (dy / length) * overlap }
+  }) as [Point2, Point2, Point2]
   const det = s0.x * (s1.y - s2.y) + s1.x * (s2.y - s0.y) + s2.x * (s0.y - s1.y)
   if (Math.abs(det) < 0.0001) return
   const a = (d0.x * (s1.y - s2.y) + d1.x * (s2.y - s0.y) + d2.x * (s0.y - s1.y)) / det
@@ -663,9 +695,9 @@ function drawMappedTriangle(
 
   ctx.save()
   ctx.beginPath()
-  ctx.moveTo(d0.x, d0.y)
-  ctx.lineTo(d1.x, d1.y)
-  ctx.lineTo(d2.x, d2.y)
+  ctx.moveTo(expandedTargetPoints[0].x, expandedTargetPoints[0].y)
+  ctx.lineTo(expandedTargetPoints[1].x, expandedTargetPoints[1].y)
+  ctx.lineTo(expandedTargetPoints[2].x, expandedTargetPoints[2].y)
   ctx.closePath()
   ctx.clip()
   ctx.transform(a, b, c, d, e, f)
@@ -1209,7 +1241,10 @@ async function transferFaceAppearance(
   // dark details and facial features retain their original luminance.
   const projectionDataUrl = face.projection.toDataURL('image/png')
   const textureLandmarks = await detectTextureLandmarks(source)
-  harmonizeRemainingSkinTone(ctx, face.color)
+  // warped UV weight가 0이면 워프뿐 아니라 피부톤 보정도 전혀 없어야 진짜 "원본 3D"가 된다 —
+  // 이전엔 이 보정이 weight와 무관하게 항상 걸려서 0%에서도 원본과 색이 달라 보였다.
+  const uvWeight = readUvWarpWeight()
+  if (uvWeight > 0) harmonizeRemainingSkinTone(ctx, face.color, 0.72 * uvWeight)
   // Stage 2 is a pure UV image made from the registered source image only.
   // Keep it separate from the final GLB texture so the diagnostic preview
   // cannot hide the actual feature-level mapping under the base texture.
@@ -1417,6 +1452,43 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   const blinkKeysRef = useRef<string[]>([])
   const blinkStateRef = useRef<{ phase: 'idle' | 'closing' | 'opening'; elapsed: number; next: number }>({ phase: 'idle', elapsed: 0, next: 2000 + Math.random() * 3000 })
 
+  // 얼굴 morph target이 없는 GLB(T1 등)에서도 "가만히 굳어있지 않게" 뼈대(bone)를 직접 돌려
+  // 고개를 움직인다 — blendshape와 무관하게 스켈레톤만 있으면 항상 동작한다.
+  const headBoneRef = useRef<THREE.Object3D | null>(null)
+  const neckBoneRef = useRef<THREE.Object3D | null>(null)
+  const chestBoneRef = useRef<THREE.Object3D | null>(null)
+  const headRestRef = useRef({ x: 0, y: 0, z: 0 })
+  const neckRestRef = useRef({ x: 0, y: 0, z: 0 })
+  const chestRestRef = useRef({ x: 0, y: 0, z: 0 })
+  // 상반신/전체 보기에서도 팔·다리·골반이 잔잔하게 움직이도록 — 본 이름별로 찾아둔다.
+  const bodyBonesRef = useRef<Record<string, THREE.Object3D | null>>({})
+  const bodyRestRef = useRef<Record<string, { x: number; y: number; z: number }>>({})
+  // GLB에 baked idle 클립이 팔 등을 이미 애니메이션하는 경우, 정적으로 캡처한 bind pose로
+  // 덮어쓰면 클립이 만든 자연스러운 자세(예: 팔이 이미 몸에 붙은 상태)가 지워진다. 클립이
+  // 실제로 건드리는 본 이름을 모아두고, 그 본에는 절대값 대입 대신 곱셈으로 살짝만 얹는다.
+  const animatedBoneNamesRef = useRef<Set<string>>(new Set())
+  // 가끔 한쪽 팔만 들었다가 자연스럽게 다시 내리는 제스처 — 양팔이 계속 들려 있지 않도록
+  // 'none' 상태에서는 팔이 항상 rest pose 근처(잔잔한 흔들림)로 돌아온다.
+  const armStateRef = useRef<{ active: 'none' | 'left' | 'right'; elapsed: number; duration: number; next: number }>(
+    { active: 'none', elapsed: 0, duration: 2, next: 4 + Math.random() * 4 },
+  )
+  type HeadGesture = 'idle' | 'lookSide' | 'nod' | 'tilt'
+  const headStateRef = useRef<{
+    gesture: HeadGesture
+    target: { yaw: number; pitch: number; roll: number }
+    current: { yaw: number; pitch: number; roll: number }
+    elapsed: number
+    duration: number
+    next: number
+  }>({
+    gesture: 'idle',
+    target: { yaw: 0, pitch: 0, roll: 0 },
+    current: { yaw: 0, pitch: 0, roll: 0 },
+    elapsed: 0,
+    duration: 3,
+    next: 2 + Math.random() * 2,
+  })
+
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [avatarLoaded, setAvatarLoaded] = useState(false)
@@ -1479,6 +1551,10 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   // 채팅
   const [input, setInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
+  const [answerLength, setAnswerLength] = useState<AnswerLength>(() => {
+    try { return (localStorage.getItem(ANSWER_LENGTH_KEY) as AnswerLength) || 'concise' }
+    catch { return 'concise' }
+  })
   const [speaking, setSpeaking] = useState(false)
   const speakingRef = useRef(false)
   // 자동재생이 브라우저 정책에 막히면, 사용자가 직접 눌러서 재생할 수 있는 버튼을 띄운다.
@@ -1515,7 +1591,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   }, [])
 
   // ── TTS ──
-  const playTTS = useCallback(async (text: string) => {
+  const playTTS = useCallback((text: string) => {
     // 응답이 연달아 오면(스트리밍 지연 등으로) 이전 호출의 오디오가 뒤늦게 재생되어
     // 화면에 보이는 최신 답변과 다른 내용을 읽는 문제를 막는다 — 이전 재생을 즉시 끊고,
     // 이 호출 이후에 더 새로운 호출이 시작되면 이 호출은 재생하지 않고 조용히 종료한다.
@@ -1526,69 +1602,86 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
 
     setSpeaking(true); speakingRef.current = true
     emotionRef.current = classifyEmotion(text)
-    // 답변이 길면 첫 문장만 읽고 나머지는 채팅창을 보라고 안내 — TTS로 실제 재생되는
-    // 텍스트는 이 짧은 버전이다 (긴 텍스트는 XTTS가 느려지거나 실패하기 쉽다).
-    const spoken = buildSpokenText(text)
-    let finished = false
-    const failsafe = setTimeout(() => done(), 2000 + spoken.length * 200)
-    const done = () => {
-      if (finished) return; finished = true
-      clearTimeout(failsafe)
+    // XTTS 한국어 95자 제한 때문에 답변 전체를 문장 단위 조각으로 나눠 순서대로 재생한다
+    // (한 번에 넘기면 그 지점부터 음성이 잘림) — 그래야 답변 전체를 끝까지 들을 수 있다.
+    const chunks = splitForTts(text)
+    const finishAll = () => {
       if (myGen !== ttsGenRef.current) return // 이미 더 새로운 응답으로 대체됨
       setSpeaking(false); speakingRef.current = false
       emotionRef.current = 'neutral'
     }
-    try {
-      const form = new FormData(); form.append('text', spoken)
-      form.append('voice', selectedVoice.kind === 'template' ? selectedVoice.id : 'mine')
-      const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
-      if (!res.ok) throw new Error()
-      const blob = await res.blob()
-      if (myGen !== ttsGenRef.current) return // 대기하는 동안 더 새로운 응답이 시작됨
-      const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
-      activeAudioRef.current = audio
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
-      const ctx = audioCtxRef.current
-      if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
-      if (myGen !== ttsGenRef.current) { URL.revokeObjectURL(url); return }
-      // AudioContext가 running이 아니면 립싱크 분석용 그래프에 태우지 않는다 — 그 상태로
-      // createMediaElementSource에 연결하면 오디오가 먼 채널로 재생될 수 있다.
-      // 립싱크 없이 원본 경로로 재생하더라도 "소리가 나는 것"이 항상 우선이다.
-      if (ctx.state === 'running') {
-        const src = ctx.createMediaElementSource(audio)
-        const analyser = ctx.createAnalyser(); analyser.fftSize = 64
-        src.connect(analyser); analyser.connect(ctx.destination)
-        lipsyncAnalyserRef.current = analyser
-      } else {
-        console.warn('[TTS] AudioContext가 running이 아니어서(', ctx.state, ') 립싱크 없이 원본 경로로 재생합니다')
-      }
-      lipCuesRef.current = []  // 발음 타이밍 큐 도착 전까지는 주파수 대역 근사로 폴백
-      const cleanup = () => {
-        done()
-        if (activeAudioRef.current === audio) activeAudioRef.current = null
-        if (myGen === ttsGenRef.current) { lipsyncAnalyserRef.current = null; lipCuesRef.current = [] }
-        URL.revokeObjectURL(url)
-      }
-      audio.onended = cleanup; audio.onerror = cleanup
-      audio.play().catch(e => {
-        console.error('[TTS] audio.play() 거부됨 — 자동재생 정책일 가능성 높음', e?.name, e?.message)
-        // 자동재생 차단 시 지금 바로 정리하지 않고, 사용자가 직접 눌러서 재생할 수 있게 남겨둔다.
-        if (myGen === ttsGenRef.current) setBlockedAudio(audio)
-        else cleanup()
-      })
-      // 재생과 별개로 정확한 발음 타이밍 분석 요청 — 도착하면 주파수 근사 대신 이 큐를 사용
-      const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
-      fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
-        .then(r => r.json())
-        .then(data => { if (activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
-        .catch(() => {})
-    } catch {
+    if (!chunks.length) { finishAll(); return }
+
+    const playChunk = async (index: number) => {
       if (myGen !== ttsGenRef.current) return
-      const u = new SpeechSynthesisUtterance(spoken)
-      u.lang = 'ko-KR'; u.rate = 0.95; u.onend = done; u.onerror = done
-      speechSynthesis.speak(u)
+      if (index >= chunks.length) { finishAll(); return }
+      const spoken = chunks[index]
+      let finished = false
+      // 짧은 조각은 타임아웃도 짧아지는데, XTTS 워커가 락으로 직렬화되어 있어 앞 조각들이
+      // 밀려 있으면 실제 합성이 그보다 오래 걸릴 수 있다. 그때 failsafe가 먼저 advance()를
+      // 불러 다음 조각을 시작해버리면, 뒤늦게 도착한 이전 조각의 오디오가 그 위에 겹쳐
+      // "목소리가 2개로 들리는" 문제가 생긴다. finished 플래그로 그 이후의 오디오 생성/재생을
+      // 완전히 막아야 한다(단순히 다음 조각으로 넘어가는 것만으로는 안 됨).
+      const failsafe = setTimeout(() => advance(), Math.max(6000, 2000 + spoken.length * 200))
+      const advance = () => {
+        if (finished) return; finished = true
+        clearTimeout(failsafe)
+        if (myGen !== ttsGenRef.current) return
+        playChunk(index + 1)
+      }
+      try {
+        const form = new FormData(); form.append('text', spoken)
+        form.append('voice', selectedVoice.kind === 'template' ? selectedVoice.id : 'mine')
+        const res = await fetch(`${API}/avatar/tts_only`, { method: 'POST', body: form })
+        if (!res.ok) throw new Error()
+        const blob = await res.blob()
+        if (myGen !== ttsGenRef.current || finished) return // 대기하는 동안 더 새로운 응답이 시작되었거나 failsafe가 이미 다음 조각으로 넘어감
+        const url = URL.createObjectURL(blob)
+        const audio = new Audio(url)
+        activeAudioRef.current = audio
+        if (!audioCtxRef.current) audioCtxRef.current = new AudioContext()
+        const ctx = audioCtxRef.current
+        if (ctx.state === 'suspended') { try { await ctx.resume() } catch { /**/ } }
+        if (myGen !== ttsGenRef.current || finished) { URL.revokeObjectURL(url); return }
+        // AudioContext가 running이 아니면 립싱크 분석용 그래프에 태우지 않는다 — 그 상태로
+        // createMediaElementSource에 연결하면 오디오가 먼 채널로 재생될 수 있다.
+        // 립싱크 없이 원본 경로로 재생하더라도 "소리가 나는 것"이 항상 우선이다.
+        if (ctx.state === 'running') {
+          const src = ctx.createMediaElementSource(audio)
+          const analyser = ctx.createAnalyser(); analyser.fftSize = 64
+          src.connect(analyser); analyser.connect(ctx.destination)
+          lipsyncAnalyserRef.current = analyser
+        } else {
+          console.warn('[TTS] AudioContext가 running이 아니어서(', ctx.state, ') 립싱크 없이 원본 경로로 재생합니다')
+        }
+        lipCuesRef.current = []  // 발음 타이밍 큐 도착 전까지는 주파수 대역 근사로 폴백
+        const cleanup = () => {
+          advance()
+          if (activeAudioRef.current === audio) activeAudioRef.current = null
+          if (myGen === ttsGenRef.current) { lipsyncAnalyserRef.current = null; lipCuesRef.current = [] }
+          URL.revokeObjectURL(url)
+        }
+        audio.onended = cleanup; audio.onerror = cleanup
+        audio.play().catch(e => {
+          console.error('[TTS] audio.play() 거부됨 — 자동재생 정책일 가능성 높음', e?.name, e?.message)
+          // 자동재생 차단 시 지금 바로 정리하지 않고, 사용자가 직접 눌러서 재생할 수 있게 남겨둔다.
+          if (myGen === ttsGenRef.current) setBlockedAudio(audio)
+          else cleanup()
+        })
+        // 재생과 별개로 정확한 발음 타이밍 분석 요청 — 도착하면 주파수 근사 대신 이 큐를 사용
+        const cuesForm = new FormData(); cuesForm.append('audio', blob, 'tts.wav')
+        fetch(`${API}/avatar/lipsync_cues`, { method: 'POST', body: cuesForm })
+          .then(r => r.json())
+          .then(data => { if (activeAudioRef.current === audio && Array.isArray(data?.cues)) lipCuesRef.current = data.cues })
+          .catch(() => {})
+      } catch {
+        if (myGen !== ttsGenRef.current || finished) return
+        const u = new SpeechSynthesisUtterance(spoken)
+        u.lang = 'ko-KR'; u.rate = 0.95; u.onend = advance; u.onerror = advance
+        speechSynthesis.speak(u)
+      }
     }
+    playChunk(0)
   }, [selectedVoice])
 
   // ── STT ──
@@ -1747,6 +1840,48 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
       gltf.scene.position.sub(center.multiplyScalar(scale))
       gltf.scene.position.y += size.y * scale * 0.5 - 0.1
       scene.add(gltf.scene)
+
+      // 얼굴 morph target이 없는 아바타에서도 살아있는 느낌을 주기 위한 본 기반 고개/호흡 움직임
+      const headBone = findBoneByName(gltf.scene, ['Head', 'head'])
+      const neckBone = findBoneByName(gltf.scene, ['Neck', 'neck'])
+      const chestBone = findBoneByName(gltf.scene, ['Spine2', 'Chest', 'spine2', 'chest', 'Spine1', 'spine1'])
+      headBoneRef.current = headBone
+      neckBoneRef.current = neckBone
+      chestBoneRef.current = chestBone
+      headRestRef.current = headBone ? { x: headBone.rotation.x, y: headBone.rotation.y, z: headBone.rotation.z } : { x: 0, y: 0, z: 0 }
+      neckRestRef.current = neckBone ? { x: neckBone.rotation.x, y: neckBone.rotation.y, z: neckBone.rotation.z } : { x: 0, y: 0, z: 0 }
+      chestRestRef.current = chestBone ? { x: chestBone.rotation.x, y: chestBone.rotation.y, z: chestBone.rotation.z } : { x: 0, y: 0, z: 0 }
+
+      const bodyBoneNames: Record<string, string[]> = {
+        leftShoulder: ['LeftShoulder', 'leftShoulder'],
+        rightShoulder: ['RightShoulder', 'rightShoulder'],
+        leftArm: ['LeftArm', 'leftArm'],
+        rightArm: ['RightArm', 'rightArm'],
+        leftForeArm: ['LeftForeArm', 'leftForeArm'],
+        rightForeArm: ['RightForeArm', 'rightForeArm'],
+        hips: ['Hips', 'hips'],
+        leftUpLeg: ['LeftUpLeg', 'leftUpLeg'],
+        rightUpLeg: ['RightUpLeg', 'rightUpLeg'],
+      }
+      const bodyBones: Record<string, THREE.Object3D | null> = {}
+      const bodyRest: Record<string, { x: number; y: number; z: number }> = {}
+      Object.entries(bodyBoneNames).forEach(([key, names]) => {
+        const bone = findBoneByName(gltf.scene, names)
+        bodyBones[key] = bone
+        bodyRest[key] = bone ? { x: bone.rotation.x, y: bone.rotation.y, z: bone.rotation.z } : { x: 0, y: 0, z: 0 }
+      })
+      bodyBonesRef.current = bodyBones
+      bodyRestRef.current = bodyRest
+
+      headStateRef.current = {
+        gesture: 'idle',
+        target: { yaw: 0, pitch: 0, roll: 0 },
+        current: { yaw: 0, pitch: 0, roll: 0 },
+        elapsed: 0,
+        duration: 3,
+        next: 1.5 + Math.random() * 1.5,
+      }
+
       setFaceMeshDiagnostics(inspectFaceMeshes(gltf.scene))
       setGlbFeatureSupport(inspectGlbFeatureSupport(gltf.scene))
       buildRegisteredFaceTexture().then(async face => {
@@ -1769,6 +1904,9 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         const mixer = new THREE.AnimationMixer(gltf.scene); mixerRef.current = mixer
         const idle = gltf.animations.find(a => /idle|stand|wait/i.test(a.name)) ?? gltf.animations[0]
         mixer.clipAction(idle).play()
+        animatedBoneNamesRef.current = new Set(idle.tracks.map(track => track.name.split('.')[0]))
+      } else {
+        animatedBoneNamesRef.current = new Set()
       }
 
       // 입싱크(viseme 근사) + 표정용 모프타겟 전체 수집
@@ -1801,6 +1939,111 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
         animFrameRef.current = requestAnimationFrame(animate)
         const dt = clockRef.current.getDelta()
         mixerRef.current?.update(dt)
+
+        // 얼굴 morph가 없는 GLB에서도 굳어있지 않도록 본으로 고개를 움직인다 —
+        // 둘러보기(완전한 옆 얼굴까지)/끄덕임/갸웃/잔잔한 idle을 무작위로 오가는 상태머신 + 가슴 호흡.
+        const hs = headStateRef.current
+        hs.elapsed += dt
+        const talkBoost = speakingRef.current ? 1.3 : 1
+        if (hs.gesture === 'nod') {
+          const p = Math.min(1, hs.elapsed / hs.duration)
+          hs.current.pitch = Math.sin(p * Math.PI * 2 * 2.5) * 0.24 * (1 - p)
+          const ease = Math.min(1, dt * 3)
+          hs.current.yaw += (hs.target.yaw - hs.current.yaw) * ease
+          hs.current.roll += (hs.target.roll - hs.current.roll) * ease
+          if (p >= 1) { hs.gesture = 'idle'; hs.elapsed = 0; hs.next = 2 + Math.random() * 2.5 }
+        } else {
+          const ease = Math.min(1, dt * 1.6)
+          hs.current.yaw += (hs.target.yaw - hs.current.yaw) * ease
+          hs.current.pitch += (hs.target.pitch - hs.current.pitch) * ease
+          hs.current.roll += (hs.target.roll - hs.current.roll) * ease
+          if (hs.elapsed >= hs.next) {
+            hs.elapsed = 0
+            const r = Math.random()
+            if (r < 0.3) {
+              const side = Math.random() < 0.5 ? -1 : 1
+              hs.gesture = 'lookSide'
+              hs.target = { yaw: side * (0.7 + Math.random() * 0.7), pitch: (Math.random() - 0.5) * 0.1, roll: side * 0.04 }
+              hs.next = 1.8 + Math.random() * 1.8
+            } else if (r < 0.5) {
+              hs.gesture = 'nod'
+              hs.duration = 1.0 + Math.random() * 0.5
+              hs.target = { yaw: hs.current.yaw * 0.3, pitch: 0, roll: hs.current.roll * 0.3 }
+            } else if (r < 0.72) {
+              const side = Math.random() < 0.5 ? -1 : 1
+              hs.gesture = 'tilt'
+              hs.target = { yaw: (Math.random() - 0.5) * 0.3, pitch: (Math.random() - 0.5) * 0.05, roll: side * (0.12 + Math.random() * 0.12) }
+              hs.next = 2 + Math.random() * 2
+            } else {
+              hs.gesture = 'idle'
+              hs.target = { yaw: (Math.random() - 0.5) * 0.22, pitch: (Math.random() - 0.5) * 0.08, roll: (Math.random() - 0.5) * 0.05 }
+              hs.next = 2.5 + Math.random() * 3
+            }
+          }
+        }
+        const animatedNames = animatedBoneNamesRef.current
+        applyBoneOffset(
+          headBoneRef.current, headRestRef.current, animatedNames.has(headBoneRef.current?.name ?? ''),
+          hs.current.pitch * talkBoost, hs.current.yaw * talkBoost, hs.current.roll * talkBoost,
+        )
+        applyBoneOffset(
+          neckBoneRef.current, neckRestRef.current, animatedNames.has(neckBoneRef.current?.name ?? ''),
+          hs.current.pitch * 0.35, hs.current.yaw * 0.35, hs.current.roll * 0.35,
+        )
+        {
+          const breathe = Math.sin(clockRef.current.getElapsedTime() * 0.7) * 0.012
+          applyBoneOffset(
+            chestBoneRef.current, chestRestRef.current, animatedNames.has(chestBoneRef.current?.name ?? ''),
+            breathe, 0, 0,
+          )
+        }
+
+        // 상반신/전체 보기에서도 팔·다리·골반이 잔잔하게 움직이도록 — 본마다 주파수/위상을 달리해
+        // 로봇처럼 똑같이 움직이지 않게 한다. 진폭을 작게 유지해 발이 바닥에서 미끄러지거나
+        // IK 없이도 부자연스러워 보이지 않게 한다.
+        {
+          const bones = bodyBonesRef.current
+          const rests = bodyRestRef.current
+          const et = clockRef.current.getElapsedTime()
+          const setSway = (key: string, x: number, y: number, z: number) => {
+            const bone = bones[key]
+            applyBoneOffset(bone, rests[key], animatedNames.has(bone?.name ?? ''), x, y, z)
+          }
+          setSway('leftShoulder', 0, 0, Math.sin(et * 0.55) * 0.02)
+          setSway('rightShoulder', 0, 0, -Math.sin(et * 0.55 + 0.4) * 0.02)
+          // 발표(PptPresenter) 화면은 팔에 어떤 보정도 걸지 않는데도 GLB 원본 bind pose 그대로
+          // 팔이 붙어 있다 — 즉 GLB 자체는 이미 차렷 자세다. 고정 오프셋으로 "붙이려" 했던
+          // 시도들이 오히려 원본 bind pose를 기준에서 벗어나게 만들었을 뿐이므로 전부 제거하고,
+          // rest pose(=bind pose, 이미 차렷) 위에 아주 작은 흔들림만 얹는다.
+          const idleArmSway = (key: 'leftArm' | 'rightArm', phase: number, sign: number) => {
+            setSway(key, Math.sin(et * 0.4 + phase) * 0.02, 0, sign * Math.sin(et * 0.5 + phase * 0.7) * 0.02)
+          }
+          const as = armStateRef.current
+          as.elapsed += dt
+          if (as.active === 'none') {
+            idleArmSway('leftArm', 0.8, 1)
+            idleArmSway('rightArm', 1.6, -1)
+            if (as.elapsed >= as.next) {
+              as.elapsed = 0
+              as.active = Math.random() < 0.5 ? 'left' : 'right'
+              as.duration = 1.8 + Math.random() * 1.4
+            }
+          } else {
+            const p = Math.min(1, as.elapsed / as.duration)
+            const lift = Math.sin(p * Math.PI) // 0 → 1 → 0, 자연스럽게 들었다 내려온다(계속 들고 있지 않음)
+            const side = as.active === 'left' ? 1 : -1
+            const raisingKey: 'leftArm' | 'rightArm' = as.active === 'left' ? 'leftArm' : 'rightArm'
+            const idleKey: 'leftArm' | 'rightArm' = as.active === 'left' ? 'rightArm' : 'leftArm'
+            setSway(raisingKey, -lift * 0.3, 0, side * lift * 0.95)
+            setSway(as.active === 'left' ? 'leftForeArm' : 'rightForeArm', 0, 0, -side * lift * 0.35)
+            idleArmSway(idleKey, idleKey === 'leftArm' ? 0.8 : 1.6, idleKey === 'leftArm' ? 1 : -1)
+            if (p >= 1) { as.active = 'none'; as.elapsed = 0; as.next = 5 + Math.random() * 5 }
+          }
+          const hipSway = Math.sin(et * 0.35) * 0.025
+          setSway('hips', 0, Math.sin(et * 0.22) * 0.03, hipSway)
+          setSway('leftUpLeg', 0, 0, -hipSway * 0.4)
+          setSway('rightUpLeg', 0, 0, hipSway * 0.4)
+        }
 
         // 자동 눈 깜빡임 — 빠른 닫힘/열림 곡선을 직접 대입(lerp 없이)
         if (blinkKeysRef.current.length > 0) {
@@ -1975,12 +2218,12 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
   // ── 채팅 ──
   const buildSystemPrompt = useCallback(async (userText: string): Promise<string> => {
     try {
-      const res = await fetch(`${API}/avatar/context?q=${encodeURIComponent(userText)}`)
+      const res = await fetch(`${API}/avatar/context?q=${encodeURIComponent(userText)}&verbosity=${answerLength}`)
       const data = await res.json()
       if (data?.system) return data.system
     } catch { /**/ }
-    return SYSTEM
-  }, [])
+    return answerLength === 'full' ? SYSTEM.replace('답변은 2~3문장으로 간결하게 하고, ', '') : SYSTEM
+  }, [answerLength])
 
   const logTurn = useCallback((role: 'user' | 'assistant', content: string) => {
     if (!content.trim()) return
@@ -2122,7 +2365,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
             <p className="text-[10px] text-gray-400 px-1 truncate max-w-[220px]">현재: {fileName}</p>
           )}
           {faceTextureStatus && (
-            <div className="flex items-center gap-1 px-1">
+            <div className="hidden">
               <p className="min-w-0 flex-1 truncate text-[10px] text-purple-200/90">{faceTextureStatus}</p>
               {avatarLoaded && objectUrlRef.current && (
                 <button
@@ -2141,11 +2384,6 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
                 <button onClick={() => setShowDebugDetails(v => !v)} className="text-gray-400 hover:text-white">{showDebugDetails ? '간단히' : '상세'}</button>
               </div>
               <div className="mb-1.5 rounded bg-gray-950/90 px-1.5 py-1 text-[9px] leading-relaxed">
-                <div>source: <span className={intermediateTextureStages.sourceMode === 'selected-aligned' || intermediateTextureStages.sourceMode === 'selected-image' || intermediateTextureStages.sourceMode === 'selected-detected' || intermediateTextureStages.sourceMode === 'aligned-display-fallback' || intermediateTextureStages.sourceMode === 'jingu-front' || intermediateTextureStages.sourceMode.startsWith('original') ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.sourceMode}</span></div>
-                <div>landmarks: <span className="text-cyan-200">{intermediateTextureStages.landmarkCount}</span></div>
-                <div>existing texture landmarks: <span className={intermediateTextureStages.textureLandmarkCount > 0 ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.textureLandmarkCount || 'geometry UV fallback'}</span></div>
-                <div>whole-face UV triangles: <span className={intermediateTextureStages.uvTriangleCount > 0 ? 'text-emerald-300' : 'text-amber-300'}>{intermediateTextureStages.uvTriangleCount || 'feature fallback'}</span></div>
-                <div>feature UV warps: <span className={intermediateTextureStages.featureWarpCount > 0 ? 'text-emerald-300' : 'text-red-300'}>{intermediateTextureStages.featureWarpCount} / 5</span></div>
                 <div className="mt-1 border-t border-gray-800 pt-1">
                   <div className="flex items-center justify-between"><span>warped UV weight</span><span className="text-cyan-200">{Math.round(uvWarpWeight * 100)}%</span></div>
                   <input
@@ -2158,14 +2396,16 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
                       const value = Number(event.target.value)
                       setUvWarpWeight(value)
                       localStorage.setItem(UV_WARP_WEIGHT_KEY, String(value))
-                      if (objectUrlRef.current) loadGLB(objectUrlRef.current)
                     }}
+                    onMouseUp={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
+                    onTouchEnd={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
+                    onKeyUp={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
                     className="mt-1 w-full accent-cyan-400"
                     aria-label="warped UV texture weight"
                   />
                   <div className="flex justify-between text-[8px] text-gray-500"><span>기존 texture</span><span>warped UV</span></div>
                 </div>
-                <div className="mt-1 border-t border-gray-800 pt-1">
+                <div className="hidden">
                   <div className="flex items-center justify-between">
                     <span>3D texture exactness</span>
                     <span className="text-cyan-200">{Math.round(faceTextureExactness * 100)}%</span>
@@ -2180,14 +2420,16 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
                       const value = Number(event.target.value)
                       setFaceTextureExactness(value)
                       localStorage.setItem(FACE_TEXTURE_EXACTNESS_KEY, String(value))
-                      if (objectUrlRef.current) loadGLB(objectUrlRef.current)
                     }}
+                    onMouseUp={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
+                    onTouchEnd={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
+                    onKeyUp={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
                     className="mt-1 w-full accent-purple-400"
                     aria-label="3D texture exactness"
                   />
                   <div className="flex justify-between text-[8px] text-gray-500"><span>3D 조명</span><span>4 최종 texture 그대로</span></div>
                 </div>
-                <div className="mt-1 border-t border-gray-800 pt-1">
+                <div className="hidden">
                   <div className="flex items-center justify-between">
                     <span>3D texture brightness</span>
                     <span className="text-cyan-200">{Math.round(faceTextureBrightness * 100)}%</span>
@@ -2202,8 +2444,10 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
                       const value = Number(event.target.value)
                       setFaceTextureBrightness(value)
                       localStorage.setItem(FACE_TEXTURE_BRIGHTNESS_KEY, String(value))
-                      if (objectUrlRef.current) loadGLB(objectUrlRef.current)
                     }}
+                    onMouseUp={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
+                    onTouchEnd={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
+                    onKeyUp={() => { if (objectUrlRef.current) loadGLB(objectUrlRef.current) }}
                     className="mt-1 w-full accent-amber-400"
                     aria-label="3D texture brightness"
                   />
@@ -2358,6 +2602,19 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
               className="text-xs text-gray-400 hover:text-gray-200 border border-gray-700 rounded px-2 py-0.5 hover:bg-gray-800">
               새로 시작
             </button>
+          </div>
+          <div className="mt-1.5 flex items-center gap-1 text-[10px]">
+            <span className="text-gray-500">답변 길이</span>
+            {([['concise', '짧게'], ['full', '모두']] as const).map(([value, label]) => (
+              <button key={value}
+                onClick={() => {
+                  setAnswerLength(value)
+                  try { localStorage.setItem(ANSWER_LENGTH_KEY, value) } catch { /* storage quota */ }
+                }}
+                className={`rounded-full border px-2 py-0.5 transition ${answerLength === value ? 'border-blue-500 bg-blue-900/70 text-blue-200' : 'border-gray-700 bg-gray-800/60 text-gray-400 hover:text-gray-200'}`}>
+                {label}
+              </button>
+            ))}
           </div>
           <div className="flex items-center justify-between mt-0.5">
             <p className="text-xs text-gray-500">

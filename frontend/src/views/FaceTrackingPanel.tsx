@@ -172,6 +172,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
   const [recording, setRecording]     = useState(false)
   const [recStatus, setRecStatus]     = useState('')
   const [resultUrl, setResultUrl]     = useState<string | null>(null)
+  const [usingRegisteredVideo, setUsingRegisteredVideo] = useState(false)
   const [hasSavedFace, setHasSavedFace] = useState(false)
   const [localImageUrl, setLocalImageUrl] = useState<string | null>(() => {
     // File/blob URLs die when the page or computer restarts. The FileReader
@@ -249,6 +250,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         video.load()
       }
       setHasLiveVideo(false)
+      setUsingRegisteredVideo(false)
       setStatus('idle')
       setStatusMsg('')
       setMirroredInput(true)
@@ -264,6 +266,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     mirroredInputRef.current = false
     setMirroredInput(false)
     setHasLiveVideo(true)
+    setUsingRegisteredVideo(true)
     setStatusMsg(`Registered video ready: ${source.name}`)
     const syncAspect = () => {
       const vw = video.videoWidth || 640
@@ -433,8 +436,10 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     }
   }, [])
 
-  useEffect(() => { if (wireRef.current) wireRef.current.visible = showWire && hasLiveVideo }, [showWire, hasLiveVideo])
-  useEffect(() => { if (faceMeshRef.current) faceMeshRef.current.visible = showMesh }, [showMesh])
+  // The original/processed video path must stay clean. Mesh and wire data are
+  // still updated for tracking callbacks, but never rendered over the video.
+  useEffect(() => { if (wireRef.current) wireRef.current.visible = false }, [showWire, hasLiveVideo])
+  useEffect(() => { if (faceMeshRef.current) faceMeshRef.current.visible = false }, [showMesh])
 
   // 얼굴 메시 삼각분할 인덱스만 필요한 경우(웹캠 없이 저장된 얼굴 복원 시) — 모델 로딩 없이 정적 상수만 사용
   const ensureFaceIndex = useCallback(async () => {
@@ -695,6 +700,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
 
       setTrackingVideoSource(registeredSource)
       setStatus('loading')
+      setUsingRegisteredVideo(true)
       setStatusMsg(`Loading registered video: ${registeredSource.name}`)
       resetVideoTrackingState(true)
       streamRef.current?.getTracks().forEach(t => t.stop())
@@ -714,6 +720,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         setStatus('tracking')
       } catch (err) {
         setHasLiveVideo(false)
+        setUsingRegisteredVideo(false)
         setStatus('error')
         setStatusMsg('Registered video playback error: ' + (err instanceof Error ? err.message : String(err)))
         return
@@ -964,7 +971,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       // landmark는 원본(비거울) 좌표, 사진은 거울모드로 저장되므로 x를 뒤집어서 겹쳐야 한다.
       // 윤곽선(초록) — 사진 속 이목구비 위치에 landmark가 실제로 겹치는지 확인
       ctx.save()
-      ctx.globalAlpha = 0
+      ctx.globalAlpha = 1
       ctx.strokeStyle = '#39ff9a'
       ctx.lineWidth = Math.max(2.5, Math.min(w, h) / 180)
       ctx.shadowColor = '#061a12'
@@ -982,7 +989,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       // 점(빨강) — 전체 landmark
       ctx.restore()
       ctx.save()
-      ctx.globalAlpha = 0
+      ctx.globalAlpha = 1
       ctx.fillStyle = '#ff3355'
       ctx.strokeStyle = '#fff'
       ctx.lineWidth = Math.max(0.8, Math.min(w, h) / 420)
@@ -1025,6 +1032,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     streamRef.current = null
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.pause() }
     setHasLiveVideo(false)
+    setUsingRegisteredVideo(false)
     motionSourceOnlyRef.current = false
     wireRef.current?.geometry.setDrawRange(0, 0)
     videoTexRef.current?.dispose()
@@ -1140,10 +1148,10 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
     <div className={`${/\b(absolute|fixed|relative|sticky)\b/.test(className) ? '' : 'relative '}${className}`}
       style={{ aspectRatio: videoAspect, overflow: 'hidden' }}>
       <video ref={videoRef}
-        className={`${imageOnly ? 'hidden ' : ''}absolute inset-0 z-10 h-full w-full bg-black transition-opacity ${hasLiveVideo && status === 'tracking' ? 'opacity-100' : 'opacity-0'}`}
+        className={`${imageOnly ? 'hidden ' : ''}absolute inset-0 z-10 h-full w-full bg-black transition-opacity ${hasLiveVideo && (status === 'tracking' || usingRegisteredVideo) ? 'opacity-100' : 'opacity-0'}`}
         style={{ transform: mirroredInput ? 'scaleX(-1)' : 'none', objectFit: 'contain' }}
         playsInline muted />
-      {(alignedFaceDisplayUrl || localImageUrl) && status !== 'tracking' && (
+      {(alignedFaceDisplayUrl || localImageUrl) && status !== 'tracking' && !usingRegisteredVideo && (
         <img
           src={alignedFaceDisplayUrl || localImageUrl || ''}
           alt="정렬된 얼굴 영역"
@@ -1151,7 +1159,7 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
         />
       )}
       <canvas ref={canvasRef}
-        className={`${imageOnly ? 'hidden ' : ''}pointer-events-none absolute inset-0 z-20 w-full h-full`}
+        className="hidden pointer-events-none absolute inset-0 z-20 w-full h-full"
         style={{ background: 'transparent' }} />
 
       {/* 컨트롤 */}
