@@ -10,8 +10,9 @@ const KnowledgeGraph = lazy(() => import('./views/KnowledgeGraph'))
 const SettingsView = lazy(() => import('./views/Settings'))
 const PptPresenter = lazy(() => import('./views/PptPresenter'))
 const InterviewPanel = lazy(() => import('./views/InterviewPanel'))
+const Notes = lazy(() => import('./views/Notes'))
 
-type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'presenter' | 'interview' | 'settings'
+type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'presenter' | 'interview' | 'notes' | 'settings'
 type NavItem = { id: Tab; label: string; navLabel: string; icon: Tab; description: string }
 
 const STORAGE_KEY = 'mental-avatar-settings'
@@ -25,6 +26,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'mode-a', label: '영상 도구', navLabel: '영상', icon: 'mode-a', description: '아바타 영상 생성' },
   { id: 'presenter', label: '발표', navLabel: '발표', icon: 'presenter', description: '슬라이드와 내레이션' },
   { id: 'interview', label: '자문자답', navLabel: '자문', icon: 'interview', description: '내 판단·기준을 아바타에게 채우기' },
+  { id: 'notes', label: '노트', navLabel: '노트', icon: 'notes', description: '대화에서 자동 생성된 노트 검색' },
   { id: 'settings', label: '설정', navLabel: '설정', icon: 'settings', description: '연결과 프로필' },
 ]
 
@@ -110,6 +112,16 @@ function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
         <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4L3 21l1.1-4A8.4 8.4 0 1 1 21 11.5Z" />
         <path d="M9.2 9.3a2.8 2.8 0 0 1 5.4.9c0 1.9-2.8 2.8-2.8 2.8" />
         <path d="M12 16.5h.01" />
+      </svg>
+    )
+  }
+  if (icon === 'notes') {
+    return (
+      <svg {...common}>
+        <path d="M7 3h8l4 4v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+        <path d="M15 3v4h4" />
+        <path d="M8 12h8" />
+        <path d="M8 16h5" />
       </svg>
     )
   }
@@ -295,6 +307,7 @@ export default function App() {
           {tab === 'kg' && <KnowledgeGraph settings={settings} />}
           {tab === 'presenter' && <PptPresenter />}
           {tab === 'interview' && <InterviewPanel />}
+          {tab === 'notes' && <Notes />}
           {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
         </Suspense>
       </main>

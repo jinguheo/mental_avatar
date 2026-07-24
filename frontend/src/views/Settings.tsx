@@ -367,9 +367,107 @@ export default function SettingsView({ settings, onChange }: Props) {
         )}
       </div>
 
+      {/* 백업 / 복원 */}
+      <BackupRestoreSection />
+
       <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-500 space-y-1">
         <p>API 서버: <span className="text-gray-700 font-medium">{API}</span></p>
         <p>설정은 브라우저 localStorage에 저장됩니다.</p>
+      </div>
+    </div>
+  )
+}
+
+function BackupRestoreSection() {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle')
+  const [msg, setMsg] = useState('')
+  const [restoreStatus, setRestoreStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle')
+  const [restoreMsg, setRestoreMsg] = useState('')
+
+  const handleExport = async () => {
+    setStatus('loading')
+    setMsg('')
+    try {
+      const res = await fetch(`${API}/backup`, { signal: AbortSignal.timeout(60000) })
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
+      const payload = await res.json()
+
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `mental-avatar-backup-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+
+      const fileCount = Array.isArray(payload.data_files) ? payload.data_files.length : 0
+      setStatus('ok')
+      setMsg(`백업 완료: DB${payload.db_base64 ? ' 포함' : ' 없음'}, 얼굴/음성 파일 ${fileCount}개`)
+    } catch (e) {
+      setStatus('error')
+      setMsg(e instanceof Error ? e.message : '백업 실패')
+    }
+  }
+
+  const handleRestore = async (file: File | undefined) => {
+    if (!file) return
+    if (!window.confirm('현재 DB를 백업 파일 내용으로 덮어씁니다. 계속할까요? (복원 직전 상태는 서버에 자동 백업됩니다)')) {
+      return
+    }
+    setRestoreStatus('loading')
+    setRestoreMsg('')
+    try {
+      const payload = JSON.parse(await file.text())
+      const res = await fetch(`${API}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(60000),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error(data.error || `서버 오류 (${res.status})`)
+
+      setRestoreStatus('ok')
+      setRestoreMsg(`복원 완료: ${(data.restored || []).length}개 항목 적용. 복원 전 상태: ${data.backup_dir || '-'}`)
+    } catch (e) {
+      setRestoreStatus('error')
+      setRestoreMsg(e instanceof Error ? `복원 실패: ${e.message}` : '복원 실패: 올바른 백업 JSON 파일인지 확인하세요.')
+    }
+  }
+
+  return (
+    <div className="space-y-4 pt-2 border-t border-gray-100">
+      <h3 className="text-sm font-semibold text-gray-800">백업 / 복원</h3>
+      <p className="text-xs text-gray-400">
+        지식그래프 DB와 등록된 얼굴/음성 파일을 하나의 JSON 파일로 내보내거나, 그 파일로 복원합니다.
+        (얼굴 트래킹·발표 산출물 같은 재생성 가능한 임시 파일은 제외됩니다. 매시간 자동 백업도 별도로 서버에 보관됩니다.)
+      </p>
+
+      <div className="flex items-center gap-3">
+        <button onClick={handleExport} disabled={status === 'loading'}
+          className="px-4 py-2 bg-gray-900 hover:bg-gray-700 text-white text-xs font-semibold rounded-xl disabled:opacity-40 transition">
+          {status === 'loading' ? '내보내는 중…' : '백업하기 (JSON 다운로드)'}
+        </button>
+        {msg && <span className={`text-xs ${status === 'error' ? 'text-red-500' : 'text-green-600'}`}>{msg}</span>}
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-xs font-medium text-gray-700">백업 파일에서 복원하기</p>
+        <label className="block">
+          <input type="file" accept="application/json,.json"
+            onChange={e => handleRestore(e.target.files?.[0])}
+            disabled={restoreStatus === 'loading'}
+            className="block w-full text-sm text-gray-600 file:mr-4 file:rounded-lg file:border-0 file:bg-gray-100 file:px-3 file:py-2 file:text-xs file:font-medium file:text-gray-700 hover:file:bg-gray-200 disabled:opacity-40" />
+        </label>
+        {restoreMsg && (
+          <p className={`text-xs ${restoreStatus === 'error' ? 'text-red-500' : 'text-green-600'}`}>{restoreMsg}</p>
+        )}
+        {restoreStatus === 'ok' && (
+          <button onClick={() => window.location.reload()}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-lg transition">
+            지금 새로고침
+          </button>
+        )}
       </div>
     </div>
   )

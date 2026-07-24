@@ -500,3 +500,45 @@ XTTS(목소리)·SadTalker(영상) 개별 + 통합 모두 성공.
 - xtts_server.py(8768) 수동 기동 이슈는 여전히 미해결(이전 세션 과제)
 
 ---
+
+## 2026-07-16 ~ 2026-07-23 (세션 18) — 워처 안정성 / GPU 페이스스왑 / UV 텍스처 매핑 / 아바타 애니메이션
+
+### 1. 8766 API 외부 감시 + 백업 버그 2건 수정 (7/16)
+- `scripts/watchdog_api.ps1`, `scripts/register_watchdog_task.ps1` 신설 — 작업 스케줄러 5분 주기로 8766 자체를 감시 (기존 워처는 8766 프로세스 안에 있어 8766이 죽으면 감시 로직도 같이 죽는 구멍이었음)
+- `frontend/src/components/SystemStatusBanner.tsx` 신설 — 아바타 3뷰 전용이던 `WatcherBanner`를 앱 전역 배너로 확장, API 오프라인/워처 상태를 모든 탭에서 노출
+- 백업 정리 로직 버그 수정: `pre_*` 백업과 시간별 백업을 분리 정원 관리(시간별 24, pre_* 10) — 이름 정렬 순서 문제로 시간별 백업이 전멸할 수 있던 결함
+- 삭제 백업이 SQLite만 뜨고 벡터(`vectors/`)를 빠뜨리던 결함 수정 — 복구 시 노드는 살아도 검색이 안 걸리는 반쪽 복구 방지
+
+### 2. GPU 페이스스왑 워커 + 진행률 추적 (7/17)
+- `core/faceswap_worker.py` 신설, `core/faceswap.py`/`api/server.py` 대폭 확장
+- `frontend/src/faceAlignment.ts` 신설 — 얼굴 정렬 유틸
+- `AvatarStudio.tsx`, `FaceTrackingPanel.tsx`, `RealisticAvatar.tsx`에 진행률 UI 반영
+
+### 3. 슬라이드별 발표 영상 추적/병합 (7/17)
+- `PptPresenter.tsx` + `api/server.py` — 슬라이드 단위로 생성된 영상을 추적해 하나로 병합
+
+### 4. 얼굴 텍스처 트래킹 안정화 (7/17)
+- `FaceTrackingPanel.tsx`, `Avatar3DChat.tsx`, `RealisticAvatar.tsx`
+
+### 5. 얼굴 전체 UV piecewise 텍스처 매핑 (7/18)
+- `RealisticAvatar.tsx`(+1232/-361) 대폭 재작성, `api/server.py` 매핑 로직 정리
+
+### 6. `/search` 500 버그 수정 (7/18)
+- `core/graph.py` — 데이터 관리용 조회 함수와 검색용 `search_nodes()` 이름 충돌 → `search_nodes_admin()`으로 분리
+
+### 7. 아바타 텍스처 정렬 + 얼굴 소스 영속화 (7/18)
+- `FaceTrackingPanel.tsx`, `RealisticAvatar.tsx`
+
+### 8. 아바타 UI/애니메이션 다듬기 + 긴 답변 전체 발화 (7/23)
+- 정렬 확인 오버레이가 alpha=0으로 안 보이던 버그 수정, UV weight/텍스처 정밀도/밝기 슬라이더가 드래그마다 GLB 텍스처를 재생성하던 것을 드래그 종료 시에만 하도록 수정
+- 피부톤 보정이 UV weight를 무시해 0%에서도 재색칠되던 버그 수정
+- XTTS 실제 한글 95자 제한에 맞춰 TTS를 분할·순차 재생 — 첫 문장만 말하고 끝나던 문제 해결, 느린 조각이 다음과 겹치는 레이스 수정
+- 답변 길이 간결/전체 토글 추가 (`core/avatar.py build_avatar_context`)
+- 얼굴 모프 타겟 없는 GLB에서도 자연스럽도록 절차적 본 기반 idle 모션 추가 (고개 움직임, 호흡, 어깨/팔/골반 흔들림, 간헐적 한쪽 팔 들기)
+
+### 알려진 이슈 / 다음 할 것
+- `watchdog_api.ps1`은 ASCII 전용 유지 필요 (PowerShell 5.1이 BOM 없는 .ps1을 cp949로 오디코딩해 한글이 깨짐 — 재발 주의)
+- xtts_server.py(8768) 수동 기동 이슈는 이번 세션 범위 밖 — my-dashboard 쪽 "시작 시 XTTS 워밍업" 커밋으로 해결됐는지 실제 기동 확인 필요
+- 이 문서화 자체가 6/27(세션17) 이후 밀려 있었음 — 커밋 로그 기준으로 소급 작성, 실행 재검증은 안 함
+
+---

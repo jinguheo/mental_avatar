@@ -160,6 +160,19 @@ def init():
 
     CREATE INDEX IF NOT EXISTS idx_selfint_created ON self_interview(created_at);
 
+    -- 아바타 AI 대화 중 자동 생성되는 노트. my-dashboard의 노트(daily_sync source='note')와는
+    -- 별개 저장소 — file_path 접두사(avatar_note://)로 KG nodes 안에서도 출처를 구분한다.
+    CREATE TABLE IF NOT EXISTS avatar_notes (
+        id          TEXT PRIMARY KEY,
+        view        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        content     TEXT NOT NULL,
+        node_id     TEXT,
+        created_at  DATETIME DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_avatar_notes_created ON avatar_notes(created_at);
+
     CREATE TABLE IF NOT EXISTS project_summaries (
         id          TEXT PRIMARY KEY,
         name        TEXT NOT NULL,

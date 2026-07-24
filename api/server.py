@@ -12,7 +12,7 @@ import re as _re
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -899,6 +899,22 @@ def interview_delete(sid):
     return jsonify({"success": True})
 
 
+# ── 아바타 대화 자동 노트 (my-dashboard 노트와는 별개 저장소) ──────────
+
+@app.route("/notes", methods=["GET"])
+def notes_list():
+    q = request.args.get("q", "")
+    view = request.args.get("view", "")
+    limit = int(request.args.get("limit", 50))
+    return jsonify({"items": notes.list_notes(query=q, view=view, limit=limit), "count": notes.count()})
+
+
+@app.route("/notes/<nid>", methods=["DELETE"])
+def notes_delete(nid):
+    notes.delete_note(nid)
+    return jsonify({"success": True})
+
+
 @app.route("/avatar/context", methods=["GET"])
 def avatar_context():
     q = request.args.get("q", "")
@@ -916,6 +932,18 @@ def conversation_log():
     if role not in ("user", "assistant") or not content:
         return jsonify({"error": "view, role(user|assistant), content 필요"}), 400
     avatar_core.log_conversation(view, role, content)
+
+    # 아바타 답변 턴마다 방금 주고받은 사용자 질문+답을 판단해 노트 자동 생성 (LLM 호출이라 백그라운드로)
+    if role == "assistant":
+        def _maybe_note():
+            try:
+                prev_user = avatar_core.recent_conversations(limit=1, view=view, role="user")
+                user_msg = prev_user[0]["content"] if prev_user else ""
+                notes.maybe_create_note(view, user_msg, content)
+            except Exception as e:
+                print(f"[notes] 자동 노트 생성 실패(무시): {e}")
+        _threading.Thread(target=_maybe_note, daemon=True).start()
+
     return jsonify({"success": True})
 
 
@@ -1512,10 +1540,15 @@ def restore():
     payload = request.get_json(silent=True) or {}
 
     restored = []
+    backup_dir = None
 
     # DB 복원 (base64)
     db_b64 = payload.get("db_base64")
     if db_b64:
+        try:
+            backup_dir = _backup_db("pre_restore")
+        except Exception as e:
+            return jsonify({"success": False, "error": f"백업 실패로 복원을 중단했습니다: {e}"}), 500
         try:
             db_bytes = _base64.b64decode(db_b64)
             db_path = Path(DB_PATH)
@@ -1542,7 +1575,7 @@ def restore():
         except Exception as e:
             return jsonify({"success": False, "error": f"미디어 복원 실패: {e}"}), 500
 
-    return jsonify({"success": True, "restored": restored})
+    return jsonify({"success": True, "restored": restored, "backup_dir": backup_dir})
 
 
 # ── STT (faster-whisper) ──────────────────────────────────

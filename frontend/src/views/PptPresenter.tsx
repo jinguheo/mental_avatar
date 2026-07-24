@@ -229,6 +229,7 @@ export default function PptPresenter() {
   const [videoResolution, setVideoResolution] = useState<VideoResolution>('720p')
   const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null)
   const [mergingVideo, setMergingVideo] = useState(false)
+  const [downloadingFinal, setDownloadingFinal] = useState(false)
 
   useEffect(() => { slidesRef.current = slides }, [slides])
   useEffect(() => { voiceIdRef.current = voiceId }, [voiceId])
@@ -942,6 +943,27 @@ export default function PptPresenter() {
     }
   }, [sessionId, slides.length])
 
+  const downloadFinalVideo = useCallback(async () => {
+    if (!finalVideoUrl) return
+    setDownloadingFinal(true)
+    setUploadError('')
+    try {
+      const response = await fetch(finalVideoUrl)
+      if (!response.ok) throw new Error('최종 발표 영상을 가져오지 못했습니다')
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `presentation-final-${sessionId ?? new Date().toISOString().slice(0, 10)}.webm`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setDownloadingFinal(false)
+    }
+  }, [finalVideoUrl, sessionId])
+
   const handlePlay = useCallback(() => {
     autoPlayRef.current = true; setAutoPlay(true)
     speakSlide(currentIndex)
@@ -1236,6 +1258,11 @@ export default function PptPresenter() {
             <span className="text-xs text-gray-400">최종 발표 영상: <strong className={finalVideoUrl ? 'text-emerald-400' : generatedVideoCount === slides.length ? 'text-amber-300' : 'text-gray-500'}>{finalVideoUrl ? '완료' : generatedVideoCount === slides.length ? '결합 가능' : `${generatedVideoCount}/${slides.length} 생성 중`}</strong></span>
             <div className="flex gap-2">
               {finalVideoUrl && <a href={finalVideoUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300">재생</a>}
+              {finalVideoUrl && (
+                <button onClick={downloadFinalVideo} disabled={downloadingFinal} className="px-2.5 py-1 text-xs rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-30 text-white">
+                  {downloadingFinal ? '다운로드 중…' : '다운로드'}
+                </button>
+              )}
               <button onClick={mergePresentationVideo} disabled={mergingVideo || generatedVideoCount !== slides.length} className="px-2.5 py-1 text-xs rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-30 text-white">{mergingVideo ? '결합 중…' : finalVideoUrl ? '다시 결합' : '하나로 결합'}</button>
             </div>
           </div>
