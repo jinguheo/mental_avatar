@@ -252,7 +252,7 @@ function read3dFaceInputSignature() {
   return [original, aligned, landmarks].map(value => `${value.length}:${value.slice(-64)}`).join('|')
 }
 
-interface FaceTextureData {
+export interface FaceTextureData {
   texture: THREE.CanvasTexture
   color: THREE.Color
   lipColor: THREE.Color
@@ -566,7 +566,7 @@ function makeSoftSkinTexture(base: THREE.Color): THREE.CanvasTexture {
   return tex
 }
 
-async function buildRegisteredFaceTexture(): Promise<FaceTextureData | null> {
+export async function buildRegisteredFaceTexture(): Promise<FaceTextureData | null> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), 2500)
   try {
@@ -1347,7 +1347,7 @@ async function withFaceTexture(
   return next
 }
 
-async function applyRegisteredFaceTexture(root: THREE.Object3D, face: FaceTextureData, onStages?: (stages: IntermediateTextureStages) => void) {
+export async function applyRegisteredFaceTexture(root: THREE.Object3D, face: FaceTextureData, onStages?: (stages: IntermediateTextureStages) => void) {
   let applied = 0
   const generated: THREE.Texture[] = [face.texture]
   const cache = new Map<string, THREE.CanvasTexture>()

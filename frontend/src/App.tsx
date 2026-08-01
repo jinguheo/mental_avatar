@@ -11,8 +11,9 @@ const SettingsView = lazy(() => import('./views/Settings'))
 const PptPresenter = lazy(() => import('./views/PptPresenter'))
 const InterviewPanel = lazy(() => import('./views/InterviewPanel'))
 const Notes = lazy(() => import('./views/Notes'))
+const Avatar3DMix = lazy(() => import('./views/Avatar3DMix'))
 
-type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'presenter' | 'interview' | 'notes' | 'settings'
+type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'mode-mix' | 'presenter' | 'interview' | 'notes' | 'settings'
 type NavItem = { id: Tab; label: string; navLabel: string; icon: Tab; description: string }
 
 const STORAGE_KEY = 'mental-avatar-settings'
@@ -23,6 +24,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'kg', label: '기억 검색', navLabel: '기억', icon: 'kg', description: '지식 그래프와 기록 검색' },
   { id: 'mode-c', label: 'AI 대화', navLabel: '대화', icon: 'mode-c', description: '가벼운 3D 아바타 채팅' },
   { id: 'mode-r', label: '실사 아바타', navLabel: '3D', icon: 'mode-r', description: '전체 아바타 장면' },
+  { id: 'mode-mix', label: '3D Mix', navLabel: 'Mix', icon: 'mode-mix', description: '사진 형태를 실사 아바타 리그에 이식' },
   { id: 'mode-a', label: '영상 도구', navLabel: '영상', icon: 'mode-a', description: '아바타 영상 생성' },
   { id: 'presenter', label: '발표', navLabel: '발표', icon: 'presenter', description: '슬라이드와 내레이션' },
   { id: 'interview', label: '자문자답', navLabel: '자문', icon: 'interview', description: '내 판단·기준을 아바타에게 채우기' },
@@ -82,6 +84,15 @@ function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
         <path d="M12 12 5.4 8.2" />
         <path d="M12 12v8.2" />
         <path d="m12 12 6.6-3.8" />
+      </svg>
+    )
+  }
+  if (icon === 'mode-mix') {
+    return (
+      <svg {...common}>
+        <circle cx="8" cy="8" r="4" />
+        <circle cx="16" cy="16" r="4" />
+        <path d="M11 8h6M8 11v6" />
       </svg>
     )
   }
@@ -243,7 +254,7 @@ function Sidebar({ current, onNavigate }: { current: Tab; onNavigate: (tab: Tab)
         <span className="flex h-10 w-10 select-none items-center justify-center rounded-2xl bg-gray-950 text-sm font-black tracking-tight text-white shadow-sm">MA</span>
       </div>
 
-      <nav className="grid h-full grid-cols-8 items-center gap-1 px-1 md:flex md:h-auto md:flex-1 md:flex-col md:items-stretch md:gap-1.5 md:overflow-y-auto md:p-2 md:pt-4">
+      <nav className="grid h-full grid-cols-9 items-center gap-1 px-1 md:flex md:h-auto md:flex-1 md:flex-col md:items-stretch md:gap-1.5 md:overflow-y-auto md:p-2 md:pt-4">
         {NAV_ITEMS.map(item => (
           <button
             key={item.id}
@@ -304,6 +315,7 @@ export default function App() {
           {tab === 'mode-a' && <AvatarStudio />}
           {tab === 'mode-c' && <Avatar3DChat settings={settings} messages={avatarMessages} setMessages={setAvatarMessages} />}
           {tab === 'mode-r' && <RealisticAvatar settings={settings} messages={realisticMessages} setMessages={setRealisticMessages} />}
+          {tab === 'mode-mix' && <Avatar3DMix />}
           {tab === 'kg' && <KnowledgeGraph settings={settings} />}
           {tab === 'presenter' && <PptPresenter />}
           {tab === 'interview' && <InterviewPanel />}

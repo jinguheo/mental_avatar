@@ -903,19 +903,6 @@ export default function FaceTrackingPanel({ className = '', compact = false, onB
       ctx.clearRect(0, 0, w, h)
       ctx.drawImage(img, 0, 0, w, h)
 
-      // AI 대화 탭에서는 선택 이미지 위에 서버에 저장된 얼굴을 반투명하게 겹쳐
-      // 두 얼굴의 위치와 크기를 한 화면에서 비교할 수 있게 한다.
-      if (isolatedVideo && localImageUrl) {
-        const saved = new Image()
-        saved.onload = () => {
-          ctx.save()
-          ctx.globalAlpha = 0.35
-          ctx.drawImage(saved, 0, 0, w, h)
-          ctx.restore()
-        }
-        saved.src = getTextureFaceUrl()
-      }
-
       const detectedLandmarks = await detectImageLandmarks(img.src)
       const landmarks = isolatedVideo ? detectedLandmarks : (preferRegisteredFace ? detectedLandmarks : readFaceLandmarks())
       const pointFor = (p: LM) => (isolatedVideo || detectedLandmarks)
