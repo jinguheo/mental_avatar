@@ -12,7 +12,7 @@ import re as _re
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes, governance, linkage, self_summary
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -788,6 +788,115 @@ def wiki_export():
         written += 1
 
     return jsonify({"success": True, "written": written, "dir": export_dir})
+
+
+@app.route("/governance", methods=["GET"])
+def governance_state():
+    return jsonify(governance.state())
+
+
+@app.route("/governance/<section>", methods=["PUT"])
+def governance_save(section):
+    try:
+        text = (request.get_json(silent=True) or {}).get("text", "")
+        return jsonify(governance.save_draft(section, text))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+
+
+@app.route("/governance/conversations", methods=["GET"])
+def governance_conversations():
+    return jsonify({"items": governance.conversation_candidates()})
+
+
+@app.route("/governance/conversations/<conversation_id>", methods=["PUT"])
+def governance_correct_conversation(conversation_id):
+    try:
+        text = (request.get_json(silent=True) or {}).get("text", "")
+        return jsonify(governance.correct_conversation(conversation_id, text))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/governance/evaluations", methods=["POST"])
+def governance_save_evaluation():
+    try:
+        return jsonify(governance.save_evaluation(request.get_json(silent=True) or {}))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/governance/evaluations/<case_id>", methods=["DELETE"])
+def governance_delete_evaluation(case_id):
+    governance.delete_evaluation(case_id)
+    return jsonify({"success": True})
+
+
+@app.route("/self_summary", methods=["GET"])
+def self_summary_state():
+    return jsonify(self_summary.state())
+
+
+@app.route("/self_summary/generate", methods=["POST"])
+def self_summary_generate():
+    try:
+        return jsonify(self_summary.generate())
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/self_summary/<section>", methods=["PUT"])
+def self_summary_approve(section):
+    try:
+        return jsonify(self_summary.approve(section, (request.get_json(silent=True) or {}).get("text", "")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/self_summary/<section>/approval", methods=["DELETE"])
+def self_summary_revoke(section):
+    try:
+        return jsonify(self_summary.revoke(section))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/self_summary/samples", methods=["POST"])
+def self_summary_add_sample():
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(self_summary.add_sample(data.get("text", ""), data.get("source", "typed")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/self_summary/samples/<sample_id>", methods=["DELETE"])
+def self_summary_delete_sample(sample_id):
+    self_summary.delete_sample(sample_id)
+    return jsonify({"success": True})
+
+
+@app.route("/linkage/run", methods=["POST"])
+def linkage_run():
+    try:
+        return jsonify({"job_id": linkage.start()})
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+
+
+@app.route("/linkage/status/<job_id>", methods=["GET"])
+def linkage_status(job_id):
+    state = linkage.status(job_id)
+    if state is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(state)
+
+
+@app.route("/linkage/latest", methods=["GET"])
+def linkage_latest():
+    return jsonify(linkage.latest() or {})
 
 
 @app.route("/profile/me", methods=["GET"])
@@ -1948,6 +2057,7 @@ def avatar_voice_status():
     return jsonify({
         "registered": VOICE_SAMPLE.exists(),
         "face_registered": FACE_FILE.exists(),
+        "model_registered": (Path(__file__).parent.parent / "myglb" / "jingu_model.glb").exists(),
     })
 
 @app.route("/avatar/voice_sample", methods=["GET"])

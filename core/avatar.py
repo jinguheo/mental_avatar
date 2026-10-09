@@ -1,10 +1,11 @@
 """아바타 프로파일 관리 + 채팅 컨텍스트 빌더"""
 import json
 import re
+from datetime import datetime
 import urllib.request
 import urllib.error
 from db.init_db import get_conn
-from . import graph, embeddings, pattern
+from . import graph, embeddings, pattern, governance, self_summary
 
 MCP_URL = "http://127.0.0.1:8765/mcp"
 _mcp_req_id = 0
@@ -83,7 +84,7 @@ def _fetch_realtime_context(query: str) -> str:
 # ── 프로파일 ───────────────────────────────────────────
 
 PROFILE_KEYS = [
-    "name", "role", "company", "main_projects",
+    "name", "role", "company", "main_projects", "relationships", "biography",
     "expertise", "work_style", "goals", "values", "other",
     "speech_style", "persona", "language_tone",
     "video_still", "video_preprocess", "video_enhancer", "video_size", "video_expression_scale",
@@ -110,6 +111,8 @@ PROFILE_LABELS = {
     "role":          "역할/직책",
     "company":       "회사/조직",
     "main_projects": "주요 프로젝트",
+    "relationships": "중요한 관계와 호칭",
+    "biography": "내 이야기와 주요 경험",
     "expertise":     "전문 분야",
     "work_style":    "업무 방식",
     "goals":         "현재 목표",
@@ -305,6 +308,10 @@ def log_conversation(view: str, role: str, content: str) -> None:
     )
     conn.commit()
     conn.close()
+
+    # 아바타 자신의 답은 사용자에 대한 지식으로 학습하지 않는다.
+    if role != "user":
+        return
 
     title = f"[{view}] {role}: " + (content[:40] + "…" if len(content) > 40 else content)
     node_id = graph.add_node(
@@ -799,9 +806,9 @@ def preference_radar() -> dict:
 # ── 아바타 채팅 컨텍스트 빌더 ──────────────────────────
 
 AVATAR_SYSTEM = """당신은 {name}의 디지털 아바타입니다.
-{name}을 완전히 대신하여 1인칭으로 답하세요.
-
-## 꼭 기억할 것 (최우선 — 아래 내용과 충돌하는 답변은 하지 마세요)
+{name}의 관점에서 1인칭으로 답하되, AI 아바타라는 사실을 묻거나 제3자와 대화할 때 숨기지 마세요.
+{self_summary_section}
+## 꼭 기억할 것 (현재 프로필·나중에 수정한 내용과 함께 해석하세요)
 {memory_section}
 
 ## 나는 누구인가
@@ -825,9 +832,14 @@ AVATAR_SYSTEM = """당신은 {name}의 디지털 아바타입니다.
 규칙:
 - 항상 1인칭("나는", "내가", "제 생각에는")으로 답하세요
 - 모르는 것은 "내 지식 범위 밖이에요" 라고 솔직하게 말하세요
+- 최신 프로필과 수정된 대화 기억을 우선하고, 과거 발언은 그 당시 상황의 사례로 해석하세요
+- 상황·대상·목적이 달라지면 판단도 달라질 수 있으니 한 사례를 영구적인 성향으로 일반화하지 마세요
+- 현재 정보와 과거 정보가 충돌하면 차이를 밝히고, 결론을 좌우할 맥락이 부족하면 사용자에게 물으세요
 - 내 전문 분야({expertise})에 대해서는 깊이 있게 답하세요
 - {length_rule}
 - 위에 설정된 말투와 성격을 일관되게 유지하세요
+- 괄호로 행동·표정·분위기를 묘사하는 지문(예: "(잠시 생각하는 듯)")을 쓰지 마세요
+- '혹시', '~드릴게요', '저희가'처럼 상담원·서비스 직원 같은 말투를 쓰지 말고, 통합 요약의 내 말투를 따르세요
 - 답변/추천을 할 때는 위 MBTI/성격/선호도와 "말하기 방식" 지침을 반영해서 그 사람에게 맞는 방식으로 답하세요
 - 단, "개방성", "성실성", "MBTI", "INTJ" 같은 특성 이름·점수·소제목을 답변 본문에 절대 직접 언급하거나 노출하지 마세요 — 그 지침은 말투에 자연스럽게 녹아있어야 하며, 사용자에게는 보이지 않는 배경 설정입니다"""
 
@@ -891,9 +903,25 @@ LENGTH_RULES = {
 }
 
 
-def build_avatar_context(query: str = "", verbosity: str = "concise") -> dict:
+def _rank_conversation_hits(hits: list[dict], limit: int = 3) -> list[dict]:
+    """Balance semantic similarity with when a user statement was last corrected."""
+    now = datetime.now()
+    def score(hit: dict) -> float:
+        node = graph.get_node(hit["id"]) or {}
+        stamp = node.get("updated_at") or node.get("created_at") or ""
+        try:
+            age_days = max(0, (now - datetime.fromisoformat(stamp)).days)
+        except (ValueError, TypeError):
+            age_days = 365
+        return float(hit.get("distance", 1)) + min(age_days / 365, 3) * 0.04
+    return sorted(hits, key=score)[:limit]
+
+
+def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: dict | None = None) -> dict:
     """아바타 채팅용 시스템 프롬프트 + 검색 결과 조합.
-    verbosity: "concise"(기본, 2~3문장) 또는 "full"(길이 제한 없이 충분히 답변) — 프론트 토글에서 전달."""
+    verbosity: "concise"(기본, 2~3문장) 또는 "full"(길이 제한 없이 충분히 답변) — 프론트 토글에서 전달.
+    what_if: {"governance": {section: text}, "self_summary": {section: text}} — DB를 바꾸지 않고 기준을 가정값으로 바꿔 같은 경로로 프롬프트를
+    만든다(연결 검사 전용, 실제 대화에서는 항상 None)."""
     profile = get_profile()
     interests = pattern.core_interests(6)
     trends = pattern.topic_trends(30)
@@ -909,7 +937,7 @@ def build_avatar_context(query: str = "", verbosity: str = "concise") -> dict:
         # 자문자답(self_interview)은 "내가 실제로 믿는 것"이라 최우선으로 먼저 확보한다.
         self_hits = embeddings.search(query, n_results=2, where={"source_type": "self_interview"})
         doc_hits  = embeddings.search(query, n_results=3, where={"source_type": {"$nin": ["conversation", "self_interview"]}})
-        conv_hits = embeddings.search(query, n_results=2, where={"source_type": "conversation"})
+        conv_hits = _rank_conversation_hits(embeddings.search(query, n_results=8, where={"$and": [{"source_type": "conversation"}, {"role": "user"}]}))
         matched_ids = []
         seen_ids: set = set()
         # ① 자문자답 먼저 (최대 2, 별도 섹션)
@@ -929,7 +957,9 @@ def build_avatar_context(query: str = "", verbosity: str = "concise") -> dict:
             seen_ids.add(r["id"])
             node = graph.get_node(r["id"])
             if node and node.get("content"):
-                relevant.append(f"- [{node['title']}] {node['content'][:200]}")
+                kind = "내 과거 대화 사례" if node.get("source_type") == "conversation" else "참고 지식"
+                when = (node.get("updated_at") or node.get("created_at") or "")[:10]
+                relevant.append(f"- [{kind} {when}] {node['content'][:240]}")
                 matched_ids.append(r["id"])
         graph_facts = _expand_graph_context(matched_ids)
         community_labels = _graphify_community_context(query)
@@ -978,6 +1008,10 @@ def build_avatar_context(query: str = "", verbosity: str = "concise") -> dict:
     ]) or "(동기화된 항목 없음)"
 
     length_rule = LENGTH_RULES.get(verbosity, LENGTH_RULES["concise"]).format(work_style=work_style)
+    # 정리·추상화 층: 내가 승인한 통합 요약을 매 답변 입력의 앞쪽에 항상 넣는다(검색 조각보다 우선).
+    summary_block = self_summary.approved_prompt((what_if or {}).get("self_summary"))
+    self_summary_section = ("\n" + summary_block + "\n") if summary_block else ""
+
     system = AVATAR_SYSTEM.format(
         name=name,
         memory_section=memory_section,
@@ -990,7 +1024,15 @@ def build_avatar_context(query: str = "", verbosity: str = "concise") -> dict:
         preference_section=preference_section,
         behavior_section=behavior_section,
         length_rule=length_rule,
+        self_summary_section=self_summary_section,
     )
+
+    # 본인이 검토하고 승인한 기준만 아바타 응답에 반영한다.
+    approved_rules = governance.approved_prompt((what_if or {}).get("governance"))
+    if approved_rules:
+        system += "\n\n## 내가 정한 기준\n" + approved_rules
+    system += ("\n\n외부 메시지 발송·결제·계정 변경 등 실제 행동은 이 대화만으로 수행하지 마세요. "
+               "이 시스템에는 해당 행동의 승인 실행 기능이 아직 없습니다.")
 
     # 관련 컨텍스트가 있으면 추가
     if self_relevant:
@@ -1021,6 +1063,11 @@ def build_avatar_context(query: str = "", verbosity: str = "concise") -> dict:
                 "아래 데이터를 직접 해석해서 자연스럽게 답변하세요.\n"
                 + realtime
             )
+
+    # 말투는 답을 쓰기 직전에 읽히도록 맨 끝에 붙인다(앞에 두면 조건부 높임 규칙을 놓침 — 실측).
+    style_block = self_summary.approved_style_prompt((what_if or {}).get("self_summary"))
+    if style_block:
+        system += "\n\n" + style_block
 
     return {
         "system": system,

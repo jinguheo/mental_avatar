@@ -12,8 +12,9 @@ const PptPresenter = lazy(() => import('./views/PptPresenter'))
 const InterviewPanel = lazy(() => import('./views/InterviewPanel'))
 const Notes = lazy(() => import('./views/Notes'))
 const Avatar3DMix = lazy(() => import('./views/Avatar3DMix'))
+const InProgress = lazy(() => import('./views/InProgress'))
 
-type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'mode-mix' | 'presenter' | 'interview' | 'notes' | 'settings'
+type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'mode-mix' | 'presenter' | 'interview' | 'notes' | 'settings' | 'in-progress'
 type NavItem = { id: Tab; label: string; navLabel: string; icon: Tab; description: string }
 
 const STORAGE_KEY = 'mental-avatar-settings'
@@ -30,6 +31,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'interview', label: '자문자답', navLabel: '자문', icon: 'interview', description: '내 판단·기준을 아바타에게 채우기' },
   { id: 'notes', label: '노트', navLabel: '노트', icon: 'notes', description: '대화에서 자동 생성된 노트 검색' },
   { id: 'settings', label: '설정', navLabel: '설정', icon: 'settings', description: '연결과 프로필' },
+  { id: 'in-progress', label: '구현중', navLabel: '진행', icon: 'in-progress', description: '판단·기억·권한·검증·신원 감독' },
 ]
 
 function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
@@ -133,6 +135,14 @@ function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
         <path d="M15 3v4h4" />
         <path d="M8 12h8" />
         <path d="M8 16h5" />
+      </svg>
+    )
+  }
+  if (icon === 'in-progress') {
+    return (
+      <svg {...common}>
+        <path d="M4 19h16M6 16l4-4 3 2 5-6" />
+        <circle cx="18" cy="8" r="2" />
       </svg>
     )
   }
@@ -254,7 +264,7 @@ function Sidebar({ current, onNavigate }: { current: Tab; onNavigate: (tab: Tab)
         <span className="flex h-10 w-10 select-none items-center justify-center rounded-2xl bg-gray-950 text-sm font-black tracking-tight text-white shadow-sm">MA</span>
       </div>
 
-      <nav className="grid h-full grid-cols-9 items-center gap-1 px-1 md:flex md:h-auto md:flex-1 md:flex-col md:items-stretch md:gap-1.5 md:overflow-y-auto md:p-2 md:pt-4">
+      <nav className="flex h-full items-center gap-1 overflow-x-auto px-1 md:h-auto md:flex-1 md:flex-col md:items-stretch md:gap-1.5 md:overflow-y-auto md:p-2 md:pt-4">
         {NAV_ITEMS.map(item => (
           <button
             key={item.id}
@@ -321,6 +331,7 @@ export default function App() {
           {tab === 'interview' && <InterviewPanel />}
           {tab === 'notes' && <Notes />}
           {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
+          {tab === 'in-progress' && <InProgress />}
         </Suspense>
       </main>
     </div>
