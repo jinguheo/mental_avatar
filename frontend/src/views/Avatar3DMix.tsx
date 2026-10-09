@@ -90,6 +90,49 @@ async function idbSave(entry: GlbEntry) {
   })
 }
 
+// 정면/좌/우 입력 사진을 매번 다시 선택하지 않도록 별도 IndexedDB에 슬롯별로 저장해둔다
+// (localStorage는 사진 3장 base64로는 용량이 부담스러워, GLB와 같은 IndexedDB 패턴 재사용).
+type PhotoSlot = 'front' | 'left' | 'right'
+const PHOTO_IDB_NAME = 'mental-avatar-mix-photos'
+const PHOTO_IDB_STORE = 'photos'
+interface PhotoEntry { slot: PhotoSlot; name: string; type: string; data: ArrayBuffer; savedAt: number }
+
+function openPhotoIDB(): Promise<IDBDatabase> {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(PHOTO_IDB_NAME, 1)
+    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains(PHOTO_IDB_STORE)) req.result.createObjectStore(PHOTO_IDB_STORE, { keyPath: 'slot' }) }
+    req.onsuccess = () => res(req.result)
+    req.onerror = () => rej(req.error)
+  })
+}
+async function photoList(): Promise<PhotoEntry[]> {
+  const db = await openPhotoIDB()
+  return new Promise((res, rej) => {
+    const tx = db.transaction(PHOTO_IDB_STORE, 'readonly')
+    const req = tx.objectStore(PHOTO_IDB_STORE).getAll()
+    req.onsuccess = () => res(req.result as PhotoEntry[])
+    req.onerror = () => rej(req.error)
+  })
+}
+async function photoSave(entry: PhotoEntry) {
+  const db = await openPhotoIDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(PHOTO_IDB_STORE, 'readwrite')
+    tx.objectStore(PHOTO_IDB_STORE).put(entry)
+    tx.oncomplete = () => res()
+    tx.onerror = () => rej(tx.error)
+  })
+}
+async function photoDelete(slot: PhotoSlot) {
+  const db = await openPhotoIDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(PHOTO_IDB_STORE, 'readwrite')
+    tx.objectStore(PHOTO_IDB_STORE).delete(slot)
+    tx.oncomplete = () => res()
+    tx.onerror = () => rej(tx.error)
+  })
+}
+
 type StageKey = 'upload' | 'mica' | 'align' | 'warp' | 'save' | 'done'
 const STAGES: { key: StageKey; label: string }[] = [
   { key: 'upload', label: '① 사진 업로드' },
@@ -108,15 +151,16 @@ interface RetargetStatus {
   warnings?: string[]
   landmark_error_mm?: { mean: number; max: number }
   mica_colors?: boolean
+  mica_texture?: boolean
   shape_original?: boolean
 }
 
 // ── 작은 GLB 미리보기 뷰어 — 자체 Three.js 씬을 갖고, data가 바뀔 때마다 다시 로드.
 // shapeOnly가 켜지면 모든 메시 재질을 무광 회색으로 바꿔 텍스처 없이 형태만 비교한다.
-function GlbPreview({ data, label, shapeOnly, applyPhotoTexture, textureVersion, micaColors, micaColorWeight, micaIntensity, shapeOriginal, shapeWeight }: {
+function GlbPreview({ data, label, shapeOnly, applyPhotoTexture, textureVersion, micaColors, micaTextureData, micaColorWeight, micaIntensity, shapeOriginal, shapeWeight }: {
   data: ArrayBuffer | null; label: string; shapeOnly: boolean
   applyPhotoTexture?: boolean; textureVersion?: number
-  micaColors?: Float32Array | null; micaColorWeight?: number; micaIntensity?: number
+  micaColors?: Float32Array | null; micaTextureData?: ArrayBuffer | null; micaColorWeight?: number; micaIntensity?: number
   shapeOriginal?: Float32Array | null; shapeWeight?: number
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -125,8 +169,22 @@ function GlbPreview({ data, label, shapeOnly, applyPhotoTexture, textureVersion,
   const originalMatsRef = useRef<Map<THREE.Mesh, THREE.Material | THREE.Material[]>>(new Map())
   const flatMatRef = useRef(new THREE.MeshStandardMaterial({ color: 0xcfd3d8, roughness: 0.95, metalness: 0 }))
   const generatedTexturesRef = useRef<THREE.Texture[]>([])
-  const micaShaderRef = useRef<{ material: THREE.Material; uniform: { value: number } } | null>(null)
+  type MicaShaderState = {
+    material: THREE.Material
+    mode: 'texture' | 'vertex'
+    uniform: {
+      weight: { value: number }
+      map?: { value: THREE.Texture | null }
+      avg?: { value: THREE.Vector3 }
+      intensity?: { value: number }
+    }
+  }
+  const micaShaderRef = useRef<MicaShaderState | null>(null)
   const micaAttrSourceRef = useRef<{ colors: Float32Array | null; intensity: number } | null>(null)
+  // UV 텍셀 단위로 서버가 구운 MICA 텍스처(정점색보다 훨씬 촘촘함) — 있으면 이쪽을 우선 쓴다.
+  const micaTextureRef = useRef<THREE.Texture | null>(null)
+  const micaTextureAvgRef = useRef<[number, number, number]>([0.6, 0.5, 0.45])
+  const [micaTexTick, setMicaTexTick] = useState(0)
   const warpedPosRef = useRef<Float32Array | null>(null)
   const warpedPosLoadTickRef = useRef<number>(-1)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
@@ -251,7 +309,9 @@ function GlbPreview({ data, label, shapeOnly, applyPhotoTexture, textureVersion,
     originalMatsRef.current.forEach((mat, mesh) => {
       mesh.material = shapeOnly ? flatMatRef.current : mat
     })
-  }, [shapeOnly, data, applyPhotoTexture])
+    // loadTick 의존성 필수 — GLTFLoader.parse가 비동기라 이 effect가 originalMatsRef 채워지기
+    // 전에 먼저 돌아 아무 것도 못 바꾸는 경우가 있음(로드 완료 시 loadTick이 올라와야 재적용).
+  }, [shapeOnly, data, applyPhotoTexture, loadTick])
 
   // 실사 텍스처 적용 — RealisticAvatar.tsx의 얼굴 텍스처 등록 기능을 그대로 재사용
   // (등록된/정렬확인된 얼굴 사진을 씀 — 이 탭에 방금 올린 사진과 다를 수 있음, 사용자 확인 필요).
@@ -277,14 +337,56 @@ function GlbPreview({ data, label, shapeOnly, applyPhotoTexture, textureVersion,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applyPhotoTexture, data, textureVersion, loadTick])
 
-  // MICA(사진 투영) 텍스처 가중치 — Streamoji_Head 정점에 서버가 barycentric 보간으로 옮겨붙인
-  // MICA 색(micaColors)을 커스텀 셰이더로 diffuse 색과 직접 mix한다.
+  // MICA UV 텍스처 디코딩 — 정점색(2162개, 삼각형 사이 선형보간이라 뭉개짐)보다 서버가 UV
+  // 텍셀 단위(1024x1024)로 구운 텍스처가 있으면 이쪽이 훨씬 촘촘하다("100%로 올려도 왜
+  // 더 거칠어지냐"는 지적의 원인 수정). 로드 시 1회만 디코딩 + 대비 조절용 평균색 계산.
+  useEffect(() => {
+    if (!micaTextureData) {
+      micaTextureRef.current?.dispose()
+      micaTextureRef.current = null
+      setMicaTexTick(t => t + 1)
+      return
+    }
+    let cancelled = false
+    createImageBitmap(new Blob([micaTextureData], { type: 'image/png' })).then(bitmap => {
+      if (cancelled) return
+      const canvas = document.createElement('canvas')
+      canvas.width = 32; canvas.height = 32
+      const ctx = canvas.getContext('2d')
+      let avg: [number, number, number] = [0.6, 0.5, 0.45]
+      if (ctx) {
+        ctx.drawImage(bitmap, 0, 0, 32, 32)
+        const px = ctx.getImageData(0, 0, 32, 32).data
+        let r = 0, g = 0, b = 0
+        const n = px.length / 4
+        for (let i = 0; i < px.length; i += 4) {
+          r += srgbToLinear(px[i] / 255); g += srgbToLinear(px[i + 1] / 255); b += srgbToLinear(px[i + 2] / 255)
+        }
+        avg = [r / n, g / n, b / n]
+      }
+      micaTextureAvgRef.current = avg
+      const tex = new THREE.Texture(bitmap)
+      tex.flipY = false // glTF UV는 V=0이 이미지 위쪽 — 구울 때도 뒤집지 않았으니 그대로 맞음
+      tex.needsUpdate = true
+      micaTextureRef.current?.dispose()
+      micaTextureRef.current = tex
+      setMicaTexTick(t => t + 1)
+    }).catch(() => {
+      micaTextureRef.current?.dispose()
+      micaTextureRef.current = null
+      setMicaTexTick(t => t + 1)
+    })
+    return () => { cancelled = true }
+  }, [micaTextureData])
+
+  // MICA(사진 투영) 가중치 — 텍스처(micaTextureRef, 있으면 우선)나 정점색(micaColors, 폴백)을
+  // 커스텀 셰이더로 diffuse 색과 직접 mix한다.
   // ⚠️ 처음엔 THREE의 기본 vertexColors(재질에 곱연산)로 구현했으나 흰색↔MICA색 사이를 곱해봤자
   // 원본 텍스처가 이미 어둡거나 색이 있으면 결과가 거의 안 변해 "조절해도 적용이 안 된다"는
   // 지적을 받았다 — mix()는 원본과 MICA색을 직접 보간해 weight=1에서 정말로 MICA색 그대로
   // 나오게 하는 게 목적이라, 곱연산이 아니라 onBeforeCompile로 diffuseColor 자체를 덮어써야 한다.
   // uMicaWeight를 uniform으로 둬서, 슬라이더를 움직일 때마다 셰이더 재컴파일 없이 값만 갱신한다
-  // (재컴파일은 실사 텍스처 토글로 material 객체 자체가 바뀔 때만 필요).
+  // (재컴파일은 실사 텍스처 토글/텍스처↔정점색 모드 전환처럼 material 자체가 바뀔 때만 필요).
   useEffect(() => {
     const root = rootRef.current
     if (!root) return
@@ -297,39 +399,82 @@ function GlbPreview({ data, label, shapeOnly, applyPhotoTexture, textureVersion,
     if (Array.isArray(mat)) return
     const vertexCount = geometry.attributes.position?.count ?? 0
     const effectiveWeight = shapeOnly ? 0 : Math.max(0, Math.min(1, micaColorWeight ?? 0))
+    const intensity = micaIntensity ?? 1
 
-    if (!micaColors || micaColors.length !== vertexCount * 3) {
-      if (micaShaderRef.current?.material === mat) micaShaderRef.current.uniform.value = 0
+    const useTexture = !!micaTextureRef.current
+    const useVertex = !useTexture && !!micaColors && micaColors.length === vertexCount * 3
+    if (!useTexture && !useVertex) {
+      if (micaShaderRef.current?.material === mat) micaShaderRef.current.uniform.weight.value = 0
       return
     }
-    const intensity = micaIntensity ?? 1
-    const prev = micaAttrSourceRef.current
-    if (!geometry.getAttribute('aMicaColor') || prev?.colors !== micaColors || prev?.intensity !== intensity) {
+
+    if (useVertex) {
       // 서버가 준 값은 사진 픽셀(sRGB) 그대로라 리니어로 먼저 바꾼 다음, "MICA 강도" 슬라이더로
-      // 평균색 기준 편차를 증폭/축소한다 — weight(uMicaWeight)와는 별개 축: intensity는 MICA
-      // 색 자체의 대비를, weight는 그 색을 얼마나 섞을지를 조절한다.
-      const linear = new Float32Array(micaColors.length)
-      for (let i = 0; i < micaColors.length; i += 1) linear[i] = srgbToLinear(micaColors[i])
-      const boosted = contrastBoost(linear, intensity)
-      geometry.setAttribute('aMicaColor', new THREE.BufferAttribute(boosted, 3))
-      micaAttrSourceRef.current = { colors: micaColors, intensity }
+      // 평균색 기준 편차를 증폭/축소한다 — weight(uMicaWeight)와는 별개 축.
+      const prev = micaAttrSourceRef.current
+      if (!geometry.getAttribute('aMicaColor') || prev?.colors !== micaColors || prev?.intensity !== intensity) {
+        const linear = new Float32Array(micaColors!.length)
+        for (let i = 0; i < micaColors!.length; i += 1) linear[i] = srgbToLinear(micaColors![i])
+        const boosted = contrastBoost(linear, intensity)
+        geometry.setAttribute('aMicaColor', new THREE.BufferAttribute(boosted, 3))
+        micaAttrSourceRef.current = { colors: micaColors!, intensity }
+      }
     }
 
-    if (micaShaderRef.current?.material === mat) {
-      micaShaderRef.current.uniform.value = effectiveWeight
-    } else {
-      const uniform = { value: effectiveWeight }
+    const mode: 'texture' | 'vertex' = useTexture ? 'texture' : 'vertex'
+    if (micaShaderRef.current?.material === mat && micaShaderRef.current.mode === mode) {
+      micaShaderRef.current.uniform.weight.value = effectiveWeight
+      if (mode === 'texture') {
+        micaShaderRef.current.uniform.map!.value = micaTextureRef.current
+        micaShaderRef.current.uniform.avg!.value.set(...micaTextureAvgRef.current)
+        micaShaderRef.current.uniform.intensity!.value = intensity
+      }
+    } else if (mode === 'texture') {
+      // ⚠️ 이 메시(Streamoji_Head)는 material.map이 없어(headMesh.material.map === null,
+      // 실측 확인) three가 vUv/vMapUv 둘 다 아예 선언을 안 한다(USE_UV/USE_MAP이 꺼짐) —
+      // "undeclared identifier"로 컴파일 자체가 깨져 메시가 안 보인다. Three 내부 varying에
+      // 기대지 말고 aMicaColor(정점색 경로)와 똑같이 geometry.attributes.uv를 별도 이름으로
+      // 복제해 직접 attribute/varying을 선언해야 material 종류와 무관하게 항상 동작한다.
+      if (!geometry.getAttribute('aMicaUv') && geometry.getAttribute('uv')) {
+        geometry.setAttribute('aMicaUv', geometry.getAttribute('uv'))
+      }
+      const weight = { value: effectiveWeight }
+      const map = { value: micaTextureRef.current }
+      const avg = { value: new THREE.Vector3(...micaTextureAvgRef.current) }
+      const intensityUniform = { value: intensity }
       mat.onBeforeCompile = shader => {
-        shader.uniforms.uMicaWeight = uniform
+        shader.uniforms.uMicaWeight = weight
+        shader.uniforms.uMicaMap = map
+        shader.uniforms.uMicaAvg = avg
+        shader.uniforms.uMicaIntensity = intensityUniform
+        shader.vertexShader = `attribute vec2 aMicaUv;\nvarying vec2 vMicaUv;\n${shader.vertexShader}`
+          .replace('void main() {', 'void main() {\n  vMicaUv = aMicaUv;')
+        shader.fragmentShader = `uniform float uMicaWeight;\nuniform sampler2D uMicaMap;\nuniform vec3 uMicaAvg;\nuniform float uMicaIntensity;\nvarying vec2 vMicaUv;\n${shader.fragmentShader}`
+          .replace('#include <map_fragment>', `#include <map_fragment>
+  {
+    vec3 c = texture2D(uMicaMap, vMicaUv).rgb;
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    vec3 micaColor = mix(lo, hi, step(vec3(0.04045), c));
+    micaColor = uMicaAvg + (micaColor - uMicaAvg) * uMicaIntensity;
+    diffuseColor.rgb = mix(diffuseColor.rgb, clamp(micaColor, 0.0, 1.0), uMicaWeight);
+  }`)
+      }
+      mat.needsUpdate = true
+      micaShaderRef.current = { material: mat, mode, uniform: { weight, map, avg, intensity: intensityUniform } }
+    } else {
+      const weight = { value: effectiveWeight }
+      mat.onBeforeCompile = shader => {
+        shader.uniforms.uMicaWeight = weight
         shader.vertexShader = `attribute vec3 aMicaColor;\nvarying vec3 vMicaColor;\n${shader.vertexShader}`
           .replace('void main() {', 'void main() {\n  vMicaColor = aMicaColor;')
         shader.fragmentShader = `varying vec3 vMicaColor;\nuniform float uMicaWeight;\n${shader.fragmentShader}`
           .replace('#include <map_fragment>', '#include <map_fragment>\n  diffuseColor.rgb = mix(diffuseColor.rgb, vMicaColor, uMicaWeight);')
       }
       mat.needsUpdate = true
-      micaShaderRef.current = { material: mat, uniform }
+      micaShaderRef.current = { material: mat, mode, uniform: { weight } }
     }
-  }, [data, loadTick, shapeOnly, applyPhotoTexture, textureVersion, micaColors, micaColorWeight, micaIntensity])
+  }, [data, loadTick, shapeOnly, applyPhotoTexture, textureVersion, micaColors, micaColorWeight, micaIntensity, micaTexTick])
 
   // 형태(shape) 가중치 — 서버가 워프 전 원본 Streamoji_Head 위치(shapeOriginal)를 주면, 로드
   // 시점의 워프된 위치(warpedPosRef, loadTick당 최초 1회만 스냅샷)와 원본 사이를 직접 lerp한다.
@@ -401,6 +546,31 @@ export default function Avatar3DMix() {
   const [leftFile, setLeftFile] = useState<File | null>(null)
   const [rightFile, setRightFile] = useState<File | null>(null)
 
+  const photoSetters: Record<PhotoSlot, (f: File | null) => void> = {
+    front: setFrontFile, left: setLeftFile, right: setRightFile,
+  }
+  // 마운트 시 이전에 선택했던 사진을 IndexedDB에서 복원 — 매번 다시 고르지 않아도 되게.
+  useEffect(() => {
+    photoList().then(entries => {
+      entries.forEach(e => {
+        photoSetters[e.slot](new File([e.data], e.name, { type: e.type }))
+      })
+    }).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  // 새 파일을 고르면 상태 갱신과 동시에 IndexedDB에 저장(다음 방문 때 기본값으로 뜨도록).
+  const pickPhoto = useCallback((slot: PhotoSlot, file: File | null) => {
+    photoSetters[slot](file)
+    if (file) {
+      file.arrayBuffer().then(data => {
+        photoSave({ slot, name: file.name, type: file.type, data, savedAt: Date.now() }).catch(() => {})
+      })
+    } else {
+      photoDelete(slot).catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobStatus, setJobStatus] = useState<RetargetStatus | null>(null)
   const [resultData, setResultData] = useState<ArrayBuffer | null>(null)
@@ -434,6 +604,8 @@ export default function Avatar3DMix() {
   // 얼마나 강하게 반영할지. 실사진 텍스처(UV) 슬라이더들과는 독립적으로 켤 수 있다.
   const [micaColorWeight, setMicaColorWeight] = useState(() => Number(localStorage.getItem(MICA_COLOR_WEIGHT_KEY) ?? '0'))
   const [micaColors, setMicaColors] = useState<Float32Array | null>(null)
+  // UV 텍셀 단위로 구운 MICA 텍스처(mica_texture.png) — 정점색보다 훨씬 촘촘함, 있으면 우선 사용.
+  const [micaTexture, setMicaTexture] = useState<ArrayBuffer | null>(null)
   const setMicaWeight = useCallback((value: number) => {
     localStorage.setItem(MICA_COLOR_WEIGHT_KEY, String(value))
     setMicaColorWeight(value)
@@ -475,6 +647,7 @@ export default function Avatar3DMix() {
     setResultData(null)
     setMicaData(null)
     setMicaColors(null)
+    setMicaTexture(null)
     setShapeOriginal(null)
     setJobStatus(null)
     setSaveMsg('')
@@ -525,6 +698,12 @@ export default function Avatar3DMix() {
                 .then(b => setMicaColors(b ? new Float32Array(b) : null))
                 .catch(() => setMicaColors(null))
             }
+            if (s.mica_texture) {
+              fetch(`${REAL3D_BASE}/retarget_texture/${job_id}`)
+                .then(r => (r.ok ? r.arrayBuffer() : null))
+                .then(b => setMicaTexture(b))
+                .catch(() => setMicaTexture(null))
+            }
             if (s.shape_original) {
               fetch(`${REAL3D_BASE}/retarget_shape_original/${job_id}`)
                 .then(r => (r.ok ? r.arrayBuffer() : null))
@@ -562,18 +741,29 @@ export default function Avatar3DMix() {
       </div>
 
       <div className="rounded-xl border border-surface-border bg-white p-3">
-        <div className="mb-2 text-sm font-medium text-gray-700">사진 선택 (정면 필수, 좌/우는 선택)</div>
+        <div className="mb-2 text-sm font-medium text-gray-700">사진 선택 (정면 필수, 좌/우는 선택) — 한 번 고르면 다음에 자동으로 채워집니다</div>
         <div className="grid grid-cols-3 gap-2">
           {([
-            ['정면 (필수)', frontFile, setFrontFile],
-            ['좌측 (선택)', leftFile, setLeftFile],
-            ['우측 (선택)', rightFile, setRightFile],
-          ] as const).map(([label, file, setter]) => (
-            <label key={label} className="flex cursor-pointer flex-col items-center gap-1 rounded-lg border border-dashed border-surface-border p-3 text-center text-xs text-gray-500 hover:bg-gray-50">
-              <input type="file" accept="image/*" className="hidden" onChange={e => setter(e.target.files?.[0] ?? null)} />
-              <span>{label}</span>
-              <span className="max-w-full truncate text-[11px] text-gray-400">{file ? file.name : '선택 안 됨'}</span>
-            </label>
+            ['front', '정면 (필수)', frontFile],
+            ['left', '좌측 (선택)', leftFile],
+            ['right', '우측 (선택)', rightFile],
+          ] as const).map(([slot, label, file]) => (
+            <div key={slot} className="flex flex-col items-center gap-1 rounded-lg border border-dashed border-surface-border p-3 text-center">
+              <label className="flex w-full cursor-pointer flex-col items-center gap-1 text-xs text-gray-500 hover:bg-gray-50">
+                <input type="file" accept="image/*" className="hidden" onChange={e => pickPhoto(slot, e.target.files?.[0] ?? null)} />
+                <span>{label}</span>
+                <span className="max-w-full truncate text-[11px] text-gray-400">{file ? file.name : '선택 안 됨'}</span>
+              </label>
+              {file && (
+                <button
+                  type="button"
+                  onClick={() => pickPhoto(slot, null)}
+                  className="text-[11px] text-red-500 hover:underline"
+                >
+                  지우기
+                </button>
+              )}
+            </div>
           ))}
         </div>
         <button
@@ -690,7 +880,7 @@ export default function Avatar3DMix() {
         <div className="flex flex-col gap-1">
           <GlbPreview data={resultData} label="형태 이식 결과(리그+MICA형태)" shapeOnly={shapeOnlyMap.result && !applyPhotoTexture}
             applyPhotoTexture={applyPhotoTexture} textureVersion={textureVersion}
-            micaColors={micaColors} micaColorWeight={micaColorWeight} micaIntensity={micaIntensity}
+            micaColors={micaColors} micaTextureData={micaTexture} micaColorWeight={micaColorWeight} micaIntensity={micaIntensity}
             shapeOriginal={shapeOriginal} shapeWeight={shapeWeight} />
           <label className="flex items-center gap-1.5 text-[11px] text-gray-500">
             <input type="checkbox" checked={shapeOnlyMap.result} disabled={applyPhotoTexture} onChange={() => toggleShapeOnly('result')} />
