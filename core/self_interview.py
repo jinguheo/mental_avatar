@@ -48,6 +48,21 @@ QUESTION_PROMPT = """당신은 한 사람("나")의 디지털 아바타를 완�
 {asked_block}
 질문:"""
 
+FOLLOWUP_PROMPT = """당신은 한 사람("나")의 디지털 아바타를 위한 심층 인터뷰어입니다.
+
+처음 질문: {question}
+사용자의 답변: {answer}
+주제: {topic}
+
+위 답변을 더 정확히 이해하기 위해 후속 질문을 딱 한 개만 만드세요.
+
+규칙:
+- 사용자가 이미 언급한 내용의 근거, 실제 사례, 적용 조건 또는 예외를 묻습니다.
+- 민감한 개인정보, 인증 정보, 제3자의 사적인 정보는 묻지 않습니다.
+- 답변을 유도하거나 평가하지 말고, 한국어 한 문장 질문만 출력합니다.
+- 답변이 충분히 구체적이어도 같은 말을 반복하지 말고 판단 기준이나 예외를 확인합니다.
+후속 질문:"""
+
 
 def _topic_candidates(limit: int = 10) -> list[str]:
     """core_interests + 프로젝트명 + 최근 노트 제목을 후보 토픽으로 모은다."""
@@ -137,6 +152,40 @@ def generate_question(topic: str = "", focus: str = "") -> dict:
     if not q:
         q = f"'{topic}'에 대해, 문서엔 안 적어둔 나만의 판단 기준이 있다면 무엇인가요?"
     return {"question": q, "topic": topic, "angle": angle}
+
+
+def generate_followup(question: str, answer: str, topic: str = "") -> dict:
+    """방금 답한 내용을 더 깊게 이해할 단일 후속 질문을 만든다.
+
+    후속 질문은 사용자가 답변을 저장한 뒤에만 생성된다. 따라서 인터뷰를 원하지
+    않을 때 자동으로 개입하지 않으며, 이미 말한 내용의 맥락만 확인한다.
+    """
+    question = (question or "").strip()
+    answer = (answer or "").strip()
+    topic = (topic or "").strip()
+    if not question or not answer:
+        raise ValueError("question and answer required")
+
+    prompt = FOLLOWUP_PROMPT.format(
+        question=question,
+        answer=answer,
+        topic=topic or "사용자가 방금 설명한 주제",
+    )
+    try:
+        raw = pattern._llm_call(prompt).strip()
+    except Exception as e:
+        return {
+            "question": "그 기준이 달라졌던 실제 사례나, 적용하지 않는 예외가 있나요?",
+            "topic": topic,
+            "fallback": True,
+            "error": str(e),
+        }
+
+    followup = raw.splitlines()[0].strip() if raw else ""
+    followup = followup.lstrip("-•* ").removeprefix("후속 질문:").strip().strip('"').strip()
+    if not followup:
+        followup = "그 기준이 달라졌던 실제 사례나, 적용하지 않는 예외가 있나요?"
+    return {"question": followup, "topic": topic}
 
 
 # ── 답변 저장 ─────────────────────────────────────────

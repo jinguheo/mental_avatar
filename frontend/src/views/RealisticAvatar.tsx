@@ -2225,11 +2225,11 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     return answerLength === 'full' ? SYSTEM.replace('답변은 2~3문장으로 간결하게 하고, ', '') : SYSTEM
   }, [answerLength])
 
-  const logTurn = useCallback((role: 'user' | 'assistant', content: string) => {
+  const logTurn = useCallback((role: 'user' | 'assistant', content: string, typed = false) => {
     if (!content.trim()) return
     fetch(`${API}/conversation/log`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ view: 'realistic_avatar', role, content }),
+      body: JSON.stringify({ view: typed ? 'realistic_avatar_typed' : 'realistic_avatar', role, content }),
     }).catch(() => {})
   }, [])
 
@@ -2238,7 +2238,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
     if (!text || chatLoading) return
     const userMsg: ChatMsg = { role: 'user', content: text }
     setMessages(prev => [...prev, userMsg]); setInput(''); setChatLoading(true)
-    logTurn('user', text)
+    logTurn('user', text, overrideText === undefined)
     try {
       const history = [...messages, userMsg].slice(-8)
       const system = await buildSystemPrompt(text)
@@ -2253,7 +2253,7 @@ export default function RealisticAvatar({ settings, messages, setMessages }: Pro
           d => { reply += d }, settings.anthropicApiKey)
       }
       setMessages(prev => [...prev, { role: 'assistant', content: reply }])
-      if (reply) { logTurn('assistant', reply); playTTS(reply) }
+      if (reply) { logTurn('assistant', reply, overrideText === undefined); playTTS(reply) }
     } catch {
       const errMsg = '죄송합니다. 일시적인 오류가 발생했습니다.'
       setMessages(prev => [...prev, { role: 'assistant', content: errMsg }])

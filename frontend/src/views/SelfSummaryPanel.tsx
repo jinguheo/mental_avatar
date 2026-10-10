@@ -84,7 +84,7 @@ export default function SelfSummaryPanel() {
             <ul className="mt-1 list-disc space-y-0.5 pl-5">{(item.evidence.projects as { name: string; overview: string }[]).map(project => <li key={project.name}><strong>{project.name}</strong>: {project.overview}</li>)}</ul>
           </details>}
           {key === 'style' && <details className="mt-2 text-xs text-gray-600"><summary className="cursor-pointer">표본 {state.samples.length}개 (지우면 다음 초안에서 빠짐)</summary>
-            <ul className="mt-1 space-y-0.5">{state.samples.map(sample => <li key={sample.id} className="flex items-start gap-2"><button onClick={() => removeSample(sample.id)} disabled={!!busy} aria-label="표본 삭제" className="text-red-600 disabled:opacity-50">✕</button><span>{sample.text}</span></li>)}</ul>
+            <ul className="mt-1 space-y-0.5">{state.samples.slice(0, 100).map(sample => <li key={sample.id} className="flex items-start gap-2"><button onClick={() => removeSample(sample.id)} disabled={!!busy} aria-label="표본 삭제" className="text-red-600 disabled:opacity-50">✕</button><span>{sample.text}</span></li>)}</ul>
           </details>}
         </article>
       })}

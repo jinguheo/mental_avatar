@@ -12,7 +12,7 @@ import re as _re
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes, governance, linkage, self_summary
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes, governance, linkage, self_summary, memory_filter, transcript_ingest, profile_recall
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -834,6 +834,70 @@ def governance_delete_evaluation(case_id):
     return jsonify({"success": True})
 
 
+@app.route("/transcripts/status", methods=["GET"])
+def transcripts_status():
+    return jsonify(transcript_ingest.status())
+
+
+@app.route("/transcripts/excluded", methods=["GET"])
+def transcripts_excluded():
+    """KG에 넣지 않기로 한 메시지(지시·반응·질문 등)를 긴 순으로 보여준다."""
+    return jsonify({"items": transcript_ingest.excluded(
+        limit=min(int(request.args.get("limit", 80)), 300), label=request.args.get("label", ""))})
+
+
+@app.route("/transcripts/promote/<path:key>", methods=["POST"])
+def transcripts_promote(key):
+    try:
+        return jsonify(transcript_ingest.promote(key))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.route("/transcripts/run", methods=["POST"])
+def transcripts_run():
+    """모든 Claude Code 세션을 백업하고 내가 쓴 메시지를 KG에 저장한다(수동 실행)."""
+    return jsonify(transcript_ingest.run_once(backfill=True))
+
+
+@app.route("/memory/quarantine", methods=["GET"])
+def memory_quarantine_list():
+    return jsonify({"items": memory_filter.list_quarantined()})
+
+
+@app.route("/memory/cleanup", methods=["POST"])
+def memory_cleanup():
+    """기존 대화를 다시 판별해 오염분을 KG에서 빼고 격리한다. 실행 전 DB·벡터를 백업한다."""
+    dry_run = bool((request.get_json(silent=True) or {}).get("dry_run", False))
+    backup_dir = None
+    if not dry_run:
+        try:
+            backup_dir = _backup_db("pre_cleanup")
+        except Exception as exc:
+            return jsonify({"error": f"백업 실패로 정리를 중단했습니다: {exc}"}), 500
+    result = memory_filter.sweep(dry_run=dry_run)
+    result["backup_dir"] = backup_dir
+    return jsonify(result)
+
+
+@app.route("/memory/quarantine/<conv_id>/restore", methods=["POST"])
+def memory_quarantine_restore(conv_id):
+    try:
+        return jsonify(memory_filter.restore(conv_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.route("/memory/quarantine/<conv_id>", methods=["DELETE"])
+def memory_quarantine_delete(conv_id):
+    return jsonify({"deleted": memory_filter.delete_quarantined(conv_id)})
+
+
+@app.route("/memory/quarantine", methods=["DELETE"])
+def memory_quarantine_delete_all():
+    return jsonify({"deleted": memory_filter.delete_quarantined(None)})
+
+
 @app.route("/self_summary", methods=["GET"])
 def self_summary_state():
     return jsonify(self_summary.state())
@@ -923,6 +987,14 @@ def profile_update():
     return jsonify({"profile": avatar_core.update_profile(data)})
 
 
+
+@app.route("/profile/auto_sync", methods=["GET", "POST"])
+def profile_auto_sync():
+    """Inspect or launch local-only explicit-fact extraction."""
+    if request.method == "POST":
+        return jsonify(profile_recall.schedule(100))
+    return jsonify(profile_recall.status())
+
 @app.route("/sync", methods=["POST"])
 def sync_item():
     """my-dashboard 항목을 KG에 동기화"""
@@ -993,6 +1065,21 @@ def interview_answer():
         return jsonify({"error": "question and answer required"}), 400
     try:
         return jsonify(self_interview.save_answer(question, answer, topic))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/interview/followup", methods=["POST"])
+def interview_followup():
+    """저장한 답변의 근거·사례·예외를 확인하는 심층 후속 질문 하나를 생성한다."""
+    data = request.get_json(silent=True) or {}
+    question = (data.get("question") or "").strip()
+    answer = (data.get("answer") or "").strip()
+    topic = (data.get("topic") or "").strip()
+    if not question or not answer:
+        return jsonify({"error": "question and answer required"}), 400
+    try:
+        return jsonify(self_interview.generate_followup(question, answer, topic))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3546,6 +3633,7 @@ def status_restart_voice():
 
 if __name__ == "__main__":
     init_db()
+    profile_recall.schedule(100)
     print("=" * 50)
     print("Mental Avatar API 서버")
     print("주소: http://127.0.0.1:8766")
@@ -3567,4 +3655,6 @@ if __name__ == "__main__":
     _threading.Thread(target=_get_whisper, daemon=True).start()
     # 워처도 같은 방식으로 자동복구(즉시 기동은 하지 않음 — 부팅 시 start_dashboard.bat과 중복 기동 방지)
     _threading.Thread(target=_watcher_watchdog_loop, daemon=True).start()
+    # 모든 Claude Code 창의 대화를 주기적으로 백업하고 내가 쓴 메시지를 KG에 자동 저장
+    _threading.Thread(target=transcript_ingest.loop, daemon=True).start()
     app.run(host="127.0.0.1", port=8766, debug=False, threaded=True)

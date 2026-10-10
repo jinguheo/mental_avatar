@@ -24,8 +24,9 @@ export default function SyncRadar({ axes, overall }: { axes: SyncAxis[]; overall
           const [labelX, labelY] = point(index, 1.25)
           return <g key={axis.label}><circle cx={x} cy={y} r="3.5" fill="#4338ca" /><text x={labelX} y={labelY} textAnchor="middle" dominantBaseline="middle" fontSize="10" fill="#374151">{axis.label}</text></g>
         })}
-        <circle cx={center} cy={center} r="22" fill="white" stroke="#c7d2fe" />
-        <text x={center} y={center} textAnchor="middle" dominantBaseline="middle" fontSize="13" fontWeight="700" fill="#312e81">{overall}%</text>
+        <circle cx={center} cy={center} r="28" fill="white" stroke="#c7d2fe" />
+        <text x={center} y={center - 5} textAnchor="middle" dominantBaseline="middle" fontSize="13" fontWeight="700" fill="#312e81">{overall}%</text>
+        <text x={center} y={center + 12} textAnchor="middle" dominantBaseline="middle" fontSize="9" fill="#4b5563">준비도</text>
       </svg>
     </div>
     <div className="grid gap-2 sm:grid-cols-2">

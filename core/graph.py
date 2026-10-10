@@ -404,6 +404,7 @@ def get_stats() -> dict:
     conn = get_conn()
     nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
     edges = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+    user_conversations = conn.execute("SELECT COUNT(*) FROM conversations WHERE role='user'").fetchone()[0]
     topics = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
     by_source = conn.execute(
         "SELECT source_type, COUNT(*) as cnt FROM nodes GROUP BY source_type"
@@ -412,6 +413,7 @@ def get_stats() -> dict:
     return {
         "nodes": nodes,
         "edges": edges,
+        "user_conversations": user_conversations,
         "topics": topics,
         "by_source": {r["source_type"]: r["cnt"] for r in by_source}
     }

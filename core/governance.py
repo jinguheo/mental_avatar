@@ -115,13 +115,15 @@ def delete_evaluation(case_id):
 def conversation_candidates(limit=20):
     conn = get_conn()
     _init(conn)
+    from . import memory_filter
+    memory_filter.ensure_schema(conn)
     rows = conn.execute(
         """SELECT c.id, c.content, c.created_at, c.view,
                   n.id AS node_id, COALESCE(k.corrected_text, '') AS corrected_text
            FROM conversations c
            LEFT JOIN nodes n ON n.file_path='conversation://' || c.view || '/' || c.id
            LEFT JOIN avatar_conversation_corrections k ON k.conversation_id=c.id
-           WHERE c.role='user'
+           WHERE c.role='user' AND c.quarantine_reason IS NULL
            ORDER BY c.created_at DESC LIMIT ?""",
         (max(1, min(int(limit), 50)),),
     ).fetchall()

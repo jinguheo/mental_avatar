@@ -879,12 +879,12 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
   }, [])
 
   // 대화 turn 로깅 — 말투/성격 학습 루프의 원재료 (실패해도 채팅 흐름에 영향 없음)
-  const logTurn = useCallback((role: 'user' | 'assistant', content: string) => {
+  const logTurn = useCallback((role: 'user' | 'assistant', content: string, typed = false) => {
     if (!content.trim()) return
     fetch(`${API}/conversation/log`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ view: 'avatar3d_chat', role, content }),
+      body: JSON.stringify({ view: typed ? 'avatar3d_chat_typed' : 'avatar3d_chat', role, content }),
     }).catch(() => {})
   }, [])
 
@@ -894,7 +894,7 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
     if (!text || chatLoading) return
     const userMsg: ChatMsg = { role: 'user', content: text }
     setMessages(prev => [...prev, userMsg]); setInput(''); setChatLoading(true)
-    logTurn('user', text)
+    logTurn('user', text, overrideText === undefined)
 
     try {
       const history = [...messages, userMsg].slice(-8)
@@ -910,7 +910,7 @@ export default function Avatar3DChat({ settings, messages, setMessages }: Props)
           d => { reply += d }, settings.anthropicApiKey)
       }
       setMessages(prev => [...prev, { role: 'assistant', content: reply }])
-      if (reply) { logTurn('assistant', reply); respond(reply) }   // ← LLM 출력 → 영상(또는 TTS) 응답
+      if (reply) { logTurn('assistant', reply, overrideText === undefined); respond(reply) }   // ← LLM 출력 → 영상(또는 TTS) 응답
     } catch (e) {
       const errMsg = `죄송합니다. 일시적인 오류가 발생했습니다.`
       setMessages(prev => [...prev, { role: 'assistant', content: errMsg }])

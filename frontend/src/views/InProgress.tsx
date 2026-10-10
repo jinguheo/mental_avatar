@@ -4,15 +4,19 @@ import SyncRadar, { type SyncAxis } from './SyncRadar'
 import ScienceBasis from './ScienceBasis'
 import LinkagePanel from './LinkagePanel'
 import SelfSummaryPanel from './SelfSummaryPanel'
+import QuarantinePanel from './QuarantinePanel'
+import TranscriptPanel from './TranscriptPanel'
 import ProgressLog from './ProgressLog'
+import ResearchTrends from './ResearchTrends'
 
 type SectionKey = 'judgment' | 'memory' | 'authority' | 'verification' | 'identity'
 type Section = { section: SectionKey; draft: string; approved: string; updated_at: string | null; approved_at: string | null }
 type Evaluation = { id: string; question: string; expected: string; observed: string; result: 'pending' | 'pass' | 'fail'; notes: string }
 type Conversation = { id: string; content: string; created_at: string; node_id: string | null; corrected_text: string }
 type State = { sections: Record<SectionKey, Section>; evaluations: Evaluation[] }
-type Profile = Record<string, { value: string; updated_at: string }>
-type Stats = { nodes: number; edges: number; vector_count: number; topics: number }
+type Profile = Record<string, { value: string; updated_at: string; source?: 'manual' | 'conversation'; evidence?: string; observed_at?: string }>
+type AutoStatus = { running: boolean; processed: number; saved: number; seen: number; facts: number; candidates: number; error: string; last_run: string }
+type Stats = { nodes: number; edges: number; vector_count: number; topics: number; user_conversations: number }
 
 const SECTION_INFO: { key: SectionKey; title: string; purpose: string; example: string }[] = [
   { key: 'judgment', title: '판단 방식', purpose: '무엇을 우선하고, 무엇을 근거로 결론을 내리는지 적습니다.', example: '예: 비용보다 정확성을 우선한다. 근거가 부족하면 결론을 보류한다.' },
@@ -42,11 +46,22 @@ function json(method: string, data: object): RequestInit {
 function date(value?: string | null) {
   return value ? value.replace('T', ' ').slice(0, 16) : '아직 없음'
 }
+function wilson95(success: number, total: number): string {
+  if (!total) return '측정 불가'
+  const z2 = 1.96 ** 2
+  const p = success / total
+  const denominator = 1 + z2 / total
+  const center = (p + z2 / (2 * total)) / denominator
+  const half = 1.96 * Math.sqrt(p * (1 - p) / total + z2 / (4 * total * total)) / denominator
+  return Math.round(Math.max(0, center - half) * 100) + '–' + Math.round(Math.min(1, center + half) * 100) + '%'
+}
 
-export default function InProgress() {
+
+function StatusView() {
   const [state, setState] = useState<State | null>(null)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [profile, setProfile] = useState<Profile>({})
+  const [autoStatus, setAutoStatus] = useState<AutoStatus | null>(null)
   const [profileDraft, setProfileDraft] = useState<Record<string, string>>({})
   const [stats, setStats] = useState<Stats | null>(null)
   const [voice, setVoice] = useState<{ registered: boolean; face_registered: boolean; model_registered: boolean } | null>(null)
@@ -64,16 +79,17 @@ export default function InProgress() {
   async function refresh() {
     setError('')
     try {
-      const [governance, s, p, v, interviews, memories, conversationData] = await Promise.all([
+      const [governance, s, p, v, interviews, memories, conversationData, auto] = await Promise.all([
         api('/governance'), api('/stats'), api('/profile/me'),
         api('/avatar/voice_status'), api('/interview/list'), api('/memory'),
-        api('/governance/conversations'),
+        api('/governance/conversations'), api('/profile/auto_sync'),
       ])
       setState(governance)
       setDrafts(Object.fromEntries(SECTION_INFO.map(item => [item.key, governance.sections[item.key].draft])))
       setStats(s)
       setProfile(p.profile || {})
       setProfileDraft(Object.fromEntries(BASIC_FIELDS.map(field => [field.key, p.profile?.[field.key]?.value || ''])))
+      setAutoStatus(auto)
       setVoice(v)
       setInterviewCount(interviews.count || 0)
       setMemoryCount((memories.items || []).length)
@@ -83,6 +99,22 @@ export default function InProgress() {
     }
   }
   useEffect(() => { void refresh() }, [])
+  useEffect(() => {
+    if (!autoStatus?.running) return
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api('/profile/auto_sync') as AutoStatus
+        setAutoStatus(next)
+        if (!next.running) {
+          const data = await api('/profile/me')
+          setProfile(data.profile || {})
+          setProfileDraft(Object.fromEntries(BASIC_FIELDS.map(field => [field.key, data.profile?.[field.key]?.value || ''])))
+        }
+      } catch { /* retain last known status */ }
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [autoStatus?.running])
+
 
   async function perform(name: string, action: () => Promise<void>, message: string) {
     setBusy(name); setError(''); setNotice('')
@@ -93,7 +125,10 @@ export default function InProgress() {
 
   async function saveProfile() {
     await perform('profile', async () => {
-      const data = await api('/profile/me', json('POST', profileDraft))
+      const changed = Object.fromEntries(BASIC_FIELDS.filter(field =>
+        (profileDraft[field.key] || '') !== (profile[field.key]?.value || '')
+      ).map(field => [field.key, profileDraft[field.key] || '']))
+      const data = await api('/profile/me', json('POST', changed))
       setProfile(data.profile)
       setProfileDraft(Object.fromEntries(BASIC_FIELDS.map(field => [field.key, data.profile?.[field.key]?.value || ''])))
     }, '기본 정보를 저장했습니다. 다음 대화부터 프로필에 반영됩니다.')
@@ -188,7 +223,7 @@ export default function InProgress() {
         <h2 className="text-lg font-semibold">기초 지식 지도</h2>
         <p className="mt-1 text-sm text-gray-600">어느 축이 연결됐고 무엇이 부족한지 보여줍니다. 각 축은 아래에 적힌 입력량·설정 상태·검증 건수로 계산합니다.</p>
         <div className="mt-4"><SyncRadar axes={axes} overall={syncRate} /></div>
-        <p className="mt-3 text-xs text-gray-500">전체 {syncRate}%는 7개 축의 평균 준비도(아바타가 알고 있는 기초 지식의 양과 상태)입니다. 내 정보가 답을 실제로 바꾸는지(연결)는 아래 6번, 나와 얼마나 같은지(sync)는 7번에 방법을 정리했고 아직 측정하지 못했습니다. 실제 답변 일치율: {evaluated ? matchRate + '% (' + passed + '/' + evaluated + ')' : '검증 사례 없음'}</p>
+        <p className="mt-3 text-xs text-gray-500">전체 {syncRate}%는 7개 축의 평균 <strong>준비도</strong>이며 나와의 일치도가 아닙니다. 내 정보가 답을 실제로 바꾸는지(연결)는 아래 6번, 나와 얼마나 같은지(sync)는 7번에 방법을 정리했습니다. 수동 비교 일치율: {evaluated ? matchRate + '% (' + passed + '/' + evaluated + '건, 95% 구간 ' + wilson95(passed, evaluated) + ')' : '검증 사례 없음'}. 이 구간은 독립 표본을 가정한 참고치이며 블라인드·보류 시험이 없어 정식 sync 점수로 쓰지 않습니다.</p>
       </section>
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {[
@@ -210,9 +245,17 @@ export default function InProgress() {
       </section>
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">1. 나는 누구인가</h2>
-        <p className="mt-1 text-sm text-gray-600">기본 사실은 본인이 직접 확인해 저장합니다. 비어 있는 항목은 아바타가 알지 못한다고 취급합니다.</p>
+        <p className="mt-1 text-sm text-gray-600">직접 입력한 값이 우선입니다. 타이핑한 대화에서 명시적으로 말한 사실을 로컬 모델이 후보로 추출하고, 서로 다른 대화에서 같은 사실이 2번 확인되면 자동 반영합니다. 단발 실수와 음성 인식 오류는 활성 프로필에 넣지 않습니다.</p>
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-600">
+          <span>대화 재검사: {autoStatus?.running ? '진행 중' : '대기'} · 검사한 발언 {autoStatus?.seen ?? 0}건 · 후보 {autoStatus?.candidates ?? 0}건 · 2회 확인된 사실 {autoStatus?.facts ?? 0}개</span>
+          <button type="button" onClick={() => { void api('/profile/auto_sync', { method: 'POST' }).then(setAutoStatus).catch(cause => setError(String(cause))) }} disabled={autoStatus?.running} className="rounded border border-gray-300 px-2 py-1 disabled:opacity-50">기존 대화 다시 검사</button>
+        </div>
+        {autoStatus?.error && <p className="mt-1 text-xs text-amber-700">로컬 추출 중단: {autoStatus.error}</p>}
+        <p className="mt-1 text-xs text-gray-500">이 자동 사실은 직접 수정하면 즉시 덮어씁니다. 모델 추출은 확정된 신원 증명이 아니며 근거와 함께 확인할 수 있습니다.</p>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           {BASIC_FIELDS.map(field => <label key={field.key} className="text-sm font-medium text-gray-700">{field.label}
+            {profile[field.key]?.source === 'conversation' && <span className="mt-1 block text-xs font-normal text-indigo-700">대화 자동 인식 · {date(profile[field.key]?.observed_at)} · 근거: {profile[field.key]?.evidence}</span>}
+            {profile[field.key]?.source === 'manual' && <span className="mt-1 block text-xs font-normal text-green-700">직접 수정한 값 우선</span>}
             <textarea rows={field.key === 'biography' || field.key === 'relationships' ? 3 : 1} value={profileDraft[field.key] || ''} onChange={event => setProfileDraft(previous => ({ ...previous, [field.key]: event.target.value }))} className="mt-1 block w-full rounded-lg border border-gray-300 bg-white p-2 text-sm font-normal" />
           </label>)}
         </div>
@@ -250,6 +293,8 @@ export default function InProgress() {
           {recent.length === 0 && <p className="text-sm text-gray-500">아직 기록된 사용자 대화가 없습니다. AI 대화 탭에서 대화하면 후보가 나타납니다.</p>}
         </div>
       </section>
+      <QuarantinePanel />
+      <TranscriptPanel />
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">4. 꼭 기억할 사실</h2>
         <p className="mt-1 text-sm text-gray-600">항상 기억해야 하는 사실은 핵심 기억으로 저장됩니다. 추정이나 바뀔 수 있는 일정은 위 ‘기억의 갱신’ 기준에 출처와 확인 방법을 적으세요.</p>
@@ -280,7 +325,24 @@ export default function InProgress() {
         </div>
       </section>
       <LinkagePanel />
-      <ScienceBasis interviewCount={interviewCount} evaluated={evaluated} passed={passed} userStatements={conversations.length} />
+      <ScienceBasis interviewCount={interviewCount} evaluated={evaluated} passed={passed} userStatements={stats?.user_conversations || 0} />
     </div>
+  </div>
+}
+
+type SubTab = 'status' | 'trends'
+const SUB_TABS: { id: SubTab; label: string }[] = [
+  { id: 'status', label: '진행 현황' },
+  { id: 'trends', label: '아바타 연구 동향' },
+]
+
+export default function InProgress() {
+  const [sub, setSub] = useState<SubTab>('status')
+  return <div className="flex h-full flex-col">
+    <div role="tablist" aria-label="진행 탭 구분" className="flex shrink-0 gap-1 border-b border-gray-200 bg-white px-4 pt-2 sm:px-6">
+      {SUB_TABS.map(item => <button key={item.id} role="tab" aria-selected={sub === item.id} onClick={() => setSub(item.id)}
+        className={'rounded-t-lg px-4 py-2 text-sm font-medium ' + (sub === item.id ? 'border border-b-white border-gray-200 bg-white text-gray-950' : 'text-gray-500 hover:text-gray-800')}>{item.label}</button>)}
+    </div>
+    <div className="min-h-0 flex-1">{sub === 'status' ? <StatusView /> : <ResearchTrends />}</div>
   </div>
 }

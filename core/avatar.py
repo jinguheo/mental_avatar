@@ -5,7 +5,7 @@ from datetime import datetime
 import urllib.request
 import urllib.error
 from db.init_db import get_conn
-from . import graph, embeddings, pattern, governance, self_summary
+from . import graph, embeddings, pattern, governance, self_summary, memory_filter, profile_recall
 
 MCP_URL = "http://127.0.0.1:8765/mcp"
 _mcp_req_id = 0
@@ -174,7 +174,13 @@ def get_profile() -> dict:
     conn = get_conn()
     rows = conn.execute("SELECT key, value, updated_at FROM user_profile").fetchall()
     conn.close()
-    profile = {r["key"]: {"value": r["value"], "updated_at": r["updated_at"]} for r in rows}
+    profile = {r["key"]: {"value": r["value"], "updated_at": r["updated_at"], "source": "manual"} for r in rows}
+    for key, fact in profile_recall.facts().items():
+        if not profile.get(key, {}).get("value", "").strip():
+            profile[key] = {"value": fact["value"], "updated_at": fact["updated_at"],
+                            "source": "conversation", "evidence": fact["evidence"],
+                            "observed_at": fact["observed_at"],
+                            "conversation_id": fact["conversation_id"]}
     return profile
 
 
@@ -293,25 +299,31 @@ def list_synced(source: str = "", limit: int = 50) -> list:
 _last_conv_node: dict[str, str] = {}
 
 
-def log_conversation(view: str, role: str, content: str) -> None:
+def log_conversation(view: str, role: str, content: str, created_at: str | None = None) -> str | None:
     """채팅 turn 저장 (행동/말투 학습의 원재료) + 지식 그래프 노드/엣지/임베딩으로도 연결.
-    이렇게 하면 /search, /avatar/context의 시멘틱 검색에서 과거 대화도 결과로 나온다."""
+    이렇게 하면 /search, /avatar/context의 시멘틱 검색에서 과거 대화도 결과로 나온다.
+    created_at을 주면(과거 기록 가져오기) 그 시각으로 저장하고, 오염 필터에 걸려 격리했다면 그 사유를 돌려준다."""
     if not content or not content.strip():
-        return
+        return None
     import uuid
     content = content.strip()
     conv_id = str(uuid.uuid4())
     conn = get_conn()
+    memory_filter.ensure_schema(conn)
+    # 오염 필터: 소음·환각·에코는 장기 기억(KG)에 넣지 않고 격리한다(대화 행은 남겨 복원 가능).
+    # 정상 발언은 그대로 자동 저장된다.
+    reason = memory_filter.classify_for_write(conn, view, content) if role == "user" else None
     conn.execute(
-        "INSERT INTO conversations (id, view, role, content) VALUES (?,?,?,?)",
-        (conv_id, view, role, content)
+        "INSERT INTO conversations (id, view, role, content, created_at, quarantine_reason, quarantined_at) "
+        "VALUES (?,?,?,?, COALESCE(?, datetime('now','localtime')), ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now','localtime') END)",
+        (conv_id, view, role, content, created_at, reason, reason)
     )
     conn.commit()
     conn.close()
 
     # 아바타 자신의 답은 사용자에 대한 지식으로 학습하지 않는다.
-    if role != "user":
-        return
+    if role != "user" or reason:
+        return reason
 
     title = f"[{view}] {role}: " + (content[:40] + "…" if len(content) > 40 else content)
     node_id = graph.add_node(
@@ -319,11 +331,20 @@ def log_conversation(view: str, role: str, content: str) -> None:
         source_type="conversation", file_path=f"conversation://{view}/{conv_id}",
     )
     embeddings.add_document(node_id, title, content, {"source_type": "conversation", "view": view, "role": role})
+    if created_at:   # 과거 기록이면 노드 시각도 원래대로(최신성 가중치가 이 시각을 쓴다)
+        c2 = get_conn()
+        c2.execute("UPDATE nodes SET created_at=?, updated_at=? WHERE id=?", (created_at, created_at, node_id))
+        c2.commit()
+        c2.close()
 
     prev_id = _last_conv_node.get(view)
     if prev_id:
         graph.add_edge(prev_id, node_id, "follows", 1.0)
     _last_conv_node[view] = node_id
+    # Only direct-text views feed automatic basic facts; voice transcripts are noisy.
+    if view in ("ai_chat", "avatar3d_chat_typed", "realistic_avatar_typed"):
+        profile_recall.schedule()
+    return None
 
 
 def recent_conversations(limit: int = 50, role: str = "", view: str = "", since: str = "") -> list:
@@ -335,6 +356,9 @@ def recent_conversations(limit: int = 50, role: str = "", view: str = "", since:
         where.append("view=?"); params.append(view)
     if since:
         where.append("created_at>?"); params.append(since)
+    # 격리된 발언(소음·환각·에코)은 대화 이어보기·말투 학습에서도 뺀다
+    memory_filter.ensure_schema(conn)
+    where.append("quarantine_reason IS NULL")
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
         f"SELECT * FROM conversations {clause} ORDER BY created_at DESC LIMIT ?",

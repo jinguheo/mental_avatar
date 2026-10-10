@@ -28,7 +28,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'mode-mix', label: '3D Mix', navLabel: 'Mix', icon: 'mode-mix', description: '사진 형태를 실사 아바타 리그에 이식' },
   { id: 'mode-a', label: '영상 도구', navLabel: '영상', icon: 'mode-a', description: '아바타 영상 생성' },
   { id: 'presenter', label: '발표', navLabel: '발표', icon: 'presenter', description: '슬라이드와 내레이션' },
-  { id: 'interview', label: '자문자답', navLabel: '자문', icon: 'interview', description: '내 판단·기준을 아바타에게 채우기' },
+  { id: 'interview', label: '심층 인터뷰', navLabel: '인터뷰', icon: 'interview', description: '나의 경험·가치관·판단 기준을 깊게 기록' },
   { id: 'notes', label: '노트', navLabel: '노트', icon: 'notes', description: '대화에서 자동 생성된 노트 검색' },
   { id: 'settings', label: '설정', navLabel: '설정', icon: 'settings', description: '연결과 프로필' },
   { id: 'in-progress', label: '구현중', navLabel: '진행', icon: 'in-progress', description: '판단·기억·권한·검증·신원 감독' },
