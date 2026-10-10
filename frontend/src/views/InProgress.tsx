@@ -6,6 +6,7 @@ import LinkagePanel from './LinkagePanel'
 import SelfSummaryPanel from './SelfSummaryPanel'
 import QuarantinePanel from './QuarantinePanel'
 import TranscriptPanel from './TranscriptPanel'
+import TranscriptBrowser from './TranscriptBrowser'
 import ProgressLog from './ProgressLog'
 import ResearchTrends from './ResearchTrends'
 
@@ -295,6 +296,7 @@ function StatusView() {
       </section>
       <QuarantinePanel />
       <TranscriptPanel />
+      <TranscriptBrowser />
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">4. 꼭 기억할 사실</h2>
         <p className="mt-1 text-sm text-gray-600">항상 기억해야 하는 사실은 핵심 기억으로 저장됩니다. 추정이나 바뀔 수 있는 일정은 위 ‘기억의 갱신’ 기준에 출처와 확인 방법을 적으세요.</p>

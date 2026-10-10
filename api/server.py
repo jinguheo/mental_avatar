@@ -843,7 +843,20 @@ def transcripts_status():
 def transcripts_excluded():
     """KG에 넣지 않기로 한 메시지(지시·반응·질문 등)를 긴 순으로 보여준다."""
     return jsonify({"items": transcript_ingest.excluded(
-        limit=min(int(request.args.get("limit", 80)), 300), label=request.args.get("label", ""))})
+        limit=min(int(request.args.get("limit", 80)), 300), label=request.args.get("label", ""),
+        saved=request.args.get("saved") == "1")})
+
+
+@app.route("/transcripts/browse", methods=["GET"])
+def transcripts_browse():
+    """Claude Code / Codex 별로 내가 쓴 메시지를 날짜·프로젝트·종류별로 묶어서 본다."""
+    try:
+        return jsonify(transcript_ingest.browse(
+            source=request.args.get("source", "claude"), group=request.args.get("group", "date"),
+            q=request.args.get("q", ""), label=request.args.get("label", ""),
+            groups=min(int(request.args.get("groups", 40)), 200), per_group=min(int(request.args.get("per_group", 30)), 200)))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/transcripts/promote/<path:key>", methods=["POST"])

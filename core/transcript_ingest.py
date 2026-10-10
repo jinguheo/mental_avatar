@@ -1,8 +1,11 @@
-"""Claude Code 대화 자동 백업 + 판단 사례 수집 + KG 자동 저장.
+"""Claude Code·Codex 대화 자동 백업 + 판단 사례 수집 + KG 자동 저장.
 
 모든 창(세션)의 대화는 ~/.claude/projects/<프로젝트>/<세션>.jsonl 에 줄 단위로 쌓인다. 이 모듈이 세 가지를 한다.
 
-1) 백업: 그 파일들을 backups/claude_transcripts/ 로 그대로 복사한다(원본 보존 — 보관 기간이 지나 지워져도 남음).
+Codex(OpenAI)도 ~/.codex/sessions/<연>/<월>/<일>/rollout-*.jsonl 에 같은 식으로 쌓이므로 똑같이 처리한다
+(승인 심사용 보조 세션·AGENTS.md 지침·앱 상태 알림은 내가 쓴 글이 아니라서 뺀다).
+
+1) 백업: 그 파일들을 backups/claude_transcripts/, backups/codex_sessions/ 로 그대로 복사한다(원본 보존 — 보관 기간이 지나 지워져도 남음).
 2) 판단 사례 수집: 내가 타이핑한 메시지마다 "직전에 Claude가 말한 것(맥락) → 내가 한 답" 짝을 저장한다.
    이 짝은 내 입력·결정을 예측하는 모델의 학습·시험 데이터이고, 일치(sync)를 재는 보류 사례가 된다.
 3) KG 저장: 내가 쓴 글 중 오래 남길 만한 것(기준·사실·목표·결정)만 KG에 넣는다. 일회성 작업 지시·상태 보고·질문·
@@ -28,6 +31,10 @@ from db.init_db import get_conn
 
 ROOT = Path.home() / ".claude" / "projects"
 BACKUP_ROOT = Path(__file__).parent.parent / "backups" / "claude_transcripts"
+CODEX_ROOT = Path.home() / ".codex" / "sessions"
+CODEX_BACKUP = Path(__file__).parent.parent / "backups" / "codex_sessions"
+CODEX_NOISE = re.compile(r"<(external_codex_apps_open_page|environment_context|user_instructions|turn_aborted|in-app-browser-context|recommended_plugins)\b[^>]*>.*?</\1>", re.S)
+CODEX_SKIP_PREFIX = ("# In app browser:", "# AGENTS.md instructions", "The following is the Codex agent history", "<user_action>", "<subagent_notification>")
 MAX_KG_CHARS = 1200          # 이보다 긴 메시지는 붙여넣은 글·로그일 가능성이 커 KG에는 넣지 않는다(원본엔 있음)
 CONTEXT_CHARS = 1500         # 판단 사례에 저장하는 직전 Claude 발화 길이
 LABEL_MODEL = "gemma4:e2b"   # e4b는 GPU 메모리가 부족하면 실행 중 비정상 종료(0xc0000409)해 안정적인 e2b를 쓴다
@@ -78,9 +85,13 @@ def _init(conn):
     CREATE INDEX IF NOT EXISTS idx_ti_pending ON transcript_ingested(label);
     """)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(transcript_ingested)")]
-    for name, ddl in (("project", "TEXT"), ("text", "TEXT"), ("label", "TEXT"), ("kept", "INTEGER NOT NULL DEFAULT 0"), ("logged", "INTEGER NOT NULL DEFAULT 0")):
+    for name, ddl in (("project", "TEXT"), ("text", "TEXT"), ("label", "TEXT"), ("kept", "INTEGER NOT NULL DEFAULT 0"), ("logged", "INTEGER NOT NULL DEFAULT 0"),
+                       ("source", "TEXT"), ("session", "TEXT"), ("source_file", "TEXT")):
         if name not in cols:
             conn.execute("ALTER TABLE transcript_ingested ADD COLUMN %s %s" % (name, ddl))
+    # 이전 버전에서 들어간 행의 출처는 키(세션:시각:해시)와 프로젝트 이름으로 복원한다
+    conn.execute("UPDATE transcript_ingested SET session=substr(key,1,instr(key,':')-1) WHERE session IS NULL")
+    conn.execute("UPDATE transcript_ingested SET source=CASE WHEN project LIKE 'codex--%' THEN 'codex' ELSE 'claude' END WHERE source IS NULL")
     sc = [r[1] for r in conn.execute("PRAGMA table_info(transcript_state)")]
     if "last_assistant" not in sc:
         conn.execute("ALTER TABLE transcript_state ADD COLUMN last_assistant TEXT")
@@ -120,7 +131,51 @@ def assistant_text(entry: dict) -> str | None:
     return _flat(entry.get("message", {}).get("content")).strip() or None
 
 
+def _codex_flat(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") in ("input_text", "output_text", "text"))
+    return ""
+
+
+def codex_user_text(entry: dict) -> str | None:
+    p = entry.get("payload") or {}
+    if entry.get("type") != "response_item" or p.get("type") != "message" or p.get("role") != "user":
+        return None
+    t = CODEX_NOISE.sub("", _codex_flat(p.get("content"))).strip()
+    if t.startswith("# Files mentioned by the user") and "## My request for Codex:" in t:
+        t = t.split("## My request for Codex:", 1)[1].strip()   # 첨부 파일 목록 뒤에 실제 내 요청이 온다
+    return None if not t or t.startswith(CODEX_SKIP_PREFIX) else t
+
+
+def codex_assistant_text(entry: dict) -> str | None:
+    p = entry.get("payload") or {}
+    if entry.get("type") != "response_item" or p.get("type") != "message" or p.get("role") != "assistant":
+        return None
+    return _codex_flat(p.get("content")).strip() or None
+
+
+def codex_meta(path: Path) -> dict | None:
+    """첫 줄(session_meta). 승인 심사용 보조 세션(subagent)이면 None — 내가 쓴 글이 없다."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            first = json.loads(fh.readline())
+    except (OSError, ValueError):
+        return None
+    meta = first.get("payload") or {}
+    return None if isinstance(meta.get("source"), dict) else meta
+
+
+def codex_project(meta: dict) -> str:
+    cwd = (meta.get("cwd") or "").replace("\\", "/").rstrip("/")
+    name = cwd.rsplit("/", 1)[-1] if cwd else "unknown"
+    return "codex--" + re.sub(r"[^\w.-]+", "_", name)
+
+
 def view_for(project_dir: str) -> str:
+    if project_dir.startswith("codex--"):
+        return "cx_" + project_dir[len("codex--"):]
     return "cc_" + re.sub(r"^[dD]--MyWork-", "", project_dir).replace("/", "_")
 
 
@@ -137,12 +192,17 @@ def session_files() -> list[Path]:
     return sorted(ROOT.glob("*/*.jsonl")) if ROOT.is_dir() else []
 
 
+def codex_files() -> list[Path]:
+    return sorted(CODEX_ROOT.rglob("rollout-*.jsonl")) if CODEX_ROOT.is_dir() else []
+
+
 # ── 1) 원본 백업 ────────────────────────────────────────
 
 def mirror() -> dict:
     copied = skipped = total = 0
-    for src in session_files():
-        dest = BACKUP_ROOT / src.parent.name / src.name
+    pairs = [(f, BACKUP_ROOT / f.parent.name / f.name) for f in session_files()]
+    pairs += [(f, CODEX_BACKUP / f.relative_to(CODEX_ROOT)) for f in codex_files()]
+    for src, dest in pairs:
         st = src.stat()
         total += st.st_size
         if dest.exists() and dest.stat().st_size == st.st_size and dest.stat().st_mtime >= st.st_mtime - 1:
@@ -193,7 +253,13 @@ def collect(backfill: bool = True) -> dict:
     conn = get_conn()
     _init(conn)
     res = {"messages": 0, "new": 0, "pairs": 0, "duplicates": 0, "files": 0}
-    for path in session_files():
+    for path in session_files() + codex_files():
+        is_codex = CODEX_ROOT in path.parents
+        meta = None
+        if is_codex:
+            meta = codex_meta(path)
+            if meta is None:
+                continue
         state = conn.execute("SELECT offset, last_assistant FROM transcript_state WHERE path=?", (str(path),)).fetchone()
         if state is None and not backfill:
             conn.execute("INSERT INTO transcript_state(path, offset, updated_at) VALUES (?,?,datetime('now','localtime'))", (str(path), path.stat().st_size))
@@ -205,7 +271,7 @@ def collect(backfill: bool = True) -> dict:
         if not lines and state:
             continue
         res["files"] += 1
-        project = path.parent.name
+        project = codex_project(meta) if is_codex else path.parent.name
         view = view_for(project)
         samples: list[str] = []
         for line in lines:
@@ -213,11 +279,11 @@ def collect(backfill: bool = True) -> dict:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            said = assistant_text(entry)
+            said = codex_assistant_text(entry) if is_codex else assistant_text(entry)
             if said:
                 last_assistant = said
                 continue
-            text = human_text(entry)
+            text = codex_user_text(entry) if is_codex else human_text(entry)
             if not text or len(text) < 2:
                 continue
             res["messages"] += 1
@@ -228,8 +294,9 @@ def collect(backfill: bool = True) -> dict:
                 continue
             label = rule_label(text)
             conn.execute(
-                "INSERT OR IGNORE INTO transcript_ingested(key, view, project, created_at, text, label) VALUES (?,?,?,?,?,?)",
-                (key, view, project, ts, text[:MAX_KG_CHARS], label))
+                "INSERT OR IGNORE INTO transcript_ingested(key, view, project, created_at, text, label, source, session, source_file) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (key, view, project, ts, text[:MAX_KG_CHARS], label, "codex" if is_codex else "claude", path.stem, str(path)))
             conn.execute(
                 "INSERT OR IGNORE INTO decision_pairs(key, project, session, created_at, context, reply, label) VALUES (?,?,?,?,?,?,?)",
                 (key, project, path.stem, ts, (last_assistant or "")[-CONTEXT_CHARS:], text[:3000], label))
@@ -291,8 +358,9 @@ def label_pending(limit: int = LABEL_BATCH) -> dict:
     for r in rows:
         norm = re.sub(r"\s+", " ", r["text"].strip().lower())
         dup = conn.execute("SELECT 1 FROM transcript_ingested WHERE logged=1 AND lower(replace(text,'  ',' '))=? LIMIT 1", (norm,)).fetchone()
+        same = conn.execute("SELECT label FROM transcript_ingested WHERE label IS NOT NULL AND text=? LIMIT 1", (r["text"],)).fetchone()
         try:
-            label = _llm_label(r["text"])
+            label = same["label"] if same else _llm_label(r["text"])   # 같은 문장("좋아" 등)은 다시 묻지 않는다
         except Exception:  # noqa: BLE001 — 모델이 응답 못 하면 다음 주기에 다시 시도한다
             res["errors"] += 1
             break
@@ -333,19 +401,59 @@ def promote(key: str) -> dict:
     return {"promoted": key}
 
 
-def excluded(limit: int = 80, label: str = "") -> list[dict]:
+def excluded(limit: int = 80, label: str = "", saved: bool = False) -> list[dict]:
+    """saved=False면 KG에서 제외한 것, True면 KG에 저장한 것. 어느 도구·프로젝트·세션·원본 파일에서 왔는지 함께 돌려준다."""
     conn = get_conn()
     _init(conn)
-    sql = "SELECT key, view, created_at, text, label FROM transcript_ingested WHERE kept=0 AND label IS NOT NULL AND label NOT IN ('붙여넣기','로그')"
+    cond = "logged=1" if saved else "kept=0 AND label IS NOT NULL AND label NOT IN ('붙여넣기','로그')"
+    sql = "SELECT key, view, created_at, text, label, source, project, session, source_file FROM transcript_ingested WHERE " + cond
     params: list = []
     if label:
         sql += " AND label=?"
         params.append(label)
-    sql += " ORDER BY length(text) DESC, created_at DESC LIMIT ?"
+    sql += " ORDER BY created_at DESC LIMIT ?" if saved else " ORDER BY length(text) DESC, created_at DESC LIMIT ?"
     params.append(limit)
     rows = [dict(r) for r in conn.execute(sql, params)]
+    for r in rows:
+        f = r.get("source_file")
+        root, back = (CODEX_ROOT, CODEX_BACKUP) if r.get("source") == "codex" else (ROOT, BACKUP_ROOT)
+        try:
+            r["backup_file"] = str(back / Path(f).relative_to(root)) if f else None
+        except ValueError:
+            r["backup_file"] = None
     conn.close()
     return rows
+
+
+def browse(source: str = "claude", group: str = "date", q: str = "", label: str = "", groups: int = 40, per_group: int = 30) -> dict:
+    """도구(claude/codex)별로 내가 쓴 메시지를 날짜·프로젝트·종류별로 묶어 보여준다. 'saved'는 KG에 들어간 것."""
+    key_sql = {"date": "substr(created_at,1,10)", "project": "project", "label": "COALESCE(label,'대기')"}.get(group)
+    if key_sql is None or source not in ("claude", "codex"):
+        raise ValueError("source는 claude/codex, group은 date/project/label 이어야 합니다")
+    where = ["COALESCE(source,'claude')=?", "1=1"]
+    params: list = [source]
+    if q:
+        where.append("text LIKE ?")
+        params.append("%" + q + "%")
+    if label:
+        where.append("COALESCE(label,'대기')=?")
+        params.append(label)
+    cond = " AND ".join(where)
+    conn = get_conn()
+    _init(conn)
+    heads = [dict(r) for r in conn.execute(
+        "SELECT %s AS k, COUNT(*) AS n, COALESCE(SUM(logged),0) AS saved, MAX(created_at) AS last FROM transcript_ingested WHERE %s "
+        "GROUP BY k ORDER BY %s LIMIT ?" % (key_sql, cond, "k DESC" if group == "date" else "n DESC"), params + [groups])]
+    total = conn.execute("SELECT COUNT(*), COALESCE(SUM(logged),0) FROM transcript_ingested WHERE " + cond, params).fetchone()
+    for h in heads:
+        h["items"] = [dict(r) for r in conn.execute(
+            "SELECT key, created_at, text, COALESCE(label,'대기') AS label, logged AS saved, project, session FROM transcript_ingested "
+            "WHERE %s AND %s=? ORDER BY created_at DESC LIMIT ?" % (cond, key_sql), params + [h["k"], per_group])]
+        h["k"] = h["k"] if h["k"] is not None else "(날짜 없음)"
+        if group == "project":
+            h["k"] = re.sub(r"^(codex--|[dD]--MyWork-?)", "", h["k"]) or "(루트)"
+    conn.close()
+    return {"source": source, "group": group, "total": total[0], "saved": total[1], "groups": heads}
 
 
 def run_once(backfill: bool = True, label_limit: int = LABEL_BATCH) -> dict:
@@ -387,6 +495,7 @@ def status() -> dict:
     conn = get_conn()
     _init(conn)
     by_label = {r["label"] or "대기": r["n"] for r in conn.execute("SELECT label, COUNT(*) AS n FROM transcript_ingested GROUP BY label")}
+    by_source = {r["source"] or "claude": r["n"] for r in conn.execute("SELECT source, COUNT(*) AS n FROM transcript_ingested GROUP BY source")}
     per = [dict(r) for r in conn.execute(
         "SELECT project, COUNT(*) AS n, SUM(logged) AS saved FROM transcript_ingested GROUP BY project ORDER BY n DESC")]
     pairs = conn.execute("SELECT COUNT(*) FROM decision_pairs").fetchone()[0]
@@ -394,8 +503,8 @@ def status() -> dict:
     total = conn.execute("SELECT COUNT(*) FROM transcript_ingested").fetchone()[0]
     saved = conn.execute("SELECT COALESCE(SUM(logged),0) FROM transcript_ingested").fetchone()[0]
     conn.close()
-    backed = sum(f.stat().st_size for f in BACKUP_ROOT.rglob("*.jsonl")) if BACKUP_ROOT.is_dir() else 0
-    return {**_status, "root": str(ROOT), "backup_dir": str(BACKUP_ROOT), "sessions": len(session_files()),
+    backed = sum(f.stat().st_size for d in (BACKUP_ROOT, CODEX_BACKUP) if d.is_dir() for f in d.rglob("*.jsonl"))
+    return {**_status, "root": str(ROOT), "backup_dir": str(BACKUP_ROOT), "sessions": len(session_files()), "codex_sessions": len(codex_files()),
             "backup_mb": round(backed / 1024 / 1024, 1), "messages_total": total, "kg_saved": saved,
-            "pending": by_label.get("대기", 0), "by_label": by_label, "by_project": per,
+            "pending": by_label.get("대기", 0), "by_label": by_label, "by_source": by_source, "by_project": per,
             "decision_pairs": pairs, "decision_pairs_with_context": pairs_ctx}
