@@ -38,8 +38,8 @@ const NEWER: Ref[] = [
     note: '훈련된 평가자 32명·판단 4,200건으로 개인 평가자를 시뮬레이션. “왜 그렇게 판단했는지”의 회고적 추론 기록이 가장 큰 이득(기본 판정기 대비 최대 +9.9%p)을 줬고, 인터페이스 텔레메트리는 오히려 해가 되는 경우가 많았다.' },
   { cite: 'Dahiya, Anacreon: mixture of minds (arXiv:2608.06115, 2026-08)', href: 'https://arxiv.org/abs/2608.06115', check: 'agent',
     note: 'Gemma 4 12B 위에 클러스터별 어댑터를 두고 선택지 순서를 섞어 프롬프트 취약성을 줄였다. 개인 수준 순서 정렬 점수 0.775를 보고.' },
-  { cite: 'Du, 에이전트 메모리 서베이 (arXiv:2603.07670, 2026-03)', href: 'https://arxiv.org/abs/2603.07670', check: 'agent',
-    note: '메모리를 write–manage–read 루프로 정리하고 모순 처리, 기록 단계 필터링, 신뢰할 수 있는 성찰, 학습된 망각을 남은 과제로 꼽는다.' },
+  { cite: 'Du, 에이전트 메모리 서베이 (arXiv:2603.07670, 2026-03)', href: 'https://arxiv.org/abs/2603.07670', check: 'checked',
+    note: '메모리를 write–manage–read 루프로 정리한 서베이(Memory for Autonomous LLM Agents). 신뢰할 수 있는 성찰과 학습된 망각을 남은 과제로 꼽고, 기록 단계 필터링·모순 처리는 “엔지니어링 현실”로 다룬다(초록 확인, 2026-10-11 정정).' },
   { cite: 'policy capturing을 LLM과 결합해 한 개인의 판단을 복제한 논문 / 특정 개인의 가치·윤리 판단을 홀드아웃으로 예측하는 벤치마크', check: 'agent',
     note: '조사 에이전트가 찾지 못했다. 이 프로젝트의 “판단 정책 포착”은 선행 연구가 거의 없는 영역일 수 있다(내 해석). 방법론 자체는 심리학의 policy capturing으로 정리돼 있다.' },
 ]

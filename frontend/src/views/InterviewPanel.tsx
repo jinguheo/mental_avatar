@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { API_BASE } from '../config'
+import AutoDraft from './AutoDraft'
 
 // 심층 인터뷰 — 사용자가 요청할 때만 질문을 생성한다.
 // 각 답은 높은 신뢰의 self_interview 지식으로 저장되며, 필요하면 직전 답을 바탕으로 한 질문을 더 받는다.
@@ -49,7 +50,10 @@ export default function InterviewPanel() {
       const r = await fetch(`${API_BASE}/interview/question${qs ? `?${qs}` : ''}`)
       const d = await r.json()
       if (d.error) setError(d.error)
-      else setQuestion(d.question || '')
+      else {
+        setQuestion(d.question || '')
+        if (!topic.trim() && d.topic) setTopic(d.topic)
+      }
       setAnswer('')
     } catch (e) {
       setError('질문을 가져오지 못했습니다 (서버 연결 확인).')
@@ -185,6 +189,7 @@ export default function InterviewPanel() {
                 rows={5}
                 className="w-full resize-y rounded-lg border border-surface-border bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400"
               />
+              <AutoDraft kind="interview" slot={question} query={topic} current={answer} onFill={setAnswer} />
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"

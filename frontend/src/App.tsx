@@ -9,12 +9,11 @@ const RealisticAvatar = lazy(() => import('./views/RealisticAvatar'))
 const KnowledgeGraph = lazy(() => import('./views/KnowledgeGraph'))
 const SettingsView = lazy(() => import('./views/Settings'))
 const PptPresenter = lazy(() => import('./views/PptPresenter'))
-const InterviewPanel = lazy(() => import('./views/InterviewPanel'))
 const Notes = lazy(() => import('./views/Notes'))
 const Avatar3DMix = lazy(() => import('./views/Avatar3DMix'))
 const InProgress = lazy(() => import('./views/InProgress'))
 
-type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'mode-mix' | 'presenter' | 'interview' | 'notes' | 'settings' | 'in-progress'
+type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'mode-mix' | 'presenter' | 'notes' | 'settings' | 'in-progress'
 type NavItem = { id: Tab; label: string; navLabel: string; icon: Tab; description: string }
 
 const STORAGE_KEY = 'mental-avatar-settings'
@@ -28,7 +27,6 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'mode-mix', label: '3D Mix', navLabel: 'Mix', icon: 'mode-mix', description: '사진 형태를 실사 아바타 리그에 이식' },
   { id: 'mode-a', label: '영상 도구', navLabel: '영상', icon: 'mode-a', description: '아바타 영상 생성' },
   { id: 'presenter', label: '발표', navLabel: '발표', icon: 'presenter', description: '슬라이드와 내레이션' },
-  { id: 'interview', label: '심층 인터뷰', navLabel: '인터뷰', icon: 'interview', description: '나의 경험·가치관·판단 기준을 깊게 기록' },
   { id: 'notes', label: '노트', navLabel: '노트', icon: 'notes', description: '대화에서 자동 생성된 노트 검색' },
   { id: 'settings', label: '설정', navLabel: '설정', icon: 'settings', description: '연결과 프로필' },
   { id: 'in-progress', label: '구현중', navLabel: '진행', icon: 'in-progress', description: '판단·기억·권한·검증·신원 감독' },
@@ -116,15 +114,6 @@ function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
         <path d="M8 20h8" />
         <path d="M8 9h8" />
         <path d="M8 12h5" />
-      </svg>
-    )
-  }
-  if (icon === 'interview') {
-    return (
-      <svg {...common}>
-        <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4L3 21l1.1-4A8.4 8.4 0 1 1 21 11.5Z" />
-        <path d="M9.2 9.3a2.8 2.8 0 0 1 5.4.9c0 1.9-2.8 2.8-2.8 2.8" />
-        <path d="M12 16.5h.01" />
       </svg>
     )
   }
@@ -328,7 +317,6 @@ export default function App() {
           {tab === 'mode-mix' && <Avatar3DMix />}
           {tab === 'kg' && <KnowledgeGraph settings={settings} />}
           {tab === 'presenter' && <PptPresenter />}
-          {tab === 'interview' && <InterviewPanel />}
           {tab === 'notes' && <Notes />}
           {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
           {tab === 'in-progress' && <InProgress />}

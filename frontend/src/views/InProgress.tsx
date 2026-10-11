@@ -7,8 +7,12 @@ import SelfSummaryPanel from './SelfSummaryPanel'
 import QuarantinePanel from './QuarantinePanel'
 import TranscriptPanel from './TranscriptPanel'
 import TranscriptBrowser from './TranscriptBrowser'
+import AutoDraft from './AutoDraft'
 import ProgressLog from './ProgressLog'
 import ResearchTrends from './ResearchTrends'
+import InterviewPanel from './InterviewPanel'
+import AvatarPaper from './AvatarPaper'
+import PersonaAvatars from './PersonaAvatars'
 
 type SectionKey = 'judgment' | 'memory' | 'authority' | 'verification' | 'identity'
 type Section = { section: SectionKey; draft: string; approved: string; updated_at: string | null; approved_at: string | null }
@@ -246,7 +250,7 @@ function StatusView() {
       </section>
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">1. 나는 누구인가</h2>
-        <p className="mt-1 text-sm text-gray-600">직접 입력한 값이 우선입니다. 타이핑한 대화에서 명시적으로 말한 사실을 로컬 모델이 후보로 추출하고, 서로 다른 대화에서 같은 사실이 2번 확인되면 자동 반영합니다. 단발 실수와 음성 인식 오류는 활성 프로필에 넣지 않습니다.</p>
+        <p className="mt-1 text-sm text-gray-600">직접 입력한 값이 우선입니다. 타이핑한 아바타 대화에서 명시적으로 말한 사실을 로컬 모델이 후보로 추출하고, 서로 다른 발언에서 같은 사실이 2번 확인되면 자동 반영합니다. 음성 인식 기록은 자동 추출에서 제외합니다.</p>
         <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-600">
           <span>대화 재검사: {autoStatus?.running ? '진행 중' : '대기'} · 검사한 발언 {autoStatus?.seen ?? 0}건 · 후보 {autoStatus?.candidates ?? 0}건 · 2회 확인된 사실 {autoStatus?.facts ?? 0}개</span>
           <button type="button" onClick={() => { void api('/profile/auto_sync', { method: 'POST' }).then(setAutoStatus).catch(cause => setError(String(cause))) }} disabled={autoStatus?.running} className="rounded border border-gray-300 px-2 py-1 disabled:opacity-50">기존 대화 다시 검사</button>
@@ -271,10 +275,11 @@ function StatusView() {
           return <article key={info.key} className="view-panel p-4 sm:p-5">
             <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">{info.title}</h3><span className="text-xs text-gray-500">마지막 반영: {date(item?.approved_at)}</span></div>
             <p className="mt-1 text-sm text-gray-600">{info.purpose}</p>
-            <textarea rows={4} placeholder={info.example} value={drafts[info.key] || ''} onChange={event => setDrafts(previous => ({ ...previous, [info.key]: event.target.value }))} onBlur={() => { if (item?.approved !== (drafts[info.key] || '')) void saveSection(info.key) }} className="mt-3 w-full rounded-lg border border-gray-300 p-3 text-sm" />
+            <textarea rows={4} placeholder={info.example} value={drafts[info.key] || ''} onChange={event => setDrafts(previous => ({ ...previous, [info.key]: event.target.value }))} className="mt-3 w-full rounded-lg border border-gray-300 p-3 text-sm" />
+            <AutoDraft kind="criterion" slot={info.title} query={info.purpose} current={drafts[info.key] || ''} onFill={text => setDrafts(previous => ({ ...previous, [info.key]: text }))} />
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button onClick={() => saveSection(info.key)} disabled={!!busy} className="rounded-lg bg-gray-950 px-3 py-2 text-sm text-white disabled:opacity-50">지금 반영</button>
-              <span className="text-xs text-gray-500">{item?.approved === (drafts[info.key] || '') ? '현재 아바타에 반영됨' : '입력칸을 벗어나면 자동 반영'}</span>
+              <span className="text-xs text-gray-500">{!(drafts[info.key] || item?.approved) ? '아직 입력 없음' : item?.approved === (drafts[info.key] || '') ? '현재 아바타에 반영됨' : '검토 후 지금 반영을 누르면 저장됩니다'}</span>
             </div>
           </article>
         })}
@@ -304,6 +309,7 @@ function StatusView() {
           <input value={newMemory} onChange={event => setNewMemory(event.target.value)} placeholder="예: 내가 가장 중요하게 여기는 원칙은…" className="min-w-0 flex-1 rounded-lg border border-gray-300 p-2 text-sm" />
           <button onClick={addMemory} disabled={!!busy || !newMemory.trim()} className="rounded-lg bg-gray-950 px-4 py-2 text-sm text-white disabled:opacity-50">핵심 기억 저장</button>
         </div>
+        <AutoDraft kind="memory" onPick={text => setNewMemory(text)} />
       </section>
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">5. 나와 비교해서 검증</h2>
@@ -312,6 +318,7 @@ function StatusView() {
           <textarea rows={3} value={newQuestion} onChange={event => setNewQuestion(event.target.value)} placeholder="아바타에게 물어볼 질문" className="rounded-lg border border-gray-300 p-2 text-sm" />
           <textarea rows={3} value={newExpected} onChange={event => setNewExpected(event.target.value)} placeholder="내가 실제로 할 답과 판단 이유" className="rounded-lg border border-gray-300 p-2 text-sm" />
         </div>
+        <AutoDraft kind="case" onPickCase={(question, expected) => { setNewQuestion(question); setNewExpected(expected) }} />
         <button onClick={addEvaluation} disabled={!!busy || !newQuestion.trim() || !newExpected.trim()} className="mt-2 rounded-lg bg-gray-950 px-4 py-2 text-sm text-white disabled:opacity-50">비교 질문 저장</button>
         <div className="mt-4 space-y-3">
           {state?.evaluations.map(item => <div key={item.id} className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
@@ -332,10 +339,13 @@ function StatusView() {
   </div>
 }
 
-type SubTab = 'status' | 'trends'
+type SubTab = 'status' | 'interview' | 'persona' | 'trends' | 'paper'
 const SUB_TABS: { id: SubTab; label: string }[] = [
   { id: 'status', label: '진행 현황' },
+  { id: 'interview', label: '심층 인터뷰' },
+  { id: 'persona', label: '유명인 아바타' },
   { id: 'trends', label: '아바타 연구 동향' },
+  { id: 'paper', label: '아바타논문' },
 ]
 
 export default function InProgress() {
@@ -345,6 +355,6 @@ export default function InProgress() {
       {SUB_TABS.map(item => <button key={item.id} role="tab" aria-selected={sub === item.id} onClick={() => setSub(item.id)}
         className={'rounded-t-lg px-4 py-2 text-sm font-medium ' + (sub === item.id ? 'border border-b-white border-gray-200 bg-white text-gray-950' : 'text-gray-500 hover:text-gray-800')}>{item.label}</button>)}
     </div>
-    <div className="min-h-0 flex-1">{sub === 'status' ? <StatusView /> : <ResearchTrends />}</div>
+    <div className="min-h-0 flex-1">{sub === 'status' ? <StatusView /> : sub === 'interview' ? <InterviewPanel /> : sub === 'persona' ? <PersonaAvatars /> : sub === 'paper' ? <AvatarPaper /> : <ResearchTrends />}</div>
   </div>
 }

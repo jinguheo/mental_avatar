@@ -12,7 +12,7 @@ import re as _re
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes, governance, linkage, self_summary, memory_filter, transcript_ingest, profile_recall
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes, governance, linkage, self_summary, memory_filter, transcript_ingest, profile_recall, autodraft, persona_eval, persona_qbank
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -832,6 +832,49 @@ def governance_save_evaluation():
 def governance_delete_evaluation(case_id):
     governance.delete_evaluation(case_id)
     return jsonify({"success": True})
+
+
+@app.route("/persona/status", methods=["GET"])
+def persona_status():
+    """유명인 아바타 시험용 수집 자료 현황(인물별 문서·글자 수, 질문·답 짝, 구성/시험 분리)"""
+    return jsonify(persona_eval.corpus_status())
+
+
+@app.route("/persona/qbank/status", methods=["GET"])
+def persona_qbank_status():
+    return jsonify(persona_qbank.status())
+
+
+@app.route("/persona/qbank/run/<person>", methods=["POST"])
+def persona_qbank_run(person):
+    """질문 은행으로 해당 인물의 자료에서 본인이 직접 답한 대목을 찾는다(백그라운드)"""
+    try:
+        return jsonify(persona_qbank.start(person))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/persona/qbank/answers/<person>", methods=["GET"])
+def persona_qbank_answers(person):
+    return jsonify({"summary": persona_qbank.summary(person), "rows": persona_qbank.load(person)})
+
+
+@app.route("/persona/build_qa", methods=["POST"])
+def persona_build_qa():
+    """주주총회 녹취에서 버핏의 질문·답 짝을 뽑고 구성용/시험용으로 나눈다"""
+    return jsonify(persona_eval.build_buffett())
+
+
+@app.route("/draft", methods=["POST"])
+def draft_from_history():
+    """이전 기록으로 입력칸 초안을 만든다(저장하지 않음). kind: criterion/interview/memory/case"""
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(autodraft.draft(data.get("kind", ""), data.get("query", ""), data.get("slot", "")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 — 모델 응답 실패 등
+        return jsonify({"error": "초안 생성 실패: " + str(exc)}), 502
 
 
 @app.route("/transcripts/status", methods=["GET"])

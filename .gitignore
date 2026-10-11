@@ -58,3 +58,6 @@ project-summaries/
 
 # 디버그용 임시 요청 덤프
 req.json
+
+# 인물 시험용 수집 자료 (공개 자료지만 저장소에는 올리지 않는다)
+data/persona_corpus/
