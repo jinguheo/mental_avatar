@@ -120,7 +120,8 @@ def wiki_text(site: str, title: str) -> str:
     """MediaWiki 본문(일반 텍스트). site: en.wikipedia.org / en.wikiquote.org / en.wikisource.org"""
     if "wikisource" in site:
         r = get("https://%s/w/api.php" % site, params={"action": "parse", "page": title, "prop": "text", "format": "json", "redirects": 1, "disablelimitreport": 1})
-        return html_to_text(r.json()["parse"]["text"]["*"].encode("utf-8"))
+        # encoding을 지정하지 않으면 lxml이 바이트를 latin-1로 읽어 한국어·한문이 깨진다(ko.wikisource에서 확인).
+        return html_to_text(r.json()["parse"]["text"]["*"].encode("utf-8"), "utf-8")
     r = get("https://%s/w/api.php" % site, params={
         "action": "query", "prop": "extracts", "explaintext": 1, "exsectionformat": "wiki",
         "titles": title, "format": "json", "redirects": 1})
@@ -250,6 +251,18 @@ SOURCES = {
         ("interview", "송해 기사 (전북일보 2011)", "https://jjan.kr/article/20110704402334"),
         ("interview", "송해 기사 (서울시 미디어허브)", "https://mediahub.seoul.go.kr/archives/2006590"),
     ]],
+    # 세종대왕: 영상·녹음이 없고 본인이 직접 쓴 글도 훈민정음 서문 정도라서 전부 '기록에 적힌 것(bio)'으로 둔다.
+    # 실록은 관찬 사서(제3자 기록)이므로 본인 발언으로 취급하지 않는다. 출처는 위키문헌·위키백과(공개).
+    "sejong": lambda: [
+        ("bio", "위키백과: 세종", ("wiki", "ko.wikipedia.org", "세종")),
+        ("bio", "위키백과: 집현전", ("wiki", "ko.wikipedia.org", "집현전")),
+        ("bio", "위키백과: 조선왕조실록", ("wiki", "ko.wikipedia.org", "조선왕조실록")),
+        ("bio", "위키문헌: 훈민정음(해례본)", ("wiki", "ko.wikisource.org", "훈민정음")),
+        ("bio", "위키문헌: 훈민정음언해", ("wiki", "ko.wikisource.org", "훈민정음언해")),
+        ("bio", "위키문헌: 용비어천가", ("wiki", "ko.wikisource.org", "용비어천가")),
+        ("bio", "위키문헌: 세종실록 25년(1443, 훈민정음 창제)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/25년")),
+        ("bio", "위키문헌: 세종실록 28년(1446, 훈민정음 반포)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/28년")),
+    ],
     "brucelee": lambda: [
         ("bio", "Wikipedia: Bruce Lee", ("wiki", "en.wikipedia.org", "Bruce Lee")),
         ("bio", "Wikipedia: Jeet Kune Do", ("wiki", "en.wikipedia.org", "Jeet Kune Do")),

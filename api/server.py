@@ -12,7 +12,7 @@ import re as _re
 from pathlib import Path
 
 from db.init_db import init as init_db
-from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes, governance, linkage, self_summary, memory_filter, transcript_ingest, profile_recall, autodraft, persona_eval, persona_qbank
+from core import graph, extractor, embeddings, pattern, wiki, queue_mgr, avatar as avatar_core, project_scan, ppt_present, lipsync, config, kg_ingest, self_interview, notes, governance, linkage, self_summary, memory_filter, transcript_ingest, profile_recall, autodraft, persona_eval, persona_qbank, persona_chat
 from agent import recommender, searcher
 from watcher.parsers import parse_file
 
@@ -857,6 +857,41 @@ def persona_qbank_run(person):
 @app.route("/persona/qbank/answers/<person>", methods=["GET"])
 def persona_qbank_answers(person):
     return jsonify({"summary": persona_qbank.summary(person), "rows": persona_qbank.load(person)})
+
+
+@app.route("/persona/chat/people", methods=["GET"])
+def persona_chat_people():
+    """홍보 페이지 체험용: 대화 가능한 유명인과 인사말·추천 질문·자료 준비 상태(글 전용, 얼굴·목소리 없음)"""
+    return jsonify({"people": persona_chat.people()})
+
+
+@app.route("/persona/chat/<person>/warm", methods=["POST"])
+def persona_chat_warm(person):
+    if person not in persona_chat.PEOPLE:
+        return jsonify({"error": "알 수 없는 인물"}), 404
+    return jsonify({"state": persona_chat.warm(person)})
+
+
+@app.route("/persona/chat/<person>/ask", methods=["POST"])
+def persona_chat_ask(person):
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(persona_chat.ask(person, data.get("question", "")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 — 로컬 모델이 꺼져 있을 때 등
+        return jsonify({"error": "답을 만들지 못했습니다: " + str(exc)}), 503
+
+
+@app.route("/persona/chat/<person>/comment", methods=["POST"])
+def persona_chat_comment(person):
+    """그 사람의 전문 관점(예: 아인슈타인=양자역학, 세종=기록)으로 이 서비스를 논평"""
+    try:
+        return jsonify(persona_chat.comment(person))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": "논평을 만들지 못했습니다: " + str(exc)}), 503
 
 
 @app.route("/persona/build_qa", methods=["POST"])

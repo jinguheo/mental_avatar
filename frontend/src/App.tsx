@@ -12,8 +12,9 @@ const PptPresenter = lazy(() => import('./views/PptPresenter'))
 const Notes = lazy(() => import('./views/Notes'))
 const Avatar3DMix = lazy(() => import('./views/Avatar3DMix'))
 const InProgress = lazy(() => import('./views/InProgress'))
+const PromoSite = lazy(() => import('./views/PromoSite'))
 
-type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'mode-mix' | 'presenter' | 'notes' | 'settings' | 'in-progress'
+type Tab = 'home' | 'kg' | 'mode-a' | 'mode-c' | 'mode-r' | 'mode-mix' | 'presenter' | 'notes' | 'settings' | 'in-progress' | 'promo'
 type NavItem = { id: Tab; label: string; navLabel: string; icon: Tab; description: string }
 
 const STORAGE_KEY = 'mental-avatar-settings'
@@ -30,6 +31,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'notes', label: '노트', navLabel: '노트', icon: 'notes', description: '대화에서 자동 생성된 노트 검색' },
   { id: 'settings', label: '설정', navLabel: '설정', icon: 'settings', description: '연결과 프로필' },
   { id: 'in-progress', label: '구현중', navLabel: '진행', icon: 'in-progress', description: '판단·기억·권한·검증·신원 감독' },
+  { id: 'promo', label: '홍보 홈페이지', navLabel: '홍보', icon: 'promo', description: '아바타 사업을 알리는 소개 페이지' },
 ]
 
 function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
@@ -124,6 +126,15 @@ function NavIcon({ icon, className = '' }: { icon: Tab; className?: string }) {
         <path d="M15 3v4h4" />
         <path d="M8 12h8" />
         <path d="M8 16h5" />
+      </svg>
+    )
+  }
+  if (icon === 'promo') {
+    return (
+      <svg {...common}>
+        <path d="M4 10v4l10 4V6L4 10Z" />
+        <path d="M14 9a3 3 0 0 1 0 6" />
+        <path d="M6 15l1 4h2l-1-3" />
       </svg>
     )
   }
@@ -320,6 +331,7 @@ export default function App() {
           {tab === 'notes' && <Notes />}
           {tab === 'settings' && <SettingsView settings={settings} onChange={setSettings} />}
           {tab === 'in-progress' && <InProgress />}
+          {tab === 'promo' && <PromoSite />}
         </Suspense>
       </main>
     </div>
