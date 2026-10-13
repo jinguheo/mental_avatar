@@ -211,7 +211,12 @@ def add_memory(content: str) -> str:
         raise ValueError("content required")
     mid = _uuid.uuid4().hex
     conn = get_conn()
-    conn.execute("INSERT INTO core_memory (id, content) VALUES (?,?)", (mid, content))
+    conn.execute(
+        """INSERT INTO core_memory
+        (id, content, source_kind, source_ref, confidence, approval_status, conflict_status)
+        VALUES (?,?,?,?,?,?,?)""",
+        (mid, content, "direct_input", "사용자 직접 입력", 1.0, "approved", "unchecked"),
+    )
     conn.commit()
     conn.close()
     return mid
@@ -219,7 +224,11 @@ def add_memory(content: str) -> str:
 
 def list_memory() -> list[dict]:
     conn = get_conn()
-    rows = conn.execute("SELECT id, content, created_at FROM core_memory ORDER BY created_at DESC").fetchall()
+    rows = conn.execute(
+        """SELECT id, content, source_kind, source_ref, observed_at, confidence,
+                  approval_status, conflict_status, created_at
+           FROM core_memory ORDER BY created_at DESC"""
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

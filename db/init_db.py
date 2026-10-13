@@ -144,6 +144,12 @@ def init():
     CREATE TABLE IF NOT EXISTS core_memory (
         id          TEXT PRIMARY KEY,
         content     TEXT NOT NULL,
+        source_kind TEXT NOT NULL DEFAULT 'direct_input',
+        source_ref  TEXT DEFAULT '사용자 직접 입력',
+        observed_at DATETIME DEFAULT (datetime('now','localtime')),
+        confidence  REAL DEFAULT 1.0,
+        approval_status TEXT NOT NULL DEFAULT 'approved',
+        conflict_status TEXT NOT NULL DEFAULT 'unchecked',
         created_at  DATETIME DEFAULT (datetime('now','localtime'))
     );
 
@@ -155,10 +161,43 @@ def init():
         answer      TEXT NOT NULL,
         topic       TEXT DEFAULT '',
         node_id     TEXT,
+        source_kind TEXT NOT NULL DEFAULT 'self_report',
+        source_ref  TEXT DEFAULT '심층 인터뷰 직접 입력',
+        observed_at DATETIME DEFAULT (datetime('now','localtime')),
+        confidence  REAL DEFAULT 0.9,
+        approval_status TEXT NOT NULL DEFAULT 'approved',
+        conflict_status TEXT NOT NULL DEFAULT 'unchecked',
         created_at  DATETIME DEFAULT (datetime('now','localtime'))
     );
 
     CREATE INDEX IF NOT EXISTS idx_selfint_created ON self_interview(created_at);
+
+    -- 구조화된 판단 사례: 자유 인터뷰와 별도로 실제 선택의 맥락과 트레이드오프를 보존한다.
+    -- self_interview_id는 같은 내용을 KG에 저장한 원본 자문자답을 가리킨다.
+    CREATE TABLE IF NOT EXISTS decision_cases (
+        id                TEXT PRIMARY KEY,
+        self_interview_id TEXT NOT NULL REFERENCES self_interview(id) ON DELETE CASCADE,
+        topic             TEXT DEFAULT '',
+        decision_type     TEXT NOT NULL,
+        situation         TEXT NOT NULL,
+        options_text      TEXT DEFAULT '',
+        choice            TEXT NOT NULL,
+        rationale         TEXT NOT NULL,
+        rejected_options  TEXT DEFAULT '',
+        exception_rule    TEXT DEFAULT '',
+        confidence        INTEGER,
+        source_kind       TEXT NOT NULL DEFAULT 'self_report',
+        source_ref        TEXT DEFAULT '심층 인터뷰 직접 입력',
+        observed_at       DATETIME DEFAULT (datetime('now','localtime')),
+        approval_status   TEXT NOT NULL DEFAULT 'approved',
+        conflict_status   TEXT NOT NULL DEFAULT 'unchecked',
+        policy_version    TEXT NOT NULL DEFAULT 'v1',
+        evidence_state    TEXT NOT NULL DEFAULT 'direct',
+        created_at        DATETIME DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_decision_cases_created ON decision_cases(created_at);
+    CREATE INDEX IF NOT EXISTS idx_decision_cases_type ON decision_cases(decision_type);
 
     -- 아바타 AI 대화 중 자동 생성되는 노트. my-dashboard의 노트(daily_sync source='note')와는
     -- 별개 저장소 — file_path 접두사(avatar_note://)로 KG nodes 안에서도 출처를 구분한다.
@@ -205,6 +244,36 @@ def init():
         c.execute("ALTER TABLE project_summaries ADD COLUMN graphified_at DATETIME")
     except sqlite3.OperationalError:
         pass  # 이미 컬럼 존재 (기존 DB) — 개별/일괄 Graphify 처리 완료 표시용
+
+    # 기존 사용자의 DB도 메타데이터를 잃지 않고 점진적으로 확장한다.
+    for table, column, definition in (
+        ("core_memory", "source_kind", "TEXT NOT NULL DEFAULT 'direct_input'"),
+        ("core_memory", "source_ref", "TEXT DEFAULT '사용자 직접 입력'"),
+        ("core_memory", "observed_at", "DATETIME"),
+        ("core_memory", "confidence", "REAL DEFAULT 1.0"),
+        ("core_memory", "approval_status", "TEXT NOT NULL DEFAULT 'approved'"),
+        ("core_memory", "conflict_status", "TEXT NOT NULL DEFAULT 'unchecked'"),
+        ("self_interview", "source_kind", "TEXT NOT NULL DEFAULT 'self_report'"),
+        ("self_interview", "source_ref", "TEXT DEFAULT '심층 인터뷰 직접 입력'"),
+        ("self_interview", "observed_at", "DATETIME"),
+        ("self_interview", "confidence", "REAL DEFAULT 0.9"),
+        ("self_interview", "approval_status", "TEXT NOT NULL DEFAULT 'approved'"),
+        ("self_interview", "conflict_status", "TEXT NOT NULL DEFAULT 'unchecked'"),
+        ("decision_cases", "source_kind", "TEXT NOT NULL DEFAULT 'self_report'"),
+        ("decision_cases", "source_ref", "TEXT DEFAULT '심층 인터뷰 직접 입력'"),
+        ("decision_cases", "observed_at", "DATETIME"),
+        ("decision_cases", "approval_status", "TEXT NOT NULL DEFAULT 'approved'"),
+        ("decision_cases", "conflict_status", "TEXT NOT NULL DEFAULT 'unchecked'"),
+        ("decision_cases", "policy_version", "TEXT NOT NULL DEFAULT 'v1'"),
+        ("decision_cases", "evidence_state", "TEXT NOT NULL DEFAULT 'direct'"),
+    ):
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError:
+            pass  # 이미 컬럼 존재
+
+    # 기존 DB에는 위 마이그레이션으로 policy_version을 먼저 만든 뒤 인덱스를 생성한다.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_decision_cases_policy ON decision_cases(policy_version)")
 
     conn.commit()
     conn.close()

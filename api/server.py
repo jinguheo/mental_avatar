@@ -859,6 +859,17 @@ def persona_qbank_answers(person):
     return jsonify({"summary": persona_qbank.summary(person), "rows": persona_qbank.load(person)})
 
 
+@app.route("/persona/qbank/review/<person>", methods=["POST"])
+def persona_qbank_review(person):
+    """그 사람을 아는 사람의 리뷰(맞음/수정/틀림/추가)를 저장한다. 원래 근거는 지우지 않는다."""
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(persona_qbank.review_add(person, body.get("qid", ""), body.get("key", ""), body.get("reviewer", ""), body.get("relation", ""),
+                                                body.get("verdict", ""), body.get("text", "")))
+    except (ValueError, KeyError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/persona/chat/people", methods=["GET"])
 def persona_chat_people():
     """홍보 페이지 체험용: 대화 가능한 유명인과 인사말·추천 질문·자료 준비 상태(글 전용, 얼굴·목소리 없음)"""
@@ -1158,6 +1169,22 @@ def interview_answer():
         return jsonify(self_interview.save_answer(question, answer, topic))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/interview/decision-case", methods=["POST"])
+def interview_decision_case():
+    """실제 판단 사례를 구조화해 자문자답과 KG에 함께 저장한다."""
+    try:
+        return jsonify(self_interview.save_decision_case(request.get_json(silent=True) or {}))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/interview/coverage", methods=["GET"])
+def interview_coverage():
+    return jsonify(self_interview.decision_coverage())
 
 
 @app.route("/interview/followup", methods=["POST"])

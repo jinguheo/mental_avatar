@@ -14,15 +14,15 @@ const VERDICT: Record<string, { text: string; cls: string }> = {
   feynman: { text: '부족(대표 인터뷰 전문 접근 불가)', cls: 'bg-amber-100 text-amber-800' },
   jobs: { text: '부족(인터뷰 전문 접근 불가)', cls: 'bg-amber-100 text-amber-800' },
   songhae: { text: '검토 중(한국어 기사 14건, 질의응답 형식은 적음)', cls: 'bg-blue-100 text-blue-800' },
-  brucelee: { text: '불가(공개 녹취 없음) → 대체 배우 필요', cls: 'bg-red-100 text-red-800' },
+  sejong: { text: '기록·일반 지식·추정으로 구성(60문항 중 21개, 리뷰 대기). 직접 평가 불가', cls: 'bg-purple-100 text-purple-800' },
 }
 
 type Todo = { text: string; status: 'done' | 'doing' | 'todo' }
 const TODO: Todo[] = [
-  { text: '후보 5명 공개 자료 수집(버핏·아인슈타인·파인만·잡스·이소룡) 및 자료 유무 확인', status: 'done' },
+  { text: '후보 공개 자료 수집(버핏·아인슈타인·파인만·잡스·송해·세종대왕) 및 자료 유무 확인. 이소룡은 제외', status: 'done' },
   { text: '버핏: 주주총회 녹취에서 질문·답 짝 추출, 2018년 이후는 시험용으로 분리(구성용에서 같은 해 이후 서한도 제외)', status: 'done' },
   { text: '질의응답 없는 인물용 시험 선택: 입장 예측·진짜 vs 오귀속 발언·시기 분리·글 이어쓰기·문체 일치(3-1)', status: 'todo' },
-  { text: '대체 배우 선정 — 이소룡은 공개 녹취가 없음(자료가 충분한 인물로 교체)', status: 'todo' },
+  { text: '이소룡은 제외하고 세종대왕으로 교체(2026-10-11, 사용자 결정)', status: 'done' },
   { text: '질문 은행(60문항)으로 인물별 고유 정보 찾기 — 찾은 것만 남기고 근거(자료·원문 주소) 표시(3-2)', status: 'doing' },
   { text: '송해(한국어) 자료 보강 — 신문·잡지 인터뷰, 평전, 다큐 기사. 한국어 검색은 별도 구현 필요', status: 'doing' },
   { text: '시험 문제에 영역 표시(가치관·결정·감정·관계·유머·취향·이력·모순) — 영역별 점수를 보기 위해', status: 'todo' },
@@ -41,7 +41,7 @@ const LAYERS = [
 ]
 const NO_QA: { name: string; how: string; truth: string; fit: string }[] = [
   { name: '입장 예측', how: '보류한 문서에서 "이 사람이 이 주장에 동의했나"를 판정하는 문장 시험을 만들고 아바타가 동의·반대를 예측', truth: '본인 글·발언에 적힌 입장', fit: '5명 모두(발언 모음 + 에세이)' },
-  { name: '진짜 vs 오귀속 발언', how: '실제 발언과, 널리 퍼졌지만 본인이 하지 않은 발언(위키인용 오귀속 구역) 중 아바타가 진짜를 고름', truth: '출처가 확인된 발언 / 오귀속으로 판정된 발언', fit: '아인슈타인·잡스·이소룡(오귀속 사례가 많음)' },
+  { name: '진짜 vs 오귀속 발언', how: '실제 발언과, 널리 퍼졌지만 본인이 하지 않은 발언(위키인용 오귀속 구역) 중 아바타가 진짜를 고름', truth: '출처가 확인된 발언 / 오귀속으로 판정된 발언', fit: '아인슈타인·잡스(오귀속 사례가 많음)' },
   { name: '시기 분리 예측', how: '앞 시기 자료로 만들고 뒤 시기의 입장을 예측(발언이 연대별로 정리되어 있음)', truth: '이후 시기의 실제 발언', fit: '아인슈타인(1890년대~1950년대 연대별 발언)' },
   { name: '글 이어쓰기·논증 완성', how: '보류한 글의 앞부분이나 전제를 주고 결론·다음 주장을 쓰게 한 뒤 원문과 비교', truth: '원문', fit: '파인만(보고서·강연)·버핏 서한·아인슈타인 에세이' },
   { name: '문체 일치(기계 측정)', how: '아바타 글과 실제 글의 문장 길이·접속어·어휘 분포를 비교, 사람 눈 없이 계산', truth: '실제 글의 통계', fit: '5명 모두' },
@@ -50,12 +50,46 @@ const NO_QA: { name: string; how: string; truth: string; fit: string }[] = [
 ]
 const DOMAINS = ['가치관·신념·윤리', '일과 결정', '감정·갈등', '관계', '유머·말투', '취향·습관', '인생 이력', '모순된 면']
 
-type Evidence = { text: string; doc: string; title: string; kind: string; tier: 'own' | 'reported'; score: number; source_url?: string; file?: string }
+type Evidence = { text: string; doc: string; title: string; kind: string; tier: 'own' | 'reported' | 'secondary' | 'general' | 'estimate' | 'reviewed'; score: number; source_url?: string; file?: string; key?: string; observed_at?: string; confidence?: number; approval_status?: string; conflict_status?: string; reviews?: { reviewer: string; relation: string; verdict: string; at: string }[] }
 type AnswerRow = { qid: string; domain: string; question: string; question_en: string; answered: boolean; evidence: Evidence[] }
-type QSummary = { total: number; answered: number; own_answered: number; by_domain: Record<string, { total: number; answered: number; own: number }> }
+type QSummary = { total: number; answered: number; real_answered?: number; own_answered: number; by_domain: Record<string, { total: number; answered: number; own: number; real?: number }> }
+const REAL = ['own', 'reported']   // 수집한 자료에서 확인된 근거. 나머지(secondary·general·estimate)는 추정·미확인으로 따로 표시한다
 type QStatus = { running: boolean; person: string; done: number; total: number; last_error: string | null; questions: number; people: Record<string, QSummary> }
-const TIER: Record<string, string> = { own: '본인이 쓴/말한 것', reported: '전기·기사에 적힌 것' }
-const KIND2: Record<string, string> = { primary: '본인 글·연설·편지', interview: '인터뷰·질의응답', quotes: '출처 확인된 발언', lecture: '강의·강연', bio: '전기·백과' }
+const TIER: Record<string, string> = { own: '본인이 쓴/말한 것', reported: '전기·기사에 적힌 것', secondary: '보도·해설 요약(원문 미확인, 리뷰 대기)', general: '일반 지식(출처 미확인, 리뷰 대기)', estimate: '가상 추정(본인 진술 아님, 리뷰 대기)', reviewed: '그 사람을 아는 사람의 리뷰' }
+const KIND2: Record<string, string> = { primary: '본인 글·연설·편지', interview: '인터뷰·질의응답', quotes: '출처 확인된 발언', lecture: '강의·강연', bio: '전기·백과', news: '보도·해설', general: '일반 지식', estimate: '가상 추정', review: '리뷰' }
+
+const VERDICT_TEXT: Record<string, string> = { confirmed: '맞다고 확인', rejected: '틀렸다고 표시' }
+
+// 서비스 단계의 검수: 그 사람을 직접 아는 사람이 추정을 맞다/틀리다/이렇게 고쳐라 하고 남긴다. 원래 근거는 지우지 않고 그 위에 겹쳐 보인다.
+function ReviewBox({ person, qid, item, onSaved }: { person: string; qid: string; item: Evidence; onSaved: () => void }) {
+  const [reviewer, setReviewer] = useState('')
+  const [relation, setRelation] = useState('')
+  const [text, setText] = useState('')
+  const [message, setMessage] = useState('')
+  async function send(verdict: string) {
+    setMessage('')
+    try {
+      await call('/persona/qbank/review/' + person, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ qid, key: item.key, reviewer, relation, verdict, text }) })
+      setText(''); setMessage('저장했습니다.'); onSaved()
+    } catch (cause) { setMessage(cause instanceof Error ? cause.message : String(cause)) }
+  }
+  return <details className="mt-1 text-xs">
+    <summary className="cursor-pointer text-indigo-700">그 사람을 아는 사람의 리뷰{item.reviews?.length ? ' (' + item.reviews.length + '건)' : ''}</summary>
+    {item.reviews?.map((rv, index) => <p key={index} className="mt-1 text-gray-700">· {rv.reviewer}({rv.relation}): {VERDICT_TEXT[rv.verdict] || rv.verdict} · {rv.at.slice(0, 10)}</p>)}
+    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <input value={reviewer} onChange={e => setReviewer(e.target.value)} placeholder="리뷰어 이름" className="w-28 rounded border border-gray-300 px-1.5 py-1" />
+      <input value={relation} onChange={e => setRelation(e.target.value)} placeholder="그 사람과의 관계" className="w-36 rounded border border-gray-300 px-1.5 py-1" />
+    </div>
+    <textarea value={text} onChange={e => setText(e.target.value)} placeholder="고칠 내용 또는 더 알려줄 내용(맞다/틀리다만 표시할 때는 비워도 됩니다)" rows={2} className="mt-1 w-full rounded border border-gray-300 px-1.5 py-1" />
+    <div className="mt-1 flex flex-wrap gap-1.5">
+      <button onClick={() => void send('confirmed')} className="rounded bg-green-600 px-2 py-1 text-white">맞다</button>
+      <button onClick={() => void send('rejected')} className="rounded bg-red-600 px-2 py-1 text-white">틀렸다</button>
+      <button onClick={() => void send('corrected')} className="rounded bg-indigo-600 px-2 py-1 text-white">이렇게 고친다</button>
+      <button onClick={() => void send('added')} className="rounded border border-gray-400 px-2 py-1">더 알려준다</button>
+      {message && <span className="text-gray-600">{message}</span>}
+    </div>
+  </details>
+}
 
 async function call(path: string, options?: RequestInit) {
   const response = await fetch(API_BASE + path, options)
@@ -152,7 +186,7 @@ export default function PersonaAvatars() {
 
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">3-1. 인터뷰 질의응답이 없어도 가능한 시험</h2>
-        <p className="mt-1 text-sm text-gray-600">질문과 실제 답이 짝지어진 자료가 없는 인물(아인슈타인·파인만·잡스·대체 배우)도 아래 방식으로 시험할 수 있습니다. 정답은 모두 본인이 실제로 쓰거나 한 것에서 옵니다.</p>
+        <p className="mt-1 text-sm text-gray-600">질문과 실제 답이 짝지어진 자료가 없는 인물(아인슈타인·파인만·잡스)도 아래 방식으로 시험할 수 있습니다. 정답은 모두 본인이 실제로 쓰거나 한 것에서 옵니다.</p>
         <div className="mt-3 space-y-2">{NO_QA.map(item => <article key={item.name} className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
           <h3 className="font-semibold">{item.name}</h3>
           <p className="mt-1 text-gray-700">{item.how}</p>
@@ -170,22 +204,24 @@ export default function PersonaAvatars() {
           </select>
           <button onClick={runQ} disabled={!!qstatus?.running} className="rounded-lg bg-gray-950 px-3 py-1.5 text-white disabled:opacity-50">{qstatus?.running ? (qstatus.person + ' 찾는 중 ' + qstatus.done + '/' + qstatus.total) : '이 인물로 찾기 실행'}</button>
           <button onClick={() => setOnly(only === 'all' ? 'answered' : 'all')} className="rounded-lg border border-gray-300 px-2.5 py-1.5">{only === 'all' ? '답 있는 것만 보기' : '답 없는 것도 보기'}</button>
-          {qstatus?.people[who]?.total ? <span className="text-xs text-gray-500">답 있음 {qstatus.people[who].answered}/{qstatus.people[who].total} · 본인 직접 {qstatus.people[who].own_answered}</span> : <span className="text-xs text-gray-500">아직 실행하지 않았습니다.</span>}
+          {qstatus?.people[who]?.total ? <span className="text-xs text-gray-500"><strong className="text-green-700">자료로 확인 {qstatus.people[who].real_answered ?? 0}/{qstatus.people[who].total}</strong> (본인 직접 {qstatus.people[who].own_answered}) · <strong className="text-amber-700">추정·미확인만 {qstatus.people[who].answered - (qstatus.people[who].real_answered ?? 0)}</strong> · 답 없음 {qstatus.people[who].total - qstatus.people[who].answered}</span> : <span className="text-xs text-gray-500">아직 실행하지 않았습니다.</span>}
         </div>
         {qstatus?.last_error && <p className="mt-1 text-xs text-amber-700">일부 판정 실패: {qstatus.last_error}</p>}
-        {qstatus?.people[who]?.total ? <div className="mt-2 flex flex-wrap gap-1.5 text-xs">{Object.entries(qstatus.people[who].by_domain).map(([domain, value]) => <span key={domain} className="rounded bg-gray-100 px-2 py-1 text-gray-700">{domain} {value.answered}/{value.total}</span>)}</div> : null}
+        {qstatus?.people[who]?.total ? <div className="mt-2 flex flex-wrap gap-1.5 text-xs">{Object.entries(qstatus.people[who].by_domain).map(([domain, value]) => <span key={domain} className="rounded bg-gray-100 px-2 py-1 text-gray-700">{domain} 확인 {value.real ?? 0} · 추정 {value.answered - (value.real ?? 0)} / {value.total}</span>)}</div> : null}
         <div className="mt-3 space-y-2">{answers.filter(row => only === 'all' || row.answered).map(row => <details key={row.qid} className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-sm">
-          <summary className="cursor-pointer"><span className="text-xs text-gray-500">{row.domain}</span> · {row.question} <span className={'ml-1 rounded px-1.5 py-0.5 text-xs ' + (row.answered ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-600')}>{row.answered ? '답 ' + row.evidence.length + '건' : '답 없음'}</span></summary>
-          <div className="mt-2 space-y-2">{row.evidence.map((item, index) => <div key={index} className="rounded bg-white p-2">
+          <summary className="cursor-pointer"><span className="text-xs text-gray-500">{row.domain}</span> · {row.question} <span className={'ml-1 rounded px-1.5 py-0.5 text-xs ' + (row.evidence.some(e => REAL.includes(e.tier)) ? 'bg-green-100 text-green-800' : row.answered ? 'bg-amber-100 text-amber-800' : 'bg-gray-200 text-gray-600')}>{row.evidence.some(e => REAL.includes(e.tier)) ? '자료 확인 ' + row.evidence.filter(e => REAL.includes(e.tier)).length + '건' : row.answered ? '추정·미확인 ' + row.evidence.length + '건' : '답 없음'}</span></summary>
+          <div className="mt-2 space-y-2">{row.evidence.map((item, index) => <div key={index} className={'rounded bg-white p-2 border-l-4 ' + (item.tier === 'reviewed' ? 'border-indigo-500' : REAL.includes(item.tier) ? 'border-green-500' : 'border-amber-400')}>
             <p className="whitespace-pre-wrap break-words text-gray-800">{item.text}</p>
-            <p className="mt-1 text-xs text-gray-600"><strong>자료:</strong> {item.title} · {KIND2[item.kind] || item.kind} · {TIER[item.tier]}</p>
+            <p className="mt-1 text-xs text-gray-600"><span className={'mr-1 rounded px-1.5 py-0.5 font-medium ' + (item.tier === 'reviewed' ? 'bg-indigo-100 text-indigo-800' : REAL.includes(item.tier) ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800')}>{item.tier === 'reviewed' ? '리뷰 반영' : REAL.includes(item.tier) ? '실제 자료' : '추정·미확인'}</span><strong>자료:</strong> {item.title} · {KIND2[item.kind] || item.kind} · {TIER[item.tier]}</p>
             {item.source_url && <p className="break-all text-xs text-gray-500"><strong>원문:</strong> {item.source_url}</p>}
+            <p className="mt-1 text-xs text-gray-500"><strong>상태:</strong> {item.observed_at ? '시점 ' + item.observed_at : '시점 미기록'} · 신뢰도 {Math.round((item.confidence ?? item.score ?? 0) * 100)}% · {item.approval_status === 'reviewed' ? '리뷰 승인' : item.approval_status === 'source_checked' ? '원문 확인' : '검토 대기'} · {item.conflict_status === 'rejected' ? '충돌·반려' : item.conflict_status === 'no_conflict' ? '충돌 없음 확인' : '충돌 확인 전'}</p>
             {item.file && <p className="break-all text-xs text-gray-400"><strong>저장 파일:</strong> {item.file}</p>}
+            {item.key && item.tier !== 'reviewed' && <ReviewBox person={who} qid={row.qid} item={item} onSaved={() => { void call('/persona/qbank/answers/' + who).then(data => setAnswers(data.rows || [])) }} />}
           </div>)}{row.evidence.length === 0 && <p className="text-xs text-gray-500">수집한 자료에서 본인이 직접 답한 대목을 찾지 못했습니다.</p>}</div>
         </details>)}
           {answers.length === 0 && <p className="text-sm text-gray-500">아직 결과가 없습니다. 인물을 고르고 "찾기 실행"을 누르세요.</p>}
         </div>
-        <p className="mt-2 text-xs text-gray-500">판정은 로컬 모델이 하므로 틀릴 수 있습니다. 근거 문단을 직접 확인하세요. 본인 단계는 본인이 쓰거나 말한 자료, 전기 단계는 제3자가 적은 행동·일화입니다.</p>
+        <p className="mt-2 text-xs text-gray-500">초록 표시는 수집한 자료에서 확인된 실제 정보이고, 주황 표시는 보도 요약·일반 지식·드러난 사실에서 추정한 값으로 리뷰 전까지 사실로 쓰지 않습니다. 서비스 단계에서는 그 사람을 직접 아는 사람이 각 근거에 리뷰(맞다/틀렸다/고친다)를 남겨 추정을 바로잡고, 리뷰는 파란 표시로 겹쳐 보입니다. 판정은 로컬 모델이 하므로 틀릴 수 있습니다. 근거 문단을 직접 확인하세요. 본인 단계는 본인이 쓰거나 말한 자료, 전기 단계는 제3자가 적은 행동·일화입니다.</p>
       </section>
 
       <section className="view-panel p-4 sm:p-5">

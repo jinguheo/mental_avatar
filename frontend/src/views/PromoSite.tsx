@@ -35,6 +35,22 @@ const DIFFS: { title: string; body: string; chip: Chip }[] = [
   { title: '얼마나 닮았는지 숫자로', body: '자료의 양과 질에 따라 얼마나 비슷한지를 측정해 알려 드립니다. “똑같다”고 말하지 않고, 잰 만큼만 말합니다.', chip: '설계 단계' },
 ]
 
+// 사례를 많이 넣는다고 곧바로 "학습"시키지 않는다. 본인 확인·분류·평가를 거쳐
+// 승인된 내용만 아바타의 판단 기준으로 반영하는 흐름이다.
+const GROWTH_LOOP: { step: string; title: string; body: string; chip: Chip }[] = [
+  { step: '01', title: '실제 사례를 남깁니다', body: '업무 선택, 갈등, 가치 판단처럼 “무엇을 왜 골랐는지”가 드러나는 본인 사례를 모읍니다. 단순 잡담·음성 인식 오류는 분리합니다.', chip: '구현됨' },
+  { step: '02', title: '본인이 확인합니다', body: '사례에서 기준·우선순위·예외를 초안으로 뽑고, 본인이 고치거나 승인합니다. 승인 전에는 아바타의 장기 판단 기준이 되지 않습니다.', chip: '구현됨' },
+  { step: '03', title: '근거 있는 답으로 연결합니다', body: '승인된 사례와 원문을 찾아 답변의 근거로 붙입니다. 관련 기록이 없거나 권한 밖이면 답하지 않고 본인에게 넘깁니다.', chip: '준비 중' },
+  { step: '04', title: '처음 보는 사례로 시험합니다', body: '처음부터 따로 보관한 사례로 아바타의 선택을 본인의 재판단과 비교합니다. 시험 사례는 답을 만들 때 쓰지 않습니다.', chip: '준비 중' },
+]
+
+const COMPETITION_NOW = [
+  { area: '현장 서비스·유통', ours: '시범 운영 준비 단계', soul: '장례시설·상조회사 제휴 및 키오스크 확장 공개', lead: 'SoulLink 우세' },
+  { area: '외형·음성·대화', ours: '사진 기반 3D 아바타·TTS·립싱크·근거 검색형 대화 구현', soul: '사진·음성·대화 기록 기반 디지털 트윈과 채팅·통화·영상편지 제공', lead: '기능 범주 겹침' },
+  { area: '답변의 근거', ours: '기록·전언·추정을 구분하고, 기록이 없으면 답하지 않는 구조', soul: '공개 자료에서 답변별 근거 표시·품질 측정 방식은 확인하지 못함', lead: '우리의 검증 방향' },
+  { area: '본인과의 일치', ours: '판단 사례·보류 시험·블라인드 Sync 평가를 구현 중', soul: '공개된 정량 일치 평가 정보는 확인하지 못함', lead: '아직 실측 전' },
+]
+
 const AUDIENCES = [
   { who: '나를 남기고 싶은 분', body: '살아 계실 때 직접 자료를 남기고, 어디까지 쓰일지 스스로 정합니다. 본인 동의라 가장 분명한 방식입니다.', note: '본인 동의' },
   { who: '고인을 기억하는 가족', body: '고인의 기록으로 이야기를 이어 갑니다. 고인이 생전에 남긴 뜻을 우선하고, 같은 순위 유족 모두의 동의를 받는 절차를 기본으로 합니다.', note: '유족 전원 동의 절차' },
@@ -52,9 +68,9 @@ const PROMISES = [
 ]
 
 const STATUS: { group: string; chip: Chip; items: string[] }[] = [
-  { group: '지금 동작하는 것', chip: '구현됨', items: ['사진 몇 장으로 얼굴 형태·색 복원 후 움직이는 3D 아바타에 입히기', '목소리 합성과 입 모양 맞추기', '출처가 붙은 지식 검색, 자료에 없으면 모른다고 답하기', '기록 속 잡음·오류 문장 걸러 내기', '공개 자료로 만든 글 전용 유명인 아바타 체험(얼굴·목소리 없음, 근거 표시, 없으면 “기록에 없음”)'] },
-  { group: '시범 운영 전에 마무리할 것', chip: '준비 중', items: ['유족 동의 확인·철회 절차', '법률 전문가 검토(초상·음성·개인정보)', '동의한 소수와 함께하는 시범 운영'] },
-  { group: '아직 하지 않은 것', chip: '설계 단계', items: ['이용 요금 책정 — 시범 운영 뒤에 정합니다', '닮은 정도의 정량 평가 — 동의한 참여자와 함께 잽니다', '유명인 대상 서비스 — 초상·음성 이용 권한을 확보한 뒤에만(위 체험은 공개 자료만 쓰는 글 전용 연구 시험)'] },
+  { group: '지금 동작하는 것', chip: '구현됨', items: ['사진 몇 장으로 얼굴 형태·색 복원 후 움직이는 3D 아바타에 입히기', '목소리 합성과 입 모양 맞추기', '출처가 붙은 지식 검색, 자료에 없으면 모른다고 답하기', '기록 속 잡음·오류 문장 걸러 내기', '대화 원본 백업·선별, 승인된 기억과 판단 사례 관리', '공개 자료로 만든 글 전용 유명인 아바타 체험(얼굴·목소리 없음, 근거 표시, 없으면 “기록에 없음”)'] },
+  { group: '시범 운영 전에 마무리할 것', chip: '준비 중', items: ['본인의 판단 사례를 기준·우선순위·예외로 검토·승인하는 흐름', '보류 사례로 본인과 아바타의 선택을 비교하는 Sync 평가', '유족 동의 확인·철회 절차와 법률 전문가 검토(초상·음성·개인정보)', '동의한 소수와 함께하는 시범 운영'] },
+  { group: '아직 하지 않은 것', chip: '설계 단계', items: ['이용 요금 책정 — 시범 운영 뒤에 정합니다', '동의한 참여자와 함께하는 정량 일치도 공개', '유명인 대상 서비스 — 초상·음성 이용 권한을 확보한 뒤에만(위 체험은 공개 자료만 쓰는 글 전용 연구 시험)'] },
 ]
 
 const COMPETITORS = [
@@ -134,7 +150,7 @@ export default function PromoSite() {
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <span className="text-sm font-semibold tracking-wide text-amber-100">{BRAND}</span>
         <nav aria-label="페이지 이동" className="hidden items-center gap-5 text-sm text-slate-300 md:flex">
-          {[['demo', '체험'], ['how', '작동 방식'], ['diff', '다른 점'], ['competition', '경쟁 업체'], ['who', '누구를 위해'], ['promise', '약속'], ['status', '현재 상태'], ['faq', '질문']].map(([id, label]) =>
+          {[['demo', '체험'], ['how', '작동 방식'], ['growth', '닮아지는 과정'], ['diff', '다른 점'], ['competition', '경쟁 업체'], ['who', '누구를 위해'], ['promise', '약속'], ['status', '현재 상태'], ['faq', '질문']].map(([id, label]) =>
             <button key={id} type="button" onClick={() => go(id)} className="hover:text-white">{label}</button>)}
         </nav>
         {apply('rounded-full bg-amber-300 px-4 py-1.5 text-sm font-semibold text-slate-900 hover:bg-amber-200', '시범 참여 신청')}
@@ -189,6 +205,25 @@ export default function PromoSite() {
       </div>
     </section>
 
+    <section id="growth" className="bg-[#f3eee4] py-16">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6">
+        <p className="text-xs font-semibold uppercase tracking-widest text-amber-700">사례가 쌓일수록</p>
+        <h2 className="mt-2 text-2xl font-semibold text-slate-900 sm:text-3xl">많이 말해서가 아니라, 내 판단을 확인해 갈수록 닮아집니다</h2>
+        <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">아바타는 새 사례를 무조건 자동 학습하지 않습니다. 본인이 확인한 기준과 예외만 반영하고, 처음 보는 사례에서 본인과 같은 선택을 하는지 계속 측정합니다. 그래서 기억이 늘어나는 과정과 “본인다움”의 근거를 분리해 볼 수 있습니다.</p>
+        <ol className="mt-8 grid gap-4 md:grid-cols-4">
+          {GROWTH_LOOP.map(item => <li key={item.step} className="relative rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
+            <span className="text-sm font-semibold text-amber-700">{item.step}</span>
+            <span className={'float-right rounded-full px-2.5 py-0.5 text-xs font-medium ' + CHIP_CLS[item.chip]}>{item.chip}</span>
+            <h3 className="mt-4 text-lg font-semibold text-slate-900">{item.title}</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">{item.body}</p>
+          </li>)}
+        </ol>
+        <div className="mt-6 rounded-2xl border border-indigo-100 bg-indigo-50 p-5 text-sm leading-6 text-indigo-950">
+          <strong>측정의 원칙:</strong> 학습에 쓰지 않은 사례를 따로 보관하고, 아바타의 선택을 본인이 다시 판단한 결과와 비교합니다. 결과가 낮으면 “닮았다”고 말하지 않고, 어떤 기준이 부족했는지부터 보완합니다.
+        </div>
+      </div>
+    </section>
+
     <section id="diff" className="bg-white py-16">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <p className="text-xs font-semibold uppercase tracking-widest text-amber-700">다른 점</p>
@@ -222,7 +257,14 @@ export default function PromoSite() {
           <div><p className="text-xs font-semibold tracking-widest text-amber-200">그대로의 위치</p><h3 className="mt-2 text-xl font-semibold">생전부터, 판단의 이유까지 남기는 아바타</h3></div>
           <ul className="space-y-2 text-sm leading-6 text-slate-200"><li>• 심층 인터뷰로 경험·가치관·판단 기준과 그 예외를 함께 기록합니다.</li><li>• 답변마다 기록·전언·추정을 구분해 근거 없는 말을 줄입니다.</li><li>• 실제 본인과 아바타를 구별하는 블라인드 Sync 평가를 설계해 “닮음”을 검증합니다.</li></ul>
         </div>
-        <p className="mt-4 text-xs leading-5 text-slate-500">자료 기준: 2026-10-11. SoulLink의 기능·유통망 정보는 회사 발표 및 제휴사 공개자료 기준이며, 제휴 회원 수는 실제 이용자 수가 아닙니다.</p>
+        <div className="mt-8 overflow-x-auto rounded-2xl border border-stone-200 bg-white">
+          <table className="w-full min-w-[720px] text-left text-sm">
+            <caption className="sr-only">그대로와 SoulLink의 현재 공개 정보 비교</caption>
+            <thead className="bg-stone-50 text-xs text-slate-500"><tr><th scope="col" className="px-5 py-3">비교 항목</th><th scope="col" className="px-5 py-3">그대로 현재</th><th scope="col" className="px-5 py-3">SoulLink 공개 정보</th><th scope="col" className="px-5 py-3">판단</th></tr></thead>
+            <tbody>{COMPETITION_NOW.map(item => <tr key={item.area} className="border-t border-stone-100 align-top"><th scope="row" className="px-5 py-4 font-semibold text-slate-900">{item.area}</th><td className="px-5 py-4 leading-6 text-slate-700">{item.ours}</td><td className="px-5 py-4 leading-6 text-slate-600">{item.soul}</td><td className="px-5 py-4"><span className="whitespace-nowrap rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-900">{item.lead}</span></td></tr>)}</tbody>
+          </table>
+        </div>
+        <p className="mt-4 text-xs leading-5 text-slate-500">자료 기준: 2026-10-11. SoulLink의 기능·유통망 정보는 회사 발표 및 제휴사 공개자료 기준이며, 제휴 회원 수는 실제 이용자 수가 아닙니다. 답변 품질·일치도는 양쪽 모두 공개 수치만으로 비교할 수 없습니다.</p>
       </div>
     </section>
 

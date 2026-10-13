@@ -15,6 +15,15 @@ from . import graph, embeddings, pattern, kg_ingest
 
 SOURCE_TYPE = "self_interview"
 
+DECISION_TYPES = [
+    "업무·품질",
+    "일정·우선순위",
+    "비용·위험",
+    "관계·협업",
+    "윤리·안전",
+    "새로운 상황",
+]
+
 
 # ── 질문 생성 ─────────────────────────────────────────
 # 다양성 확보: 작은 모델(gemma)은 토픽 여러 개를 주면 한 주제·한 프레임(예: 정확도vs속도)에
@@ -224,8 +233,10 @@ def save_answer(question: str, answer: str, topic: str = "") -> dict:
     # 추출 단계(update_importance)가 importance를 흔들 수 있어 1인칭·높은 신뢰로 고정.
     conn.execute("UPDATE nodes SET importance=0.85 WHERE id=?", (node_id,))
     conn.execute(
-        "INSERT INTO self_interview (id, question, answer, topic, node_id) VALUES (?,?,?,?,?)",
-        (sid, question, answer, topic.strip(), node_id),
+        """INSERT INTO self_interview
+        (id, question, answer, topic, node_id, source_kind, source_ref, confidence, approval_status, conflict_status)
+        VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (sid, question, answer, topic.strip(), node_id, "self_report", "심층 인터뷰 직접 입력", 0.9, "approved", "unchecked"),
     )
     conn.commit()
     conn.close()
@@ -233,16 +244,112 @@ def save_answer(question: str, answer: str, topic: str = "") -> dict:
     return {"id": sid, "node_id": node_id}
 
 
+def save_decision_case(data: dict) -> dict:
+    """실제 판단 사례를 구조화해 자문자답·KG와 함께 저장한다.
+
+    자유 형식의 인터뷰와 달리, 당시 상황과 선택하지 않은 대안까지 남겨 이후
+    보류 사례 평가와 판단 정책 추출에 쓸 수 있게 한다.
+    """
+    values = {key: (data.get(key) or "").strip() for key in (
+        "topic", "decision_type", "situation", "options_text", "choice", "rationale",
+        "rejected_options", "exception_rule", "policy_version",
+    )}
+    values["policy_version"] = values["policy_version"][:40] or "v1"
+    if values["decision_type"] not in DECISION_TYPES:
+        raise ValueError("invalid decision_type")
+    for key in ("situation", "choice", "rationale"):
+        if not values[key]:
+            raise ValueError(f"{key} required")
+
+    raw_confidence = data.get("confidence")
+    confidence = None if raw_confidence in (None, "") else int(raw_confidence)
+    if confidence is not None and not 0 <= confidence <= 100:
+        raise ValueError("confidence must be between 0 and 100")
+
+    question = f"[{values['decision_type']}] {values['situation']}"
+    answer_parts = [
+        f"상황: {values['situation']}",
+        f"선택지: {values['options_text'] or '기록하지 않음'}",
+        f"내 선택: {values['choice']}",
+        f"판단 이유: {values['rationale']}",
+        f"고려했지만 선택하지 않은 대안: {values['rejected_options'] or '기록하지 않음'}",
+        f"예외·적용 조건: {values['exception_rule'] or '기록하지 않음'}",
+        f"당시 확신도: {confidence if confidence is not None else '기록하지 않음'}",
+    ]
+    saved = save_answer(question, "\n".join(answer_parts), values["topic"])
+
+    case_id = uuid.uuid4().hex
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO decision_cases
+        (id, self_interview_id, topic, decision_type, situation, options_text, choice, rationale,
+         rejected_options, exception_rule, confidence, source_kind, source_ref, approval_status,
+         conflict_status, policy_version, evidence_state)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (case_id, saved["id"], values["topic"], values["decision_type"], values["situation"],
+         values["options_text"], values["choice"], values["rationale"], values["rejected_options"],
+         values["exception_rule"], confidence, "self_report", "심층 인터뷰 직접 입력", "approved",
+         "unchecked", values["policy_version"], "direct"),
+    )
+    conn.commit()
+    conn.close()
+    return {**saved, "case_id": case_id}
+
+
 # ── 목록/삭제 ─────────────────────────────────────────
 
 def list_interviews(limit: int = 100) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, question, answer, topic, created_at FROM self_interview ORDER BY created_at DESC LIMIT ?",
+        """SELECT id, question, answer, topic, source_kind, source_ref, observed_at, confidence,
+                  approval_status, conflict_status, created_at
+           FROM self_interview ORDER BY created_at DESC LIMIT ?""",
         (limit,),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def decision_coverage() -> dict:
+    """판단 영역별 수집량과 최근 사례를 UI에 제공한다."""
+    conn = get_conn()
+    counts = {
+        row["decision_type"]: row["count"]
+        for row in conn.execute(
+            "SELECT decision_type, COUNT(*) AS count FROM decision_cases GROUP BY decision_type"
+        ).fetchall()
+    }
+    latest = conn.execute(
+        """SELECT id, self_interview_id, topic, decision_type, situation, options_text, choice,
+                  rationale, rejected_options, exception_rule, confidence, source_kind, source_ref,
+                  observed_at, approval_status, conflict_status, policy_version, evidence_state, created_at
+           FROM decision_cases ORDER BY created_at DESC LIMIT 20"""
+    ).fetchall()
+    version_rows = conn.execute(
+        "SELECT policy_version, COUNT(*) AS count FROM decision_cases GROUP BY policy_version ORDER BY policy_version"
+    ).fetchall()
+    conn.close()
+    items = [dict(row) for row in latest]
+    needs_review = []
+    for item in items:
+        reasons = []
+        if item.get("confidence") is not None and item["confidence"] < 60:
+            reasons.append("확신도 낮음")
+        if not (item.get("rejected_options") or "").strip():
+            reasons.append("대안 미기록")
+        if not (item.get("exception_rule") or "").strip():
+            reasons.append("예외 미기록")
+        if item.get("conflict_status") not in ("unchecked", "no_conflict"):
+            reasons.append("충돌 검토 필요")
+        if reasons:
+            needs_review.append({**item, "review_reasons": reasons})
+    return {
+        "types": [{"name": name, "count": counts.get(name, 0)} for name in DECISION_TYPES],
+        "total": sum(counts.values()),
+        "items": items,
+        "policy_versions": [dict(row) for row in version_rows],
+        "needs_review": needs_review,
+    }
 
 
 def delete_interview(sid: str) -> None:

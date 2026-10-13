@@ -7,6 +7,7 @@
 근거 단계: own(본인이 쓰거나 말한 것) / reported(전기·백과에 적힌 행동·일화). 출처 문서와 종류를 항상 함께 저장한다.
 결과: data/persona_corpus/<인물>/answers.jsonl — 구성용(특정 정보) 근거이자, 일부를 보류하면 시험용 정답이 된다.
 """
+import hashlib
 import json
 import math
 import re
@@ -117,7 +118,10 @@ def _paragraphs(person: str) -> list[dict]:
 
 
 def _tok(s: str) -> list[str]:
-    return [w for w in re.findall(r"[a-z']{3,}", s.lower()) if w not in STOP]
+    toks = [w for w in re.findall(r"[a-z']{3,}", s.lower()) if w not in STOP]
+    for word in re.findall(r"[가-힣]{2,}", s):          # 한국어는 형태소 분석 없이 두 글자 묶음으로 쪼갠다(조사가 붙어도 잡히게)
+        toks.extend(word[i:i + 2] for i in range(len(word) - 1))
+    return toks
 
 
 STOP = set("the and for that with this was were are but not you your his her him they them have has had from which what when who whom would could should there their been its into than then also more most some any all one our out about over after before while because only very much many such these those can will may might must just like".split())
@@ -170,7 +174,10 @@ def _judge(question: str, passage: str, name: str) -> bool:
     return out.startswith("YES")
 
 
-NAMES = {"buffett": "Warren Buffett", "einstein": "Albert Einstein", "feynman": "Richard Feynman", "jobs": "Steve Jobs", "songhae": "Song Hae", "brucelee": "Bruce Lee"}
+REAL_TIERS = {"own", "reported"}   # 수집·저장한 자료에서 확인된 근거. secondary(원문 미확인)·general(출처 미확인)·estimate(추정)는 실제 정보로 세지 않는다
+HAND_MADE = {"sejong"}   # answers.jsonl을 사람이 직접 작성한 인물 — 검색 실행으로 덮어쓰지 않는다
+KOREAN = {"songhae", "sejong"}   # 자료가 한국어인 인물 — 질문도 한국어로 검색·판정한다
+NAMES = {"buffett": "Warren Buffett", "einstein": "Albert Einstein", "feynman": "Richard Feynman", "jobs": "Steve Jobs", "songhae": "Song Hae", "sejong": "King Sejong"}
 
 
 def run(person: str, candidates: int = 5) -> dict:
@@ -186,9 +193,9 @@ def run(person: str, candidates: int = 5) -> dict:
         for qid, domain, ko, en, kw in QUESTIONS:
             found = []
             for tier in ("own", "reported"):
-                for score, ch in index.search(en + " " + kw, k=candidates, tier=tier):
+                for score, ch in index.search(ko if person in KOREAN else en + " " + kw, k=candidates, tier=tier):
                     try:
-                        ok = _judge(en, ch["text"], name)
+                        ok = _judge(ko if person in KOREAN else en, ch["text"], name)
                     except Exception as exc:  # noqa: BLE001 — 모델이 응답 못 하면 이 질문은 건너뛴다
                         _state["last_error"] = str(exc)
                         ok = False
@@ -211,8 +218,31 @@ def start(person: str) -> dict:
         return {"error": "이미 실행 중입니다: " + _state["person"]}
     if person not in NAMES:
         raise ValueError("알 수 없는 인물")
+    if person in HAND_MADE:
+        raise ValueError("이 인물의 답은 손으로 작성한 것이라 다시 찾기를 실행하면 덮어쓰게 됩니다")
     threading.Thread(target=run, args=(person,), daemon=True).start()
     return {"started": person}
+
+
+def ekey(e: dict) -> str:
+    """근거 한 건을 가리키는 키(검색을 다시 돌려 순서가 바뀌어도 리뷰가 붙은 근거를 찾을 수 있게 본문 해시를 쓴다)."""
+    return hashlib.sha1(e["text"].encode("utf-8")).hexdigest()[:10]
+
+
+def review_add(person: str, qid: str, key: str, reviewer: str, relation: str, verdict: str, corrected_text: str = "") -> dict:
+    """그 사람을 아는 사람의 리뷰를 저장한다. verdict: confirmed(맞음) / corrected(수정) / rejected(틀림) / added(새로 알려줌).
+    원래 근거는 지우지 않고, 리뷰가 위에 겹쳐 보인다(되돌릴 수 있게)."""
+    if verdict not in ("confirmed", "corrected", "rejected", "added"):
+        raise ValueError("verdict")
+    if not reviewer.strip() or not relation.strip():
+        raise ValueError("리뷰어 이름과 그 사람과의 관계가 필요합니다")
+    if verdict in ("corrected", "added") and not corrected_text.strip():
+        raise ValueError("수정/추가 내용이 필요합니다")
+    rec = {"qid": qid, "key": key, "reviewer": reviewer.strip(), "relation": relation.strip(), "verdict": verdict,
+           "text": corrected_text.strip(), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    with open(ROOT / person / "reviews.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
 
 
 def load(person: str) -> list[dict]:
@@ -225,23 +255,68 @@ def load(person: str) -> list[dict]:
             if l.strip():
                 d = json.loads(l)
                 sources[d["id"]] = d
+    sup = ROOT / person / "supplement.jsonl"      # 자료에서 못 찾은 질문을 일반 지식·추정으로 채운 것(검색 재실행에도 보존)
+    if sup.exists():
+        by_q = {r["qid"]: r for r in rows}
+        for l in sup.read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                s = json.loads(l)
+                row = by_q.get(s["qid"])
+                if row and not any(e["tier"] in REAL_TIERS for e in row["evidence"]):   # 자료로 확인된 근거가 있으면 추정은 붙이지 않는다
+                    row["evidence"].extend(s["evidence"])
+                    row["answered"] = True
     for r in rows:           # 근거마다 원 출처(URL)와 저장 파일을 붙여, 어디서 찾았는지 확인할 수 있게 한다
         for e in r["evidence"]:
             d = sources.get(e["doc"], {})
-            e["source_url"] = d.get("source")
-            e["file"] = str(ROOT / person / "texts" / (e["doc"] + ".txt"))
+            e["source_url"] = e.get("source_url") or d.get("source")
+            e["observed_at"] = e.get("observed_at") or d.get("published_at") or d.get("date")
+            e["confidence"] = e.get("score", 0.0)
+            e["approval_status"] = "reviewed" if e["tier"] == "reviewed" else "source_checked" if e["tier"] in REAL_TIERS else "pending_review"
+            e["conflict_status"] = "unchecked"
+            e["key"] = ekey(e)
+            e["reviews"] = []
+            if d:
+                e["file"] = str(ROOT / person / "texts" / (e["doc"] + ".txt"))
+    rv = ROOT / person / "reviews.jsonl"      # 그 사람을 아는 사람의 리뷰(서비스 단계에서 추정을 고치는 통로)
+    if rv.exists():
+        by_q = {r["qid"]: r for r in rows}
+        for l in rv.read_text(encoding="utf-8").splitlines():
+            if not l.strip():
+                continue
+            v = json.loads(l)
+            row = by_q.get(v["qid"])
+            if not row:
+                continue
+            if v["verdict"] in ("corrected", "added"):    # 리뷰어가 알려준 내용은 새 근거로 붙인다(원래 근거도 남는다)
+                row["evidence"].append({"text": v["text"], "doc": "review", "title": "리뷰: " + v["reviewer"] + " (" + v["relation"] + ")", "kind": "review",
+                                        "tier": "reviewed", "score": 1.0, "key": "r" + hashlib.sha1((v["at"] + v["text"]).encode("utf-8")).hexdigest()[:9],
+                                        "reviews": [], "reviewed_at": v["at"], "replaces": v["key"] if v["verdict"] == "corrected" else None})
+                row["answered"] = True
+            else:
+                for e in row["evidence"]:
+                    if e["key"] == v["key"]:
+                        e["reviews"].append({"reviewer": v["reviewer"], "relation": v["relation"], "verdict": v["verdict"], "at": v["at"]})
+                        if v["verdict"] == "rejected":
+                            e["conflict_status"] = "rejected"
+                        elif v["verdict"] == "confirmed":
+                            e["approval_status"] = "reviewed"
+                            e["conflict_status"] = "no_conflict"
     return rows
 
 
 def summary(person: str) -> dict:
     rows = load(person)
     by_domain: dict = {}
+    real = lambda r: any(e["tier"] in REAL_TIERS for e in r["evidence"])   # noqa: E731 — 수집한 자료에서 확인된 것
     for r in rows:
-        d = by_domain.setdefault(r["domain"], {"total": 0, "answered": 0, "own": 0})
+        d = by_domain.setdefault(r["domain"], {"total": 0, "answered": 0, "own": 0, "real": 0})
         d["total"] += 1
         d["answered"] += 1 if r["answered"] else 0
         d["own"] += 1 if any(e["tier"] == "own" for e in r["evidence"]) else 0
+        d["real"] += 1 if real(r) else 0
     return {"person": person, "total": len(rows), "answered": sum(1 for r in rows if r["answered"]),
+            "real_answered": sum(1 for r in rows if real(r)),
+            "reviewed_answered": sum(1 for r in rows if any(e["tier"] == "reviewed" or any(x["verdict"] == "confirmed" for x in e.get("reviews", [])) for e in r["evidence"])),
             "own_answered": sum(1 for r in rows if any(e["tier"] == "own" for e in r["evidence"])), "by_domain": by_domain}
 
 

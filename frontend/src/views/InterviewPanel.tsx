@@ -10,7 +10,40 @@ type Interview = {
   question: string
   answer: string
   topic: string
+  source_kind?: string
+  source_ref?: string
+  observed_at?: string
+  confidence?: number
+  approval_status?: string
+  conflict_status?: string
   created_at: string
+}
+
+const DECISION_TYPES = ['업무·품질', '일정·우선순위', '비용·위험', '관계·협업', '윤리·안전', '새로운 상황'] as const
+type DecisionType = typeof DECISION_TYPES[number]
+type DecisionForm = {
+  topic: string
+  decision_type: DecisionType
+  situation: string
+  options_text: string
+  choice: string
+  rationale: string
+  rejected_options: string
+  exception_rule: string
+  confidence: number
+  policy_version: string
+}
+type DecisionCoverage = {
+  total: number
+  types: { name: DecisionType; count: number }[]
+  items: Array<DecisionForm & { id: string; created_at: string; source_kind?: string; source_ref?: string; observed_at?: string; approval_status?: string; conflict_status?: string; evidence_state?: string }>
+  policy_versions?: { policy_version: string; count: number }[]
+  needs_review?: Array<DecisionForm & { id: string; review_reasons: string[] }>
+}
+
+const EMPTY_DECISION: DecisionForm = {
+  topic: '', decision_type: '업무·품질', situation: '', options_text: '', choice: '', rationale: '',
+  rejected_options: '', exception_rule: '', confidence: 70, policy_version: 'v1',
 }
 
 export default function InterviewPanel() {
@@ -23,6 +56,9 @@ export default function InterviewPanel() {
   const [error, setError] = useState('')
   const [topic, setTopic] = useState('')   // 주제 지정(선택). 비우면 무작위
   const [focus, setFocus] = useState('')   // 초점 힌트(선택), 예: 사람들이 주로 헷갈리는 부분
+  const [decision, setDecision] = useState<DecisionForm>(EMPTY_DECISION)
+  const [coverage, setCoverage] = useState<DecisionCoverage | null>(null)
+  const [savingDecision, setSavingDecision] = useState(false)
 
   const loadList = useCallback(async () => {
     try {
@@ -35,9 +71,19 @@ export default function InterviewPanel() {
     }
   }, [])
 
+  const loadCoverage = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/interview/coverage`)
+      if (r.ok) setCoverage(await r.json())
+    } catch {
+      /* 서버 미연결 — 무시 */
+    }
+  }, [])
+
   useEffect(() => {
     loadList()
-  }, [loadList])
+    loadCoverage()
+  }, [loadList, loadCoverage])
 
   const getQuestion = useCallback(async () => {
     setLoadingQ(true)
@@ -132,6 +178,34 @@ export default function InterviewPanel() {
     [loadList],
   )
 
+  const updateDecision = <K extends keyof DecisionForm>(key: K, value: DecisionForm[K]) => {
+    setDecision(previous => ({ ...previous, [key]: value }))
+  }
+
+  const saveDecisionCase = useCallback(async () => {
+    if (!decision.situation.trim() || !decision.choice.trim() || !decision.rationale.trim()) {
+      setError('상황, 내 선택, 판단 이유는 꼭 적어주세요.')
+      return
+    }
+    setSavingDecision(true)
+    setError('')
+    try {
+      const r = await fetch(`${API_BASE}/interview/decision-case`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(decision),
+      })
+      const data = await r.json()
+      if (!r.ok || data.error) setError(data.error || '판단 사례를 저장하지 못했습니다.')
+      else {
+        setDecision(EMPTY_DECISION)
+        await Promise.all([loadList(), loadCoverage()])
+      }
+    } catch {
+      setError('판단 사례를 저장하지 못했습니다 (서버 연결 확인).')
+    } finally {
+      setSavingDecision(false)
+    }
+  }, [decision, loadCoverage, loadList])
+
   return (
     <div className="view-canvas h-full overflow-y-auto">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5 sm:px-6 lg:px-8">
@@ -139,9 +213,75 @@ export default function InterviewPanel() {
           <p className="dashboard-kicker">나를 이해하는 대화</p>
           <h1 className="mt-1 text-xl font-semibold text-gray-950">심층 인터뷰</h1>
           <p className="mt-1 text-xs text-gray-500">
-            경험, 가치관, 판단 기준을 차례로 기록합니다. 답을 저장한 뒤에는 근거·사례·예외를 묻는 후속 질문으로 더 깊게 이어갈 수 있습니다. (누적 {count}개)
+            경험, 가치관, 판단 기준을 차례로 기록합니다. 저장한 사례는 다음 대화에서 우선 검색하되, 보류해 둔 사례는 학습에 섞지 않고 일치 검증에 씁니다. 답을 저장한 뒤에는 근거·사례·예외를 묻는 후속 질문으로 더 깊게 이어갈 수 있습니다. (누적 {count}개)
           </p>
         </header>
+
+        <section className="view-panel p-4 sm:p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="dashboard-kicker">판단 사례</p>
+              <h2 className="mt-1 text-base font-semibold text-gray-950">실제 선택을 구조화해 기록</h2>
+              <p className="mt-1 text-xs leading-5 text-gray-500">나중에 보류 사례 평가와 판단 기준 추출에 쓰입니다. 사실을 지어내지 않고 당시 맥락과 선택하지 않은 대안까지 남깁니다.</p>
+            </div>
+            <span className="rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-700">누적 {coverage?.total ?? 0}건</span>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <label className="text-xs font-medium text-gray-700">판단 영역
+              <select value={decision.decision_type} onChange={e => updateDecision('decision_type', e.target.value as DecisionType)} className="mt-1 block w-full rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900">
+                {DECISION_TYPES.map(item => <option key={item}>{item}</option>)}
+              </select>
+            </label>
+            <label className="text-xs font-medium text-gray-700">주제 (선택)
+              <input value={decision.topic} onChange={e => updateDecision('topic', e.target.value)} placeholder="예: 고객 납기와 검사 정확도" className="mt-1 block w-full rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+            </label>
+            <label className="text-xs font-medium text-gray-700">정책 버전
+              <input value={decision.policy_version} onChange={e => updateDecision('policy_version', e.target.value)} placeholder="예: v1 또는 2026-Q4" maxLength={40} className="mt-1 block w-full rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+              <span className="mt-1 block font-normal text-gray-500">기준을 바꾼 뒤에는 새 버전으로 기록해 결과를 섞지 않습니다.</span>
+            </label>
+          </div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="text-xs font-medium text-gray-700">상황 <span className="text-red-600">*</span>
+              <textarea value={decision.situation} onChange={e => updateDecision('situation', e.target.value)} rows={3} placeholder="어떤 문제가 있었나요? 누가, 무엇이, 언제 충돌했나요?" className="mt-1 block w-full resize-y rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+            </label>
+            <label className="text-xs font-medium text-gray-700">가능했던 선택지
+              <textarea value={decision.options_text} onChange={e => updateDecision('options_text', e.target.value)} rows={3} placeholder="예: 납기를 맞춘다 / 검사를 더 한다 / 범위를 줄인다" className="mt-1 block w-full resize-y rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+            </label>
+            <label className="text-xs font-medium text-gray-700">내 선택 <span className="text-red-600">*</span>
+              <textarea value={decision.choice} onChange={e => updateDecision('choice', e.target.value)} rows={3} placeholder="실제로 무엇을 선택했나요?" className="mt-1 block w-full resize-y rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+            </label>
+            <label className="text-xs font-medium text-gray-700">판단 이유 <span className="text-red-600">*</span>
+              <textarea value={decision.rationale} onChange={e => updateDecision('rationale', e.target.value)} rows={3} placeholder="무엇을 가장 중요하게 봤나요?" className="mt-1 block w-full resize-y rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+            </label>
+            <label className="text-xs font-medium text-gray-700">선택하지 않은 대안과 이유
+              <textarea value={decision.rejected_options} onChange={e => updateDecision('rejected_options', e.target.value)} rows={3} placeholder="무엇을 고려했지만 왜 제외했나요?" className="mt-1 block w-full resize-y rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+            </label>
+            <label className="text-xs font-medium text-gray-700">예외·적용 조건
+              <textarea value={decision.exception_rule} onChange={e => updateDecision('exception_rule', e.target.value)} rows={3} placeholder="어떤 경우에는 다르게 판단하나요?" className="mt-1 block w-full resize-y rounded-lg border border-surface-border bg-white px-3 py-2 text-sm font-normal text-gray-900" />
+            </label>
+          </div>
+          <label className="mt-3 block text-xs font-medium text-gray-700">당시 확신도: {decision.confidence}%
+            <input type="range" min="0" max="100" step="5" value={decision.confidence} onChange={e => updateDecision('confidence', Number(e.target.value))} className="mt-2 block w-full accent-gray-950" />
+          </label>
+          <button type="button" onClick={saveDecisionCase} disabled={savingDecision} className="mt-4 rounded-lg bg-gray-950 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{savingDecision ? '저장 중…' : '판단 사례 저장'}</button>
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {(coverage?.types || DECISION_TYPES.map(name => ({ name, count: 0 }))).map(item => <div key={item.name} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs"><span className="text-gray-600">{item.name}</span><strong className="float-right text-gray-950">{item.count}건</strong></div>)}
+          </div>
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-xs leading-5 text-emerald-950">
+              <strong>판단 증거 묶음</strong>
+              <p className="mt-1">직접 입력 사례에는 출처, 기록 시점, 승인 상태, 확신도, 충돌 확인 상태, 정책 버전을 함께 보관합니다. 현재 버전별 사례: {(coverage?.policy_versions || []).length ? (coverage?.policy_versions || []).map(item => `${item.policy_version} ${item.count}건`).join(' · ') : '아직 없음'}.</p>
+            </div>
+            <div className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-xs leading-5 text-amber-950">
+              <strong>보강·이양 대기</strong>
+              <p className="mt-1">확신도 60% 미만, 대안·예외가 비어 있거나 충돌 검토가 필요한 사례는 확정 정책으로 쓰지 않고 보강 대상으로 남깁니다. 현재 {(coverage?.needs_review || []).length}건.</p>
+              {(coverage?.needs_review || []).slice(0, 3).map(item => <p key={item.id} className="mt-1 truncate">· {item.decision_type}: {item.review_reasons.join(', ')}</p>)}
+            </div>
+          </div>
+          <div className="mt-4 rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-xs leading-5 text-indigo-950">
+            <strong>사례가 닮음을 만드는 방식:</strong> 실제 사례를 증거 묶음으로 저장 → 정책 버전별로 관련 사례·이유·예외를 우선 참고 → 다른 상황에서 본인의 재판단과 비교 → 차이가 난 경우 새 버전의 기준이나 사례를 보강합니다. 단순히 사례 수가 많아졌다고 일치도가 높다고 표시하지 않습니다.
+          </div>
+        </section>
 
         {/* 질문 받기 / 답변 */}
         <section className="view-panel p-4 sm:p-5">
@@ -243,7 +383,7 @@ export default function InterviewPanel() {
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-medium text-gray-500">{it.question}</p>
                     <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{it.answer}</p>
-                    <p className="mt-1 text-[11px] text-gray-400">{it.created_at}</p>
+                    <p className="mt-1 text-[11px] text-gray-400">{it.created_at} · 출처: {it.source_ref || '심층 인터뷰 직접 입력'} · 신뢰도 {Math.round((it.confidence ?? 0.9) * 100)}% · {it.approval_status === 'approved' ? '사용자 저장·승인' : it.approval_status || '승인 상태 없음'} · {it.conflict_status === 'unchecked' ? '충돌 확인 전' : it.conflict_status || '충돌 상태 없음'}</p>
                   </div>
                   <button
                     type="button"
