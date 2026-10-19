@@ -13,6 +13,7 @@ backups/
 
 # 이전용 데이터 번들(개인 데이터 포함 — 직접 전달용, git에 올리지 않음)
 migrate/data_bundle_*.zip
+migrate/personal_files_extra.zip
 
 # 문서 (개인 파일)
 docs/
