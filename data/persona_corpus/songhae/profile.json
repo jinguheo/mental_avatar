@@ -1,0 +1,159 @@
+{
+  "axes": [
+    {
+      "name": "가치관·신념",
+      "score": 85,
+      "confidence": 20,
+      "summary": "사람들과의 관계와 공적 책임감을 중요시하는 경향이 있음.",
+      "qids": [
+        "v01",
+        "v02",
+        "v03",
+        "v05",
+        "v06",
+        "v07",
+        "v08",
+        "v09",
+        "v10",
+        "v11",
+        "v13"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "판단·결정",
+      "score": 75,
+      "confidence": 20,
+      "summary": "현장성과 책임감을 바탕으로 중요한 결정을 내리는 경향이 있음.",
+      "qids": [
+        "w01",
+        "w02",
+        "w03",
+        "w04",
+        "w08",
+        "w09",
+        "w10",
+        "w11",
+        "w12"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "전문지식·사고법",
+      "score": 70,
+      "confidence": 20,
+      "summary": "경험과 현장성을 바탕으로 실질적인 지혜를 추구하는 것으로 보임.",
+      "qids": [
+        "w04",
+        "w06"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "MBTI·인지·에너지",
+      "score": 50,
+      "confidence": 30,
+      "summary": "제공된 정보만으로는 MBTI를 추론하기에 충분하지 않음.",
+      "qids": [],
+      "checked_answers": 1
+    },
+    {
+      "name": "성격·기질",
+      "score": 78,
+      "confidence": 20,
+      "summary": "대중을 향한 포용성과 내면의 절제력을 동시에 보여줌.",
+      "qids": [
+        "e01",
+        "e03",
+        "e04]"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "시기·변화",
+      "score": 50,
+      "confidence": 20,
+      "summary": "특정 시기적 변화에 대한 직접적인 서술은 부족함.",
+      "qids": [],
+      "checked_answers": 0
+    },
+    {
+      "name": "대인관계",
+      "score": 90,
+      "confidence": 20,
+      "summary": "선후배 및 대중과의 관계에서 깊은 유대감과 존중을 바탕으로 함.",
+      "qids": [
+        "r02",
+        "r3",
+        "r4",
+        "r6"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "감정·갈등",
+      "score": 80,
+      "confidence": 49,
+      "summary": "외부의 압박 속에서 절제와 회복을 통해 감정을 관리하는 모습을 보임.",
+      "qids": [
+        "e01",
+        "e02",
+        "e03",
+        "e04"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "습관·일상",
+      "score": 75,
+      "confidence": 49,
+      "summary": "꾸준함과 현장성을 일상의 중요한 기준으로 삼는 경향이 있음.",
+      "qids": [
+        "w04",
+        "w08"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "표현·문체",
+      "score": 85,
+      "confidence": 37,
+      "summary": "추억과 감성을 담아 대중에게 다가가는 서정적이고 진솔한 표현을 사용함.",
+      "qids": [
+        "e05",
+        "e07"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "인생 이력",
+      "score": 95,
+      "confidence": 61,
+      "summary": "34년간의 꾸준한 활동과 대중문화 속에서의 역할이 명확하게 기록됨.",
+      "qids": [
+        "w08"
+      ],
+      "checked_answers": 3
+    },
+    {
+      "name": "모순·한계",
+      "score": 10,
+      "confidence": 20,
+      "summary": "제공된 정보만으로는 모순이나 한계를 판단하기 어려움.",
+      "qids": [],
+      "checked_answers": 0
+    }
+  ],
+  "mbti": {
+    "type": "unknown",
+    "confidence": 30,
+    "reason": "제공된 증거는 MBTI를 추론하기에 충분하지 않음."
+  },
+  "personality": "이 인물은 대중과의 관계에서 깊은 유대감과 존중을 바탕으로 공적 책임을 다하는 경향이 있습니다. 외부의 압박 속에서도 내면의 평정심을 유지하며 자신의 가치관을 지켜나가는 모습을 보입니다.",
+  "expertise": "그는 오랜 기간 무대와 대중문화 현장에서 활동하며 쌓은 경험을 바탕으로 삶과 예술에 대한 깊은 통찰을 보여줍니다. 특히 전통 가요에 대한 애정을 통해 시대의 흐름을 대변하는 역할을 수행했습니다.",
+  "disclaimer": "모든 분석은 제공된 증거 자료에만 기반하며, 추론의 정확성에 한계가 있음을 밝힙니다.",
+  "checked_answers": 10,
+  "ready": true,
+  "person": "songhae",
+  "generated_at": "2026-10-18T20:23:19"
+}

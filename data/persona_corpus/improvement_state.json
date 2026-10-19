@@ -1,0 +1,15 @@
+{
+  "signatures": {
+    "buffett": "18e40839c601c2b5356cb530efe917275a2fedfc5b9ae2ab63a4fb36bb5b825d",
+    "einstein": "a3becae422bce3be7987b0e6fbe12dfb04c064277b2c73086f6afbd69a927103",
+    "feynman": "c3cfa4a6b4cd859ef9791b20850aa0e52df97346a56f22af7c50e1db5f3e99c3",
+    "jobs": "5b757d114c029c27fa5e61a154ed5b54fcf14e63bf5201cd1f6e540133b4e9c5",
+    "songhae": "5b7d74b2d964801e0ea26eaefc2326b1038443c9beb02609e6273bf2c68b5037",
+    "brucelee": "1e6988bebb2529e44e7f91eed51a602f93293ce7f96212a436d779bac44f2da7",
+    "sejong": "05fc2f808a8c7c670641ac8c6c4df3addf2dd5a726b6df354d3a1bfded85d6b4",
+    "yi_sun_sin": "6cfe060e08ab3110701e6fb6fcb1c939e27609896c5fe5dba05f959354faa25d",
+    "leonardo": "7438622403639708837d2b8fa4d927b440b70778999e7c8b89298667a7abdf91",
+    "marie_curie": "9f99f81e47afffc7e92f81d5a2fe32ae8ef35ef07532914d26fd0159e7b94934",
+    "marcus_aurelius": "70a138ccdf2534b6235a82fe5923c7e77c70cb4d06f9c517d7dd8c0601b6f975"
+  }
+}

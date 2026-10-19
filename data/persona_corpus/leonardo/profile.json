@@ -1,0 +1,162 @@
+{
+  "axes": [
+    {
+      "name": "가치관·신념",
+      "score": 85,
+      "confidence": 30,
+      "summary": "탐구, 호기심, 그리고 자신이 세운 기준을 중시하는 경향이 강하게 추정됩니다.",
+      "qids": [
+        "v01",
+        "v02",
+        "v03",
+        "v04",
+        "v05",
+        "v06",
+        "v07",
+        "v08",
+        "v09",
+        "v10",
+        "w01",
+        "w04"
+      ],
+      "checked_answers": 5
+    },
+    {
+      "name": "판단·결정",
+      "score": 80,
+      "confidence": 35,
+      "summary": "탐구와 책임감을 바탕으로 중요한 결정을 내리며 위험을 관리하는 방식으로 추정됩니다.",
+      "qids": [
+        "w01",
+        "w02",
+        "w03",
+        "w08",
+        "w09",
+        "w10",
+        "w11"
+      ],
+      "checked_answers": 3
+    },
+    {
+      "name": "전문지식·사고법",
+      "score": 95,
+      "confidence": 40,
+      "summary": "관찰과 탐구를 통해 지식을 습득하고 이를 바탕으로 사고하는 방식이 두드러집니다.",
+      "qids": [
+        "v11",
+        "w06",
+        "w11"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "MBTI·인지·에너지",
+      "score": 50,
+      "confidence": 20,
+      "summary": "공개된 증거만으로는 MBTI를 추론하기에 매우 부족합니다.",
+      "qids": [],
+      "checked_answers": 0
+    },
+    {
+      "name": "성격·기질",
+      "score": 75,
+      "confidence": 20,
+      "summary": "내적 성찰과 절제를 통해 감정적 갈등을 관리하려는 경향이 보입니다.",
+      "qids": [
+        "e01",
+        "e02",
+        "e03",
+        "e04",
+        "e05",
+        "e06",
+        "e07"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "시기·변화",
+      "score": 10,
+      "confidence": 10,
+      "summary": "시간의 흐름이나 변화에 대한 직접적인 언급은 발견되지 않았습니다.",
+      "qids": [],
+      "checked_answers": 0
+    },
+    {
+      "name": "대인관계",
+      "score": 65,
+      "confidence": 20,
+      "summary": "타인에 대한 태도와 관계에서 원칙과 탐구를 중시하는 경향이 추정됩니다.",
+      "qids": [
+        "r01",
+        "r02",
+        "r04",
+        "r06"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "감정·갈등",
+      "score": 70,
+      "confidence": 35,
+      "summary": "비판이나 외로움 속에서도 논리적이고 이성적인 대응을 시도하는 모습이 나타납니다.",
+      "qids": [
+        "e01",
+        "e03",
+        "e04",
+        "e06",
+        "e07"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "습관·일상",
+      "score": 50,
+      "confidence": 25,
+      "summary": "구체적인 일상 습관에 대한 정보는 제한적입니다.",
+      "qids": [],
+      "checked_answers": 2
+    },
+    {
+      "name": "표현·문체",
+      "score": 85,
+      "confidence": 20,
+      "summary": "문체에서 논리적이고 사변적인 표현을 사용하여 자신의 생각을 전달하는 경향이 있습니다.",
+      "qids": [
+        "v07",
+        "w10"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "인생 이력",
+      "score": 5,
+      "confidence": 10,
+      "summary": "구체적인 인생 이력에 대한 정보는 전혀 제공되지 않았습니다.",
+      "qids": [],
+      "checked_answers": 0
+    },
+    {
+      "name": "모순·한계",
+      "score": 70,
+      "confidence": 20,
+      "summary": "지식과 현실 사이의 관계, 명성과 부의 의미 등에 대해 깊이 탐구하는 모습에서 내적 긴장이 추정됩니다.",
+      "qids": [
+        "v15",
+        "e05"
+      ],
+      "checked_answers": 0
+    }
+  ],
+  "mbti": {
+    "type": "unknown",
+    "confidence": 10,
+    "reason": "제공된 증거만으로는 MBTI를 추론하기에 충분한 정보가 없습니다."
+  },
+  "personality": "이 인물은 관찰과 호기심을 바탕으로 광범위한 탐구를 추구하며, 자신의 기준을 세우고 이를 통해 삶의 의미와 가치를 탐색하는 경향이 있습니다. 감정적 상황 속에서도 이성적인 분석을 시도하는 모습이 관찰됩니다.",
+  "expertise": "그는 지식과 경험을 바탕으로 현실과 이상 사이의 관계를 탐구하며, 논리적이고 사변적인 사고방식을 통해 세상을 이해하려는 경향을 보입니다. 특히 자연 현상과 인간 본성에 대한 깊은 성찰이 돋보입니다.",
+  "disclaimer": "분석은 제공된 증거 발췌문에만 기반하며, 특정 인물에 대한 확정적인 진술이나 심리 진단을 의미하지 않습니다.",
+  "checked_answers": 13,
+  "ready": true,
+  "person": "leonardo",
+  "generated_at": "2026-10-18T20:40:51"
+}

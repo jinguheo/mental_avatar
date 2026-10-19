@@ -44,7 +44,12 @@ graphify-out/
 models/
 .pipcache/
 tmp/
-data/
+data/*
+!data/persona_visuals/
+!data/persona_corpus/
+data/persona_corpus/*/texts/
+data/persona_corpus/*/qa_pairs.jsonl
+data/persona_corpus/*/improvement_plan.json
 avatar-studio-verify.png
 *.png
 
@@ -59,5 +64,3 @@ project-summaries/
 # 디버그용 임시 요청 덤프
 req.json
 
-# 인물 시험용 수집 자료 (공개 자료지만 저장소에는 올리지 않는다)
-data/persona_corpus/

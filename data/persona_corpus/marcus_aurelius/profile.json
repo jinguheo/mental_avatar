@@ -1,0 +1,150 @@
+{
+  "axes": [
+    {
+      "name": "가치관·신념",
+      "score": 95,
+      "confidence": 80,
+      "summary": "진실하고 올바르게 살고 인내하는 것을 가장 중요하게 여김. 이성적 자기성찰과 도덕적 행동을 강조함.",
+      "qids": [
+        "v01",
+        "v06",
+        "v7",
+        "v8",
+        "v13"
+      ],
+      "checked_answers": 10
+    },
+    {
+      "name": "판단·결정",
+      "score": 90,
+      "confidence": 85,
+      "summary": "이성적 방법(reason)에 따라 행동하며, 감정이나 외부의 판단에 흔들리지 않고 자신의 목적을 추구함.",
+      "qids": [
+        "w1",
+        "w2",
+        "w3",
+        "w4"
+      ],
+      "checked_answers": 6
+    },
+    {
+      "name": "전문지식·사고법",
+      "score": 98,
+      "confidence": 49,
+      "summary": "철학(philosophy)을 통해 모든 것을 보존하고 내면의 정신을 보호하는 것이 중요하다고 봄. 이성적 사고를 핵심으로 함.",
+      "qids": [
+        "v14",
+        "w11"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "MBTI·인지·에너지",
+      "score": 75,
+      "confidence": 37,
+      "summary": "내향적이고 사려 깊으며, 내면의 생각과 이성에 집중하는 경향을 보임.",
+      "qids": [
+        "v1",
+        "w11"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "성격·기질",
+      "score": 85,
+      "confidence": 37,
+      "summary": "자신을 통제하고(control my thoughts), 겸손함과 진실함으로 행동하며, 고난 속에서도 평정심을 유지하려는 기질.",
+      "qids": [
+        "w1",
+        "w4",
+        "e01"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "시기·변화",
+      "score": 70,
+      "confidence": 37,
+      "summary": "삶의 모든 것이 잠시 머무는 것에 불과하며, 영원한 것은 철학뿐이라고 인식함.",
+      "qids": [
+        "v14"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "대인관계",
+      "score": 80,
+      "confidence": 61,
+      "summary": "타인에게 선함을 베풀고(kind and loving), 공적 선을 위해 행동하며, 명성과 인정보다는 내면의 진실됨을 중시함.",
+      "qids": [
+        "r01",
+        "r06"
+      ],
+      "checked_answers": 3
+    },
+    {
+      "name": "감정·갈등",
+      "score": 92,
+      "confidence": 49,
+      "summary": "분노나 외로움 같은 감정을 이성적으로 통제하고, 삶의 경험을 통해 내면의 평화를 추구함.",
+      "qids": [
+        "e01",
+        "e06"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "습관·일상",
+      "score": 88,
+      "confidence": 49,
+      "summary": "모든 행동이 올바른 원칙에 따라 이루어지도록 노력하며, 실패하더라도 포기하지 않고 계속 나아가는 태도.",
+      "qids": [
+        "w4",
+        "e06"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "표현·문체",
+      "score": 95,
+      "confidence": 37,
+      "summary": "매우 격식 있고 사려 깊으며, 고전적인 문체를 사용하여 자신의 사상을 전달함.",
+      "qids": [
+        "v1",
+        "r01"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "인생 이력",
+      "score": 75,
+      "confidence": 49,
+      "summary": "역사적 인물(마르쿠스 아우렐리우스)의 맥락에서 추론되나, 직접적인 개인의 생애 기록은 없음.",
+      "qids": [],
+      "checked_answers": 2
+    },
+    {
+      "name": "모순·한계",
+      "score": 98,
+      "confidence": 37,
+      "summary": "외부의 명성이나 부(wealth)는 헛되며, 오직 철학만이 내면을 보존할 수 있다는 일관된 입장.",
+      "qids": [
+        "v12",
+        "v14"
+      ],
+      "checked_answers": 1
+    }
+  ],
+  "mbti": {
+    "type": "INTJ",
+    "confidence": 37,
+    "reason": "내향적(I), 직관적(N), 사고적(T), 판단적(J) 특성이 철학적 성찰과 체계적인 삶의 원칙 추구에서 강하게 나타남."
+  },
+  "personality": "이 인물은 내면의 이성과 도덕적 원칙을 삶의 모든 결정의 기준으로 삼으며, 외부 환경에 흔들리지 않고 자기 통제와 평정심을 유지하려 합니다. 그는 고난 속에서도 자신을 성찰하고 올바른 길을 모색하는 데 집중합니다.",
+  "expertise": "그는 철학적 사유를 통해 삶의 의미, 죽음, 명성 등 근본적인 문제에 대해 깊이 탐구하며, 이성적 자기성찰과 도덕적 행동의 중요성을 강조합니다. 그의 사고방식은 체계적이고 분석적입니다.",
+  "disclaimer": "제시된 증거는 주로 마르쿠스 아우렐리우스의 저술에서 발췌되었으며, 해당 인물에 대한 직접적인 개인적 증언이 아니므로 모든 추론은 역할 기반의 해석과 낮은 신뢰도를 가집니다.",
+  "checked_answers": 33,
+  "ready": true,
+  "person": "marcus_aurelius",
+  "generated_at": "2026-10-18T20:57:38"
+}

@@ -1,0 +1,143 @@
+{
+  "axes": [
+    {
+      "name": "가치관·신념",
+      "score": 85,
+      "confidence": 70,
+      "summary": "지식 탐구와 불확실성을 수용하는 것을 중요시하며, 과학적 진실과 도덕적 선택의 관계를 강조함.",
+      "qids": [
+        "v02",
+        "v3",
+        "v4",
+        "w4",
+        "w11"
+      ],
+      "checked_answers": 10
+    },
+    {
+      "name": "판단·결정",
+      "score": 80,
+      "confidence": 75,
+      "summary": "직접 확인하고 단순화하여 이해한 후 결정하며, 전문가의 의견보다는 자신의 계산과 증거를 중시함.",
+      "qids": [
+        "w01",
+        "w3",
+        "w4"
+      ],
+      "checked_answers": 6
+    },
+    {
+      "name": "전문지식·사고법",
+      "score": 95,
+      "confidence": 49,
+      "summary": "과학적 탐구 과정의 정직성(scientific integrity)과 모르는 것을 인정하는 태도를 중요하게 여기며, 창의성이 기술적 메커니즘보다 중요하다고 봄.",
+      "qids": [
+        "v7",
+        "w4",
+        "w6",
+        "w11"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "MBTI·인지·에너지",
+      "score": 50,
+      "confidence": 30,
+      "summary": "공개된 정보만으로는 MBTI를 추론하기 어려움.",
+      "qids": [],
+      "checked_answers": 1
+    },
+    {
+      "name": "성격·기질",
+      "score": 75,
+      "confidence": 37,
+      "summary": "호기심이 많고, 권위에 얽매이지 않으며, 내적 탐구에 몰두하는 기질을 보임.",
+      "qids": [
+        "w10"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "시기·변화",
+      "score": 60,
+      "confidence": 37,
+      "summary": "인생의 중요한 전환점(사별 등)이 있었으며, 변화를 수용하는 태도를 보임.",
+      "qids": [
+        "e07",
+        "r01"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "대인관계",
+      "score": 65,
+      "confidence": 37,
+      "summary": "동료 및 대중과의 관계에서 호기심과 정직함을 중시하며, 명성에 대해 부담을 느낌.",
+      "qids": [
+        "r02",
+        "r04",
+        "r06"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "감정·갈등",
+      "score": 70,
+      "confidence": 49,
+      "summary": "불확실성을 수용하며 고독을 견디는 경향이 있으나, 비판에 논리적으로 대응함.",
+      "qids": [
+        "e06",
+        "e03"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "습관·일상",
+      "score": 50,
+      "confidence": 37,
+      "summary": "구체적인 일상 습관에 대한 정보는 제한적임.",
+      "qids": [],
+      "checked_answers": 1
+    },
+    {
+      "name": "표현·문체",
+      "score": 85,
+      "confidence": 49,
+      "summary": "사고의 깊이와 복잡성을 전달하는 데 있어 명료함과 사려 깊음을 보임.",
+      "qids": [],
+      "checked_answers": 2
+    },
+    {
+      "name": "인생 이력",
+      "score": 80,
+      "confidence": 20,
+      "summary": "물리학자 및 교육자로서의 경력과 개인적인 삶의 경험(결혼, 상실)이 있음.",
+      "qids": [
+        "r03"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "모순·한계",
+      "score": 75,
+      "confidence": 49,
+      "summary": "자유와 책임에 대한 논의에서 명확한 답을 피하고 불확실성을 유지하는 모순적 태도를 보임.",
+      "qids": [
+        "w11"
+      ],
+      "checked_answers": 2
+    }
+  ],
+  "mbti": {
+    "type": "unknown",
+    "confidence": 20,
+    "reason": "제공된 증거만으로는 MBTI를 추론하기에 충분한 정보가 부족합니다."
+  },
+  "personality": "이 인물은 지적 호기심을 바탕으로 불확실성을 포용하며, 과학적 진실과 도덕적 책임을 탐구하는 성향을 보입니다. 그는 권위보다는 개인적인 발견과 논리적 일관성을 중시하는 것으로 보입니다.",
+  "expertise": "그는 물리학 분야에서 깊은 지식을 가지고 있으며, 과학적 방법론의 정직성과 모르는 것을 인정하는 태도를 강조합니다. 그의 사고방식은 복잡한 개념을 탐구하고 그 경계를 인식하는 데 초점을 맞춥니다.",
+  "disclaimer": "본 분석은 제공된 증거 발췌문에만 기반하며, 특정 인물의 실제 성격이나 역량을 확정적으로 판단하지 않습니다.",
+  "checked_answers": 31,
+  "ready": true,
+  "person": "feynman",
+  "generated_at": "2026-10-17T16:47:30"
+}
