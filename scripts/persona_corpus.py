@@ -269,7 +269,7 @@ SOURCES = {
         ("bio", "위키백과: 이순신", ("wiki", "ko.wikipedia.org", "이순신")),
         ("bio", "위키백과: 난중일기", ("wiki", "ko.wikipedia.org", "난중일기")),
         ("primary", "위키문헌: 난중일기", ("wiki", "ko.wikisource.org", "난중일기")),
-        ("quotes", "위키인용: 이순신", ("wikiquote", "Yi Sun-sin")),
+        ("quotes", "위키인용(한국어): 이순신", ("wiki", "ko.wikiquote.org", "이순신")),   # 영어판은 인용문 없이 전기 소개문뿐이라 한국어판 사용
     ],
     "leonardo": lambda: [
         ("bio", "Wikipedia: Leonardo da Vinci", ("wiki", "en.wikipedia.org", "Leonardo da Vinci")),
@@ -284,6 +284,8 @@ SOURCES = {
         ("quotes", "Wikiquote: Marie Curie", ("wikiquote", "Marie Curie")),
         # The 1903 physics page says that Curie delivered no lecture; the actual lecture is Chemistry 1911.
         ("lecture", "Nobel Prize: Marie Curie 1911 Nobel lecture - Radium and the New Concepts in Chemistry", ("url", "https://www.nobelprize.org/prizes/chemistry/1911/marie-curie/lecture/?print=1")),
+        # 본인 저술: 남편 피에르 퀴리 전기(1923). 말미에 마리 퀴리 본인의 자전적 회고가 포함된 공개 도메인 도서(eBook 69617).
+        ("primary", "Project Gutenberg: Pierre Curie by Marie Curie (eBook 69617)", ("url", "https://www.gutenberg.org/ebooks/69617.txt.utf-8")),
     ],
     "marcus_aurelius": lambda: [
         ("bio", "Wikipedia: Marcus Aurelius", ("wiki", "en.wikipedia.org", "Marcus Aurelius")),

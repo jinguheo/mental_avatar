@@ -1,4 +1,4 @@
 {"id": "bio_위키백과_이순신", "person": "yi_sun_sin", "kind": "bio", "title": "위키백과: 이순신", "source": "https://ko.wikipedia.org/wiki/이순신", "chars": 26878, "fetched_at": "2026-10-15T21:18:01"}
 {"id": "bio_위키백과_난중일기", "person": "yi_sun_sin", "kind": "bio", "title": "위키백과: 난중일기", "source": "https://ko.wikipedia.org/wiki/난중일기", "chars": 15175, "fetched_at": "2026-10-15T21:18:01"}
 {"id": "primary_위키문헌_난중일기", "person": "yi_sun_sin", "kind": "primary", "title": "위키문헌: 난중일기", "source": "https://ko.wikisource.org/wiki/난중일기", "chars": 525, "fetched_at": "2026-10-15T21:18:01"}
-{"id": "quotes_위키인용_이순신", "person": "yi_sun_sin", "kind": "quotes", "title": "위키인용: 이순신", "source": "https://en.wikiquote.org/wiki/Yi_Sun-sin", "chars": 6296, "fetched_at": "2026-10-15T21:18:01"}
+{"id": "quotes_위키인용_한국어_이순신", "person": "yi_sun_sin", "kind": "quotes", "title": "위키인용(한국어): 이순신", "source": "https://ko.wikiquote.org/wiki/이순신", "chars": 5148, "fetched_at": "2026-10-19T20:25:43"}
