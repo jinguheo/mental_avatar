@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { API_BASE } from '@/config'
+import { MaterialsBrowser } from './PersonaAvatars'
 
 type Person = { id: string; name: string; docs: number; chars: number; policy?: { label: string; mode: string } }
 type Status = { people: Person[]; historical_five?: string[] }
@@ -38,9 +39,11 @@ function Guide({ axes }: { axes: Axis[] }) {
   </svg>
 }
 
-export default function PersonaLibrary() {
+export default function PersonaLibrary({ selected, onPerson }: { selected?: string; onPerson?: (id: string) => void } = {}) {
   const [status, setStatus] = useState<Status | null>(null)
-  const [who, setWho] = useState('buffett')
+  const [localWho, setLocalWho] = useState('buffett')
+  const who = selected ?? localWho
+  const setWho = onPerson ?? setLocalWho
   const [materials, setMaterials] = useState<Material[]>([])
   const [answers, setAnswers] = useState<Answer[]>([])
   const [profile, setProfile] = useState<Profile | null>(null)
@@ -86,6 +89,6 @@ export default function PersonaLibrary() {
       <section className="view-panel p-4"><h2 className="text-lg font-semibold">이 인물의 페르소나</h2><p className="mt-3 text-sm leading-6 text-gray-700">{profile?.personality}</p><p className="mt-3 text-sm leading-6 text-gray-700"><strong>전문·활동 영역:</strong> {profile?.expertise}</p><p className="mt-4 rounded-lg bg-amber-50 p-3 text-xs text-amber-900">{profile?.disclaimer}</p></section></div>
     <section className="view-panel p-4"><h2 className="text-lg font-semibold">12개 성향 축과 근거</h2><div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{profile?.axes?.map(axis => <article key={axis.name} className="rounded-lg border border-violet-100 bg-violet-50/40 p-3"><div className="flex justify-between gap-2"><strong className="text-sm">{axis.name}</strong><span className="text-sm text-violet-800">{axis.score}/100</span></div><p className="mt-1 text-xs text-gray-500">근거 신뢰 {axis.confidence}% · {axis.qids.join(', ') || '근거 보류'}</p><p className="mt-2 text-xs leading-5 text-gray-700">{axis.summary}</p></article>)}</div></section>
     <section className="view-panel p-4"><h2 className="text-lg font-semibold">사용해 보며 성향 다듬기</h2><p className="mt-1 text-sm text-gray-600">한 번 추정하고 끝내지 않습니다. ① 실제 대화에서 답을 확인하고 ② 본인 또는 그 사람을 아는 사람이 수정 의견을 남기고 ③ 의견을 새 근거로 저장해 레이더와 다음 답변을 갱신합니다.</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => setPerspective('self')} className={'rounded-lg border px-3 py-1.5 text-sm ' + (perspective === 'self' ? 'border-violet-700 bg-violet-700 text-white' : 'border-gray-300 bg-white')}>본인 관점으로 확인</button><button onClick={() => setPerspective('other')} className={'rounded-lg border px-3 py-1.5 text-sm ' + (perspective === 'other' ? 'border-violet-700 bg-violet-700 text-white' : 'border-gray-300 bg-white')}>가족·동료 관점으로 검토</button></div><p className="mt-2 text-xs text-gray-500">{perspective === 'self' ? '당사자가 직접 “이 판단은 내 기준과 맞다/다르다”를 확인하는 의견입니다.' : '가족·동료·지인이 관찰한 사례를 추가합니다. 관찰 의견은 본인 확인과 구분되어 남습니다.'}</p><div className="mt-3 grid gap-2 sm:grid-cols-[12rem_1fr]"><select value={axis} onChange={event => setAxis(event.target.value)} className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">{profile?.axes?.map(item => <option key={item.name}>{item.name}</option>)}</select><textarea value={feedback} onChange={event => setFeedback(event.target.value)} rows={3} placeholder="예: 중요한 결정을 할 때 속도보다 충분한 검토와 구성원의 신뢰를 우선했다는 기록을 더 반영해 주세요." className="rounded-lg border border-gray-300 p-2 text-sm" /></div><div className="mt-2 flex flex-wrap gap-2"><input value={reviewer} onChange={event => setReviewer(event.target.value)} aria-label="검토자" className="w-28 rounded-lg border border-gray-300 px-2 py-1.5 text-sm" /><input value={relation} onChange={event => setRelation(event.target.value)} aria-label="관계" className="w-44 rounded-lg border border-gray-300 px-2 py-1.5 text-sm" /><button onClick={() => void saveFeedback()} disabled={saving || !feedback.trim()} className="rounded-lg bg-violet-700 px-3 py-1.5 text-sm text-white disabled:opacity-50">{saving ? '반영 중…' : '의견 저장·프로필 갱신'}</button></div><p className="mt-2 text-xs text-gray-500">검토 의견은 ‘리뷰 반영’ 근거로 남으며, 원래 자료와 추정 기록은 지우지 않습니다.</p></section>
-    <section className="view-panel p-4"><h2 className="text-lg font-semibold">자료 위치와 구성</h2><p className="mt-1 text-sm text-gray-600">{who} · 자료 유형: {byKind.map(([kind, count]) => kind + ' ' + count + '건').join(' · ')}</p><div className="mt-3 max-h-80 space-y-2 overflow-y-auto">{materials.map(item => <article key={item.id} className="rounded-lg border border-gray-200 p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><strong>{item.title}</strong><span className="text-xs text-gray-500">{item.kind} · 질문에서 {item.used_by_questions}회 사용</span></div><p className="mt-1 text-xs text-gray-500">저장됨 {item.available ? '✓' : '—'} · {Math.round((item.chars || 0) / 1000)}천자</p>{item.source && <a href={item.source} target="_blank" rel="noreferrer" className="mt-1 block break-all text-xs text-indigo-700 underline">원문</a>}</article>)}</div></section>
+    <section className="view-panel p-4"><h2 className="text-lg font-semibold">자료 위치와 구성</h2><p className="mt-1 text-sm text-gray-600">{who} · 자료 유형: {byKind.map(([kind, count]) => kind + ' ' + count + '건').join(' · ')}</p><MaterialsBrowser person={who} /></section>
   </div></div>
 }

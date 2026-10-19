@@ -19,9 +19,11 @@ function Sources({ items }: { items: Source[] }) {
   </details>
 }
 
-export default function PersonaStage() {
+export default function PersonaStage({ selected, onPerson }: { selected?: string; onPerson?: (id: string) => void } = {}) {
   const [people, setPeople] = useState<Person[]>([])
-  const [who, setWho] = useState('buffett')
+  const [localWho, setLocalWho] = useState('buffett')
+  const who = selected ?? localWho
+  const setWho = onPerson ?? setLocalWho
   const [visual, setVisual] = useState<Visual | null>(null)
   const [frame, setFrame] = useState(0)
   const [turns, setTurns] = useState<Turn[]>([])

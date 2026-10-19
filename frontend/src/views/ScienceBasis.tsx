@@ -196,9 +196,9 @@ export default function ScienceBasis({ interviewCount, evaluated, passed, userSt
       </article>)}
     </div>
     <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-950">
-      <p className="font-medium">KG에 기록하는 틀 (설계 제안, 아직 구현 전)</p>
+      <p className="font-medium">KG에 기록하는 틀 (일부 구현: 판단 사례의 출처·시점·확신도·승인·충돌 확인·정책 버전, 2026-10-13)</p>
       <p className="mt-1">가치·신념·선호는 지식 노드와 구분해 저장하고, 각 항목에 <strong>내용 · 강도(순위) · 적용 조건(if-then) · 근거 유형(자기보고 / 관찰된 선택 / 추정) · 확인 시점 · 충돌하는 항목</strong>을 남깁니다. 답변할 때는 사실과 따로 “내가 중시하는 것”으로 넣고, 오래됐거나 자기보고와 행동이 다른 항목은 다시 확인합니다.</p>
-      <p className="mt-2 text-xs text-indigo-900">현재 자문자답은 KG 주제에서 질문을 만들고 관점(판단 기준·예외·트레이드오프 등)만 바꿔 묻습니다. 구조화된 가치·선호 측정은 없고, 발언은 KG에 기록되지만 가치로 분류되거나 자기보고와 대조되지는 않습니다.</p>
+      <p className="mt-2 text-xs text-indigo-900">현재 심층 인터뷰는 KG 주제에서 질문을 만들어 관점(판단 기준·예외·트레이드오프 등)을 바꿔 묻고, 구조화된 판단 사례(상황·선택지·선택·이유·버린 선택지·예외)를 출처·기록 시점·승인 상태·확신도·충돌 확인 상태·정책 버전과 함께 따로 저장합니다. 아직 없는 것: 강도(순위)와 적용 조건(if-then)을 가진 가치·신념 노드, 자기보고와 실제 선택의 자동 대조(충돌 확인 상태는 ‘미확인’으로 남음), 직접 입력 사례 자체(현재 0건).</p>
     </div>
     <h3 className="mt-6 font-semibold">최근 연구 (2025~2026)</h3>
     <ul className="mt-2 space-y-2 text-sm">

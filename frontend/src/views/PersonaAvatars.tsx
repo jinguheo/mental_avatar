@@ -9,26 +9,27 @@ type Person = { id: string; name: string; docs: number; chars: number; by_kind: 
 type Status = { people: Person[]; root: string; historical_five?: string[] }
 
 const KIND: Record<string, string> = { primary: '본인 글·연설·편지', interview: '인터뷰·질의응답', quotes: '출처 확인된 발언', lecture: '강의·강연', bio: '전기·백과' }
-const VERDICT: Record<string, { text: string; cls: string }> = {
-  buffett: { text: '충분', cls: 'bg-green-100 text-green-800' },
-  einstein: { text: '부족(질문-답 거의 없음)', cls: 'bg-amber-100 text-amber-800' },
-  feynman: { text: '부족(대표 인터뷰 전문 접근 불가)', cls: 'bg-amber-100 text-amber-800' },
-  jobs: { text: '부족(인터뷰 전문 접근 불가)', cls: 'bg-amber-100 text-amber-800' },
-  songhae: { text: '검토 중(한국어 기사 14건, 질의응답 형식은 적음)', cls: 'bg-blue-100 text-blue-800' },
-  sejong: { text: '기록·일반 지식·추정으로 구성(78문항 중 21개, 리뷰 대기). 직접 평가 불가', cls: 'bg-purple-100 text-purple-800' },
+// 판정 배지는 질문은행에서 실제 자료로 확인된 답 수(real_answered)로 계산한다. 20개 미만은 논문 12절의 '자료 부족' 기준.
+function verdictOf(real: number | undefined, total: number): { text: string; cls: string } | null {
+  if (real === undefined) return null
+  const label = real + '/' + total + '문항 확인'
+  if (real >= 30) return { text: '비교적 충분(' + label + ')', cls: 'bg-green-100 text-green-800' }
+  if (real >= 20) return { text: '일부 확보(' + label + ')', cls: 'bg-blue-100 text-blue-800' }
+  return { text: '자료 부족(' + label + ', 20 미만)', cls: 'bg-amber-100 text-amber-800' }
 }
 
 type Todo = { text: string; status: 'done' | 'doing' | 'todo' }
 const TODO: Todo[] = [
-  { text: '후보 공개 자료 수집(버핏·아인슈타인·파인만·잡스·송해·세종대왕) 및 자료 유무 확인. 이소룡은 제외', status: 'done' },
+  { text: '공개 자료 수집·자료 유무 확인: 유명인 6명(버핏·아인슈타인·파인만·잡스·송해·이소룡) + 역사 인물 5명(세종·이순신·레오나르도·마리 퀴리·마르쿠스) = 11명', status: 'done' },
+  { text: '이소룡: 2026-10-11에 세종대왕으로 교체하며 제외했으나 2026-10-19에 복원(11명에 포함)', status: 'done' },
+  { text: '인물별 이용 범위 4모드 분류(초상권 위험·역사·가상 AI·개인 동의) — 위험 인물은 텍스트 전용', status: 'done' },
   { text: '버핏: 주주총회 녹취에서 질문·답 짝 추출, 2018년 이후는 시험용으로 분리(구성용에서 같은 해 이후 서한도 제외)', status: 'done' },
+  { text: '질문 은행 78문항(13영역)으로 인물별 고유 정보 찾기 — 찾은 것만 남기고 근거(자료·원문 주소) 표시. 11명 전원 실행, 본인 저작용 판정 문구로 재판정(2026-10-19)', status: 'done' },
+  { text: '질문 은행 판정의 사람 검수 표본(정밀도·재현율) — 확인된 답 수는 커버리지일 뿐 정확도가 아니다', status: 'todo' },
+  { text: '자료가 얇은 인물 출처 보강(이순신 한국어 위키 인용·마리 퀴리 Pierre Curie 저술은 추가함, 확인된 답이 20개 미만인 인물이 남음) · 송해는 한국어 기사 위주라 질의응답 형식이 적음', status: 'doing' },
+  { text: '인물 채팅(③ 대화): 분야 전문가 초안 + 인물 자료 합성, 근거를 못 찾으면 "분야 지식 보충 추정"으로 표시(2026-10-19). 남은 한계: 개인 사실 질문(어제 점심 등)이 보류로 처리되지 않음', status: 'doing' },
+  { text: '이름을 가린 인물 식별 평가(④ 블라인드 평가): 6명 52문항 세트 생성, 현재 평가는 모델 평가자 사전 점검뿐 — 사람 평가자 결과 대기', status: 'doing' },
   { text: '질의응답 없는 인물용 시험 선택: 입장 예측·진짜 vs 오귀속 발언·시기 분리·글 이어쓰기·문체 일치(3-1)', status: 'todo' },
-  { text: '이소룡은 제외하고 세종대왕으로 교체(2026-10-11, 사용자 결정)', status: 'done' },
-  { text: '질문 은행(78문항)으로 인물별 고유 정보 찾기 — 찾은 것만 남기고 근거(자료·원문 주소) 표시(3-2)', status: 'doing' },
-  { text: '송해(한국어) 자료 보강 — 신문·잡지 인터뷰, 평전, 다큐 기사. 한국어 검색은 별도 구현 필요', status: 'doing' },
-  { text: '시험 문제에 영역 표시(가치관·결정·감정·관계·유머·취향·이력·모순) — 영역별 점수를 보기 위해', status: 'todo' },
-  { text: '아바타 구성: 일반 층 + 특정 층(발언 검색·말투) + 결합 규칙, 근거 없는 쟁점은 "기록에 없는 추정"으로 표시', status: 'todo' },
-  { text: '시험 실행: 시험용 질문에 아바타가 답하고 실제 답과 비교(판정 모델, 5×5 식별 표, 이름 가림 시험)', status: 'todo' },
   { text: '결합 효과 측정: 일반만 / 특정만 / 결합을 같은 문제로 비교 + 기록에 없는 새 상황에서의 차이', status: 'todo' },
   { text: '채점에 쓸 더 큰 모델 여부 결정(로컬 모델은 채점이 거칠 수 있음)', status: 'todo' },
   { text: '결과를 내 아바타에 적용: 내 기록(특정)과 일반 지식을 섞는 방식 선택', status: 'todo' },
@@ -48,11 +49,11 @@ const LAYERS = [
   { name: '결합', text: '질문의 쟁점을 일반 정보로 이해하고, 관련된 그 사람의 기록을 근거로 그 사람이라면 어떻게 할지 정한다. 기록에 없는 쟁점은 일반 정보로 추론하되 추정이라고 표시한다.' },
 ]
 const NO_QA: { name: string; how: string; truth: string; fit: string }[] = [
-  { name: '입장 예측', how: '보류한 문서에서 "이 사람이 이 주장에 동의했나"를 판정하는 문장 시험을 만들고 아바타가 동의·반대를 예측', truth: '본인 글·발언에 적힌 입장', fit: '5명 모두(발언 모음 + 에세이)' },
+  { name: '입장 예측', how: '보류한 문서에서 "이 사람이 이 주장에 동의했나"를 판정하는 문장 시험을 만들고 아바타가 동의·반대를 예측', truth: '본인 글·발언에 적힌 입장', fit: '본인 글·발언 모음이 있는 인물 전원' },
   { name: '진짜 vs 오귀속 발언', how: '실제 발언과, 널리 퍼졌지만 본인이 하지 않은 발언(위키인용 오귀속 구역) 중 아바타가 진짜를 고름', truth: '출처가 확인된 발언 / 오귀속으로 판정된 발언', fit: '아인슈타인·잡스(오귀속 사례가 많음)' },
   { name: '시기 분리 예측', how: '앞 시기 자료로 만들고 뒤 시기의 입장을 예측(발언이 연대별로 정리되어 있음)', truth: '이후 시기의 실제 발언', fit: '아인슈타인(1890년대~1950년대 연대별 발언)' },
   { name: '글 이어쓰기·논증 완성', how: '보류한 글의 앞부분이나 전제를 주고 결론·다음 주장을 쓰게 한 뒤 원문과 비교', truth: '원문', fit: '파인만(보고서·강연)·버핏 서한·아인슈타인 에세이' },
-  { name: '문체 일치(기계 측정)', how: '아바타 글과 실제 글의 문장 길이·접속어·어휘 분포를 비교, 사람 눈 없이 계산', truth: '실제 글의 통계', fit: '5명 모두' },
+  { name: '문체 일치(기계 측정)', how: '아바타 글과 실제 글의 문장 길이·접속어·어휘 분포를 비교, 사람 눈 없이 계산', truth: '실제 글의 통계', fit: '본인 글이 충분한 인물 전원(한문·번역 자료는 별도 판단)' },
   { name: '편지·청문회 질의응답', how: '받은 편지→답장 짝, 청문회에서 질문한 사람과 답한 사람 짝(인터뷰와 같은 구조)', truth: '실제 답장·답변', fit: '아인슈타인 편지, 파인만(챌린저 조사위원회 청문회 녹취, 공개 문서)' },
   { name: '기록된 결정 지점', how: '결정 직전 상황만 주고 무엇을 할지 예측(서명·사임·복귀·거절 등)', truth: '실제로 한 결정', fit: '아인슈타인·파인만·잡스(모델이 이미 아는 유명 결정은 제외해야 함)' },
 ]
@@ -60,9 +61,6 @@ const DOMAINS = ['가치관·신념·윤리', '일과 결정', '감정·갈등',
 type Evidence = { text: string; doc: string; title: string; kind: string; tier: 'own' | 'reported' | 'secondary' | 'general' | 'estimate' | 'reviewed'; score: number; source_url?: string; file?: string; key?: string; observed_at?: string; confidence?: number; approval_status?: string; conflict_status?: string; source_refs?: { doc: string; title: string; kind: string }[]; reviews?: { reviewer: string; relation: string; verdict: string; at: string }[] }
 type AnswerRow = { qid: string; domain: string; question: string; question_en: string; answered: boolean; evidence: Evidence[] }
 type Material = { id: string; title: string; kind: string; source?: string; chars?: number; fetched_at?: string; available: boolean; used_by_questions: number }
-type PersonaProfile = { ready: boolean; message?: string; generated_at?: string; axes?: { name: string; score: number; confidence: number; summary: string; qids: string[] }[]; mbti?: { type: string; confidence: number; reason: string }; personality?: string; expertise?: string; disclaimer?: string }
-type HistoricalVisual = { ready: boolean; message?: string; disclaimer?: string; generic_presenter?: boolean; video?: string; videos?: { label: string; url: string }[]; frames?: { label: string; url: string }[] }
-type ProfileAxis = NonNullable<PersonaProfile['axes']>[number]
 type QSummary = { total: number; answered: number; real_answered?: number; own_answered: number; reviewed_answered?: number; by_domain: Record<string, { total: number; answered: number; own: number; real?: number; reviewed?: number; rejected?: number }> }
 const REAL = ['own', 'reported']   // 수집한 자료에서 확인된 근거. 나머지(secondary·general·estimate)는 추정·미확인으로 따로 표시한다
 type QStatus = { running: boolean; person: string; done: number; total: number; last_error: string | null; questions: number; queue?: string[]; queue_index?: number; queue_total?: number; people: Record<string, QSummary> }
@@ -233,38 +231,7 @@ function AllCelebrityCoverage({ status, summaries }: { status: Status | null; su
   return <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4"><h3 className="font-semibold text-gray-950">전체 인물 13축 근거 레이더 비교</h3><p className="mt-1 text-xs text-gray-600">각 카드는 한 명의 공개 인물 또는 역사 인물입니다. 초록 면적이 클수록 실제 기록 근거가 충분하고, 주황 점선만 넓을수록 추정·검증 보강이 필요합니다.</p><div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{status.people.map(person => <CelebrityCoverageRadar key={person.id} person={person} summary={summaries.people[person.id]} />)}</div></section>
 }
 
-function MiniProfileRadar({ title, axes }: { title: string; axes: ProfileAxis[] }) {
-  const center = 115, radius = 72
-  const point = (index: number, value: number) => { const angle = -Math.PI / 2 + index * Math.PI * 2 / Math.max(axes.length, 1); return [center + Math.cos(angle) * radius * value, center + Math.sin(angle) * radius * value] }
-  const polygon = (value: number) => axes.map((_, index) => point(index, value).join(',')).join(' ')
-  if (axes.length < 3) return null
-  return <div className="rounded-lg border border-violet-100 bg-white p-2"><h4 className="text-xs font-semibold text-gray-800">{title}</h4><svg viewBox="-18 -18 266 266" className="mx-auto mt-1 w-full max-w-[260px]" role="img" aria-label={title + ' 레이더 차트'}>{[.25, .5, .75, 1].map(level => <polygon key={level} points={polygon(level)} fill="none" stroke="#c4b5fd" />)}{axes.map((axis, index) => { const [x, y] = point(index, 1); return <line key={axis.name} x1={center} y1={center} x2={x} y2={y} stroke="#ddd6fe" /> })}<polygon points={axes.map((axis, index) => point(index, Math.max(0, Math.min(100, axis.score)) / 100).join(',')).join(' ')} fill="#8b5cf6" fillOpacity=".25" stroke="#6d28d9" strokeWidth="2" />{axes.map((axis, index) => { const [x, y] = point(index, axis.score / 100); const [lx, ly] = point(index, 1.28); return <g key={axis.name}><circle cx={x} cy={y} r="2.7" fill="#6d28d9" /><text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize="8.5" fill="#374151">{axis.name.replace('·', ' ')}</text></g> })}</svg></div>
-}
-
-function PersonaProfileRadar({ person }: { person: string }) {
-  const [profile, setProfile] = useState<PersonaProfile | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  useEffect(() => { setProfile(null); setError(''); call('/persona/qbank/profile/' + person).then(setProfile).catch(cause => setError(cause instanceof Error ? cause.message : String(cause))) }, [person])
-  async function generate() {
-    setBusy(true); setError('')
-    try { setProfile(await call('/persona/qbank/profile/' + person, { method: 'POST' })) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
-    finally { setBusy(false) }
-  }
-  const allAxes = profile?.axes || []
-  const thinkingNames = ['가치관·신념', '판단·결정', '전문지식·사고법', 'MBTI·인지·에너지', '성격·기질', '시기·변화']
-  const axes = allAxes.filter(axis => thinkingNames.includes(axis.name))
-  const expressionAxes = allAxes.filter(axis => !thinkingNames.includes(axis.name))
-  return <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50/50 p-3 sm:p-4">
-    <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="font-semibold text-gray-950">{person}을 닮기 위한 인물 프로필 지도</h3><p className="mt-1 text-xs leading-5 text-gray-600">질문 은행의 공개 근거만 바탕으로 성향의 두드러짐을 추정합니다. 사람의 실제 내면이나 능력을 측정하는 차트는 아닙니다.</p></div><button type="button" onClick={() => void generate()} disabled={busy} className="rounded-lg bg-violet-700 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{busy ? '근거 분석 중…' : profile?.ready ? '다시 추정' : '프로필 추정'}</button></div>
-    {error && <p role="alert" className="mt-2 text-xs text-red-700">{error}</p>}
-    {!profile?.ready && <p className="mt-3 text-sm text-gray-600">{profile?.message || '질문 은행 결과를 불러오는 중입니다.'}</p>}
-    {profile?.ready && allAxes.length > 2 && <><div className="mt-3 grid gap-3 lg:grid-cols-2"><MiniProfileRadar title="① 사고·판단 지도" axes={axes} /><MiniProfileRadar title="② 성격·표현 지도" axes={expressionAxes} /></div><div className="mt-3 grid gap-2 sm:grid-cols-2">{allAxes.map(axis => <article key={axis.name} className="rounded-lg border border-violet-100 bg-white p-2.5 text-xs"><div className="flex justify-between gap-2"><strong>{axis.name}</strong><span className="font-medium text-violet-800">성향 {axis.score}/100</span></div><p className="mt-1 text-gray-700">{axis.summary}</p><p className="mt-1 text-gray-500">근거 신뢰 {axis.confidence}% · 질문 {axis.qids?.join(', ') || '없음'}</p></article>)}</div><div className="mt-3 rounded-lg border border-violet-100 bg-white p-3 text-sm"><p><strong>MBTI 가설:</strong> {profile.mbti?.type || '판단 보류'} <span className="text-xs text-gray-500">(신뢰 {profile.mbti?.confidence ?? 0}%)</span></p><p className="mt-1 text-gray-700">{profile.mbti?.reason}</p><p className="mt-2"><strong>성격:</strong> {profile.personality}</p><p className="mt-1"><strong>전문지식:</strong> {profile.expertise}</p></div><p className="mt-2 text-xs text-gray-500">{profile.disclaimer}</p></>}
-  </div>
-}
-
-function MaterialsBrowser({ person }: { person: string }) {
+export function MaterialsBrowser({ person }: { person: string }) {
   const [materials, setMaterials] = useState<Material[]>([])
   const [query, setQuery] = useState('')
   const [opened, setOpened] = useState<{ id: string; title: string; text: string; source?: string } | null>(null)
@@ -289,36 +256,16 @@ function MaterialsBrowser({ person }: { person: string }) {
   </div>
 }
 
-function PersonaVisualViewer({ person, policy }: { person: string; policy?: PersonaPolicy }) {
-  const [visual, setVisual] = useState<HistoricalVisual | null>(null)
-  useEffect(() => {
-    setVisual(null)
-    if (!policy || policy.mode === 'private_consent') return
-    call('/persona/visuals/' + person).then(setVisual).catch(() => setVisual({ ready: false, message: '시각자료를 불러오지 못했습니다.' }))
-  }, [person, policy?.mode])
-  if (!policy || policy.mode === 'private_consent') return null
-  const historical = policy.mode === 'historical'
-  const title = historical ? person + ' · 가상 역사 재현 5뷰' : person + ' 대화용 가상 진행자 5뷰'
-  const description = historical ? '사료·시대 초상화의 복식·시대 특징을 참고한 AI 재현 시안입니다. 실제 인물의 얼굴 또는 음성이라고 주장하지 않습니다.' : '특정 인물과 닮지 않는 독립적인 현실형 가상 진행자입니다. 대화는 공개 자료를 바탕으로 한 가상 AI 페르소나이며, 실제 모습·음성·본인 발언이 아닙니다.'
-  return <section className={'mt-4 rounded-xl border p-3 sm:p-4 ' + (historical ? 'border-sky-200 bg-sky-50/50' : 'border-violet-200 bg-violet-50/50')}>
-    <h3 className="font-semibold text-gray-950">{title}</h3>
-    <p className="mt-1 text-xs leading-5 text-gray-600">{description}</p>
-    {!visual?.ready && <p className="mt-2 text-sm text-gray-500">{visual?.message || '시각자료를 불러오는 중입니다.'}</p>}
-    {visual?.ready && <><video className="mt-3 aspect-video w-full rounded-lg bg-black" controls preload="metadata" src={API_BASE + visual.video} aria-label={person + ' 가상 역사 재현 5뷰 영상'} />
-      <div className="mt-3 grid gap-2 sm:grid-cols-5">{visual.videos?.map(video => <div key={video.url} className="overflow-hidden rounded-lg border border-sky-100 bg-white"><video className="aspect-[3/4] w-full bg-black object-cover" controls preload="metadata" src={API_BASE + video.url} aria-label={person + ' ' + video.label + ' 영상'} /><p className="p-1.5 text-center text-[10px] text-gray-600">{video.label}</p></div>)}</div>
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">{visual.frames?.map(frame => <figure key={frame.url} className="overflow-hidden rounded-lg border border-sky-100 bg-white"><img src={API_BASE + frame.url} alt={person + ' ' + frame.label} className="aspect-[3/4] w-full object-cover" /><figcaption className="p-1.5 text-center text-[10px] text-gray-600">{frame.label}</figcaption></figure>)}</div>
-      <p className="mt-2 text-xs text-gray-500">{visual.disclaimer}</p></>}
-  </section>
-}
-
-export default function PersonaAvatars() {
+export default function PersonaAvatars({ selected, onPerson, onGoto }: { selected?: string; onPerson?: (id: string) => void; onGoto?: (step: 'library' | 'stage') => void } = {}) {
   const [status, setStatus] = useState<Status | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [qstatus, setQstatus] = useState<QStatus | null>(null)
   const [improvement, setImprovement] = useState<ImprovementStatus | null>(null)
-  const [who, setWho] = useState('sejong')
+  const [localWho, setLocalWho] = useState('sejong')
+  const who = selected ?? localWho
+  const setWho = onPerson ?? setLocalWho
   const [answers, setAnswers] = useState<AnswerRow[]>([])
   const [only, setOnly] = useState<'all' | 'answered'>('answered')
   const load = () => call('/persona/status').then(setStatus).catch(cause => setError(String(cause.message || cause)))
@@ -411,7 +358,8 @@ export default function PersonaAvatars() {
         <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[640px] text-left text-sm">
           <thead className="text-xs text-gray-500"><tr><th className="py-1 pr-3">인물</th><th className="pr-3">문서</th><th className="pr-3">글자 수</th><th className="pr-3">인터뷰·질의응답</th><th className="pr-3">질문·답 짝(구성/시험)</th><th>판정</th></tr></thead>
           <tbody>{status?.people.map(person => {
-            const verdict = VERDICT[person.id]
+            const summary = qstatus?.people[person.id]
+            const verdict = verdictOf(summary ? (summary.real_answered ?? summary.own_answered) : undefined, summary?.total ?? qstatus?.questions ?? 78)
             return <tr key={person.id} className="border-t border-gray-100 align-top">
               <td className="py-2 pr-3 font-medium">{person.name}<span className="mt-1 block text-xs font-normal text-gray-500">{person.policy?.label || '정책 확인 전'}</span></td>
               <td className="pr-3">{person.docs}</td>
@@ -490,8 +438,7 @@ export default function PersonaAvatars() {
         <CoverageGaps summary={qstatus?.people[who]} />
         <AllCelebrityCoverage status={status} summaries={qstatus} />
         <PersonaEvidenceRadar person={status?.people.find(person => person.id === who)?.name || who} rows={answers} />
-        <PersonaProfileRadar person={who} />
-        <PersonaVisualViewer person={who} policy={status?.people.find(person => person.id === who)?.policy} />
+        <p className="mt-3 rounded-lg border border-violet-100 bg-violet-50 p-2 text-xs text-violet-900">이 인물의 성향 거미줄·페르소나 요약은 <button type="button" onClick={() => onGoto?.('library')} className="font-medium underline">② 인물 지식</button>, 시각자료와 대화는 <button type="button" onClick={() => onGoto?.('stage')} className="font-medium underline">③ 대화</button>에서 봅니다.</p>
         <EvidenceSummary rows={answers} />
         <div className="mt-3 space-y-2">{answers.filter(row => only === 'all' || row.answered).map(row => <details key={row.qid} className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-sm">
           <summary className="cursor-pointer"><span className="text-xs text-gray-500">{row.domain}</span> · {row.question} <span className={'ml-1 rounded px-1.5 py-0.5 text-xs ' + (row.evidence.some(e => REAL.includes(e.tier)) ? 'bg-green-100 text-green-800' : row.answered ? 'bg-amber-100 text-amber-800' : 'bg-gray-200 text-gray-600')}>{row.evidence.some(e => REAL.includes(e.tier)) ? '자료 확인 ' + row.evidence.filter(e => REAL.includes(e.tier)).length + '건' : row.answered ? '추정·미확인 ' + row.evidence.length + '건' : '답 없음'}</span></summary>
@@ -508,7 +455,7 @@ export default function PersonaAvatars() {
           {answers.length === 0 && <p className="text-sm text-gray-500">아직 결과가 없습니다. 인물을 고르고 "찾기 실행"을 누르세요.</p>}
         </div>
         <p className="mt-2 text-xs text-gray-500">초록 표시는 수집한 자료에서 확인된 실제 정보이고, 주황 표시는 직접 답변이 없을 때 수집 원문·보도 요약·드러난 사실에서 만든 낮은 신뢰도의 추정입니다. 추정은 사실이나 본인 발언으로 쓰지 않으며, 더 좋은 원문 근거나 리뷰가 추가되면 자동으로 그 근거가 우선됩니다. 서비스 단계에서는 그 사람을 직접 아는 사람이 각 근거에 리뷰(맞다/틀렸다/고친다)를 남겨 추정을 바로잡고, 리뷰는 파란 표시로 겹쳐 보입니다. 판정은 로컬 모델이 하므로 틀릴 수 있습니다. 근거 문단을 직접 확인하세요. 본인 단계는 본인이 쓰거나 말한 자료, 전기 단계는 제3자가 적은 행동·일화입니다.</p>
-        <MaterialsBrowser person={who} />
+        <p className="mt-3 text-xs text-gray-500">수집한 모든 자료의 원문 열람은 <button type="button" onClick={() => onGoto?.('library')} className="text-indigo-700 underline">② 인물 지식</button>에 모았습니다.</p>
       </section>
 
       <section className="view-panel p-4 sm:p-5">
