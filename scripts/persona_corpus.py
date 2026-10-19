@@ -270,6 +270,12 @@ SOURCES = {
         ("bio", "위키백과: 난중일기", ("wiki", "ko.wikipedia.org", "난중일기")),
         ("primary", "위키문헌: 난중일기", ("wiki", "ko.wikisource.org", "난중일기")),
         ("quotes", "위키인용(한국어): 이순신", ("wiki", "ko.wikiquote.org", "이순신")),   # 영어판은 인용문 없이 전기 소개문뿐이라 한국어판 사용
+        # 2026-10-19 보강: 확인된 답이 0건이던 이순신. 이충무공전서 5~7권은 난중일기(한문 원문, 한국어 질문과 검색이 잘 안 맞을 수 있음),
+        # 이순신전은 신채호(1908)의 한국어 전기라 본인 글이 아니라 전기(reported)로 센다.
+        ("primary", "위키문헌: 이충무공전서 제5권(난중일기 한문 원문)", ("wiki", "ko.wikisource.org", "이충무공전서/제5권")),
+        ("primary", "위키문헌: 이충무공전서 제6권(난중일기 한문 원문)", ("wiki", "ko.wikisource.org", "이충무공전서/제6권")),
+        ("primary", "위키문헌: 이충무공전서 제7권(난중일기 한문 원문)", ("wiki", "ko.wikisource.org", "이충무공전서/제7권")),
+        ("bio", "위키문헌: 이순신전(신채호, 1908)", ("wiki", "ko.wikisource.org", "이순신전")),
     ],
     "leonardo": lambda: [
         ("bio", "Wikipedia: Leonardo da Vinci", ("wiki", "en.wikipedia.org", "Leonardo da Vinci")),

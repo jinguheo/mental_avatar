@@ -1003,6 +1003,42 @@ def persona_qbank_conversation_feedback(person):
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/persona/blind/sets", methods=["GET"])
+def persona_blind_sets():
+    """이름을 가린 인물 식별 평가(논문 12절 E1): 평가 세트 목록"""
+    from core import persona_blind
+    return jsonify({"sets": persona_blind.list_sets(), "min_real_answers": persona_blind.MIN_REAL_ANSWERS})
+
+
+@app.route("/persona/blind/<set_id>", methods=["GET"])
+def persona_blind_items(set_id):
+    """평가자에게 보여 줄 문항(이름 가림, 정답 없음)"""
+    from core import persona_blind
+    try:
+        return jsonify(persona_blind.get_set(set_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.route("/persona/blind/<set_id>/rate", methods=["POST"])
+def persona_blind_rate(set_id):
+    from core import persona_blind
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(persona_blind.add_rating(set_id, body.get("item", ""), body.get("guess", ""), body.get("rater", ""), "human"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/persona/blind/<set_id>/results", methods=["GET"])
+def persona_blind_results(set_id):
+    from core import persona_blind
+    try:
+        return jsonify(persona_blind.results(set_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
 @app.route("/persona/chat/people", methods=["GET"])
 def persona_chat_people():
     """홍보 페이지 체험용: 대화 가능한 유명인과 인사말·추천 질문·자료 준비 상태(글 전용, 얼굴·목소리 없음)"""

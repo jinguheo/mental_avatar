@@ -336,6 +336,10 @@ def _ask_yes(model: str, prompt: str) -> bool:
             if exc.code < 500 or attempt == 3:
                 raise
             time.sleep(3 * (attempt + 1))
+        except (urllib.error.URLError, ConnectionError, TimeoutError):   # 연결이 끊긴 경우(송해 재판정 중 WinError 10054)도 다시 시도
+            if attempt == 3:
+                raise
+            time.sleep(3 * (attempt + 1))
     return False
 
 
@@ -587,6 +591,11 @@ def review_add(person: str, qid: str, key: str, reviewer: str, relation: str, ve
            "text": corrected_text.strip(), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     with open(ROOT / person / "reviews.jsonl", "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    try:   # 피드백이 대화에서 읽는 인물 지식 저장소에 바로 반영되게 한다(프로필은 다시 만들지 않고 저장된 것을 쓴다)
+        from . import persona_knowledge
+        persona_knowledge.sync(person)
+    except Exception as exc:  # noqa: BLE001 — 저장소 동기화 실패가 리뷰 저장을 막지 않게 한다
+        rec["knowledge_sync_error"] = str(exc)[:160]
     return rec
 
 

@@ -36,15 +36,19 @@ def sync(person: str, profile: dict | None = None) -> dict:
     materials = persona_qbank.materials(person)
     profile = profile or persona_qbank.profile(person)
     facts, estimates = [], []
+    def priority(evidence: dict) -> int:
+        # 대화 중 받은 피드백·리뷰(reviewed)가 가장 앞, 그다음 수집 원문에서 확인된 근거, 마지막이 추정
+        return 0 if evidence.get("tier") == "reviewed" else 1 if evidence.get("tier") in persona_qbank.REAL_TIERS else 2
+
     for row in rows:
-        for evidence in row.get("evidence", []):
+        ranked = sorted(row.get("evidence", []), key=priority)
+        for evidence in ranked[:1]:   # 질문 하나당 대표 근거 하나만 대화 컨텍스트에 보관
             item = {
                 "qid": row["qid"], "domain": row["domain"], "question": row["question"],
                 "text": evidence.get("text", "")[:700], "tier": evidence.get("tier", "estimate"),
                 "title": evidence.get("title", ""), "source": evidence.get("source_url"),
             }
-            (facts if item["tier"] in persona_qbank.REAL_TIERS else estimates).append(item)
-            break  # 질문 하나당 대표 근거 하나만 대화 컨텍스트에 보관
+            (facts if priority(evidence) < 2 else estimates).append(item)
     context = json.dumps({"person": person, "facts": facts, "estimates": estimates,
                           "profile": profile, "materials": [{"id": m["id"], "title": m["title"], "kind": m["kind"]} for m in materials]},
                          ensure_ascii=False)
