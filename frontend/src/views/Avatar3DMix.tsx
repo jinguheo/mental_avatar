@@ -93,24 +93,31 @@ async function idbSave(entry: GlbEntry) {
 // 정면/좌/우 입력 사진을 매번 다시 선택하지 않도록 별도 IndexedDB에 슬롯별로 저장해둔다
 // (localStorage는 사진 3장 base64로는 용량이 부담스러워, GLB와 같은 IndexedDB 패턴 재사용).
 type PhotoSlot = 'front' | 'left' | 'right'
+// 공개 인물 사진을 수집·조합하는 용도로 쓰지 않는다. 이 작업대는 동의 받은 개인 또는
+// 실존 인물을 닮지 않은 가상 캐릭터의 입력만 다룬다.
+type PersonaId = 'private-consented' | 'fictional-ai'
 const PHOTO_IDB_NAME = 'mental-avatar-mix-photos'
-const PHOTO_IDB_STORE = 'photos'
-interface PhotoEntry { slot: PhotoSlot; name: string; type: string; data: ArrayBuffer; savedAt: number }
+const PHOTO_IDB_STORE = 'persona-photos'
+interface PhotoEntry { id: string; person: PersonaId; slot: PhotoSlot; name: string; type: string; data: ArrayBuffer; savedAt: number }
+const PERSONAS: { id: PersonaId; name: string; face: string; voice: string; confirmation: string }[] = [
+  { id: 'private-consented', name: '개인 아바타 (동의 확인)', face: '본인 또는 당사자가 직접 제공하고 사용에 동의한 사진만', voice: '당사자가 명시적으로 허락한 음성만', confirmation: '이 사진·음성의 당사자이며, 아바타 생성과 저장에 필요한 명시적 동의를 받았습니다.' },
+  { id: 'fictional-ai', name: '가상 AI 캐릭터', face: '실존 인물을 식별하거나 닮게 만들지 않은 창작 이미지', voice: '특정 실존 인물을 모방하지 않는 가상 음성', confirmation: '이 입력은 특정 실존 인물의 사진·음성·초상을 사용하거나 모방하지 않습니다.' },
+]
 
 function openPhotoIDB(): Promise<IDBDatabase> {
   return new Promise((res, rej) => {
-    const req = indexedDB.open(PHOTO_IDB_NAME, 1)
-    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains(PHOTO_IDB_STORE)) req.result.createObjectStore(PHOTO_IDB_STORE, { keyPath: 'slot' }) }
+    const req = indexedDB.open(PHOTO_IDB_NAME, 2)
+    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains(PHOTO_IDB_STORE)) req.result.createObjectStore(PHOTO_IDB_STORE, { keyPath: 'id' }) }
     req.onsuccess = () => res(req.result)
     req.onerror = () => rej(req.error)
   })
 }
-async function photoList(): Promise<PhotoEntry[]> {
+async function photoList(person: PersonaId): Promise<PhotoEntry[]> {
   const db = await openPhotoIDB()
   return new Promise((res, rej) => {
     const tx = db.transaction(PHOTO_IDB_STORE, 'readonly')
     const req = tx.objectStore(PHOTO_IDB_STORE).getAll()
-    req.onsuccess = () => res(req.result as PhotoEntry[])
+    req.onsuccess = () => res((req.result as PhotoEntry[]).filter(item => item.person === person))
     req.onerror = () => rej(req.error)
   })
 }
@@ -123,11 +130,11 @@ async function photoSave(entry: PhotoEntry) {
     tx.onerror = () => rej(tx.error)
   })
 }
-async function photoDelete(slot: PhotoSlot) {
+async function photoDelete(person: PersonaId, slot: PhotoSlot) {
   const db = await openPhotoIDB()
   return new Promise<void>((res, rej) => {
     const tx = db.transaction(PHOTO_IDB_STORE, 'readwrite')
-    tx.objectStore(PHOTO_IDB_STORE).delete(slot)
+    tx.objectStore(PHOTO_IDB_STORE).delete(`${person}:${slot}`)
     tx.oncomplete = () => res()
     tx.onerror = () => rej(tx.error)
   })
@@ -542,6 +549,11 @@ function GlbPreview({ data, label, shapeOnly, applyPhotoTexture, textureVersion,
 }
 
 export default function Avatar3DMix() {
+  const [persona, setPersona] = useState<PersonaId>(() => {
+    const stored = localStorage.getItem('mental-avatar-mix-persona')
+    return stored === 'fictional-ai' ? 'fictional-ai' : 'private-consented'
+  })
+  const [rightsConfirmed, setRightsConfirmed] = useState(false)
   const [frontFile, setFrontFile] = useState<File | null>(null)
   const [leftFile, setLeftFile] = useState<File | null>(null)
   const [rightFile, setRightFile] = useState<File | null>(null)
@@ -549,27 +561,29 @@ export default function Avatar3DMix() {
   const photoSetters: Record<PhotoSlot, (f: File | null) => void> = {
     front: setFrontFile, left: setLeftFile, right: setRightFile,
   }
-  // 마운트 시 이전에 선택했던 사진을 IndexedDB에서 복원 — 매번 다시 고르지 않아도 되게.
+  // 인물별 정면/좌/우 참고사진을 독립 보관한다. 인물을 바꾸면 해당 인물의 사진만 복원한다.
   useEffect(() => {
-    photoList().then(entries => {
+    setFrontFile(null); setLeftFile(null); setRightFile(null)
+    setRightsConfirmed(false)
+    photoList(persona).then(entries => {
       entries.forEach(e => {
         photoSetters[e.slot](new File([e.data], e.name, { type: e.type }))
       })
     }).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [persona])
   // 새 파일을 고르면 상태 갱신과 동시에 IndexedDB에 저장(다음 방문 때 기본값으로 뜨도록).
   const pickPhoto = useCallback((slot: PhotoSlot, file: File | null) => {
     photoSetters[slot](file)
     if (file) {
       file.arrayBuffer().then(data => {
-        photoSave({ slot, name: file.name, type: file.type, data, savedAt: Date.now() }).catch(() => {})
+        photoSave({ id: `${persona}:${slot}`, person: persona, slot, name: file.name, type: file.type, data, savedAt: Date.now() }).catch(() => {})
       })
     } else {
-      photoDelete(slot).catch(() => {})
+      photoDelete(persona, slot).catch(() => {})
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [persona])
 
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobStatus, setJobStatus] = useState<RetargetStatus | null>(null)
@@ -643,6 +657,7 @@ export default function Avatar3DMix() {
 
   const startGenerate = useCallback(async () => {
     if (!frontFile) return
+    if (!rightsConfirmed) { setError('사진을 처리하기 전에 사용 권한·동의 확인을 선택해 주세요.'); return }
     setError('')
     setResultData(null)
     setMicaData(null)
@@ -720,7 +735,7 @@ export default function Avatar3DMix() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
-  }, [frontFile, leftFile, rightFile])
+  }, [frontFile, leftFile, rightFile, rightsConfirmed])
 
   const useAsAvatar = useCallback(async () => {
     if (!resultData || !jobId) return
@@ -736,12 +751,19 @@ export default function Avatar3DMix() {
   return (
     <div className="mx-auto flex h-full max-w-5xl flex-col gap-4 overflow-y-auto p-4">
       <div>
-        <h1 className="text-lg font-semibold text-gray-900">3D Mix — 형태 이식 작업대</h1>
-        <p className="text-sm text-gray-500">사진으로 MICA 형태를 추정해 "실사 아바타" 리그(모프타겟·스켈레톤)에 이식합니다. 형태만 비교해보고, 마음에 들면 실사 아바타 탭에 바로 반영할 수 있습니다.</p>
+        <h1 className="text-lg font-semibold text-gray-900">3D Mix — 동의된 개인·가상 캐릭터 작업대</h1>
+        <p className="text-sm text-gray-500">사진으로 MICA 형태를 추정해 "실사 아바타" 리그(모프타겟·스켈레톤)에 이식합니다. 공개 인물의 사진·음성 수집과 재현에는 사용하지 않습니다.</p>
       </div>
 
       <div className="rounded-xl border border-surface-border bg-white p-3">
-        <div className="mb-2 text-sm font-medium text-gray-700">사진 선택 (정면 필수, 좌/우는 선택) — 한 번 고르면 다음에 자동으로 채워집니다</div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div><div className="text-sm font-medium text-gray-700">3D 입력 종류</div><p className="mt-0.5 text-xs text-gray-500">정면·좌·우(또는 3/4) 사진은 같은 당사자 또는 같은 가상 캐릭터 안에서만 섞어 사용합니다.</p></div>
+          <select value={persona} onChange={event => { const next = event.target.value as PersonaId; localStorage.setItem('mental-avatar-mix-persona', next); setPersona(next) }} className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm">
+            {PERSONAS.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </div>
+        {(() => { const item = PERSONAS.find(entry => entry.id === persona)!; return <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50 p-2 text-xs text-indigo-950"><p><strong>외형:</strong> {item.face}</p><p className="mt-1"><strong>음성:</strong> {item.voice}</p><label className="mt-2 flex cursor-pointer items-start gap-2 rounded border border-indigo-200 bg-white/70 p-2 text-gray-800"><input type="checkbox" checked={rightsConfirmed} onChange={event => setRightsConfirmed(event.target.checked)} className="mt-0.5" /><span>{item.confirmation}</span></label></div> })()}
+        <div className="mb-2 text-sm font-medium text-gray-700">사진 선택 (정면 필수, 좌/우는 선택) — 입력 종류별로 자동 저장됩니다</div>
         <div className="grid grid-cols-3 gap-2">
           {([
             ['front', '정면 (필수)', frontFile],
@@ -768,7 +790,7 @@ export default function Avatar3DMix() {
         </div>
         <button
           type="button"
-          disabled={!frontFile || (jobStatus?.status === 'running')}
+          disabled={!frontFile || !rightsConfirmed || (jobStatus?.status === 'running')}
           onClick={startGenerate}
           className="mt-3 rounded-lg bg-gray-950 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
         >
