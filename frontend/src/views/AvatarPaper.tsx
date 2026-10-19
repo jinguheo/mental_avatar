@@ -66,6 +66,7 @@ const SECTIONS: Section[] = [
         ['Wei 외, 2025 (Second Me) arXiv:2503.08102', 'L0 원본(RAG) / L1 자연어 요약 / L2 개인 모델(Qwen2.5-7B, SFT·DPO)', '직원 1명의 노트 132개·할 일 62개, LLM 채점', '1인칭 기억 QA 0.96, 제3자 0.76, 컨텍스트 보강 0.85, 비평 0.86(만점 대비)', '평가 대상 1명·LLM 채점, 제3자 질문에 약함, 본문 내 모순, 판단 대리가 아니라 “컨텍스트 제공자”'],
       ], note: '주의: Second Me의 5단계 필터 설명과 “필터링 없는 데이터가 최고”라는 토론이 모순되고, 컨텍스트 보강 점수는 저자도 부정확하다고 인정했다(본문·부록 직접 확인).' },
       { t: 'p', text: '상용 제품(HeyGen·Synthesia·Delphi 등)은 본인 동의 영상 검증, 출처 인용 같은 동의·신뢰 장치에 무게를 두며, 사용자의 판단 정책을 따로 모델링한다는 증거는 찾지 못했다(요약 수준 확인, 인용 전 원문 확인 필요).' },
+      { t: 'p', text: '빅테크의 개인 에이전트(OpenAI Dots, 2026-09-29 / Meta Muse / Microsoft Digital Me)는 아바타보다 에이전트에 가깝다. Dots와 Muse의 캐릭터는 사용자를 닮은 모습이 아니라 AI를 친근하게 보이게 하는 얼굴이고, 정체성은 사용자가 고르는 설정이다. Microsoft Research의 Digital Me(2016)는 개인 지식을 디지털화한 “Avatar”와 이를 대신해 행동하는 에이전트를 분리해 정의한 점에서 본 연구와 구조가 가장 가깝다. 본 연구와의 차이는 닮음(누구와 얼마나 같은가)을 측정 대상으로 삼고 근거를 분리해 보고하는 점이다(Dots는 TechCrunch 기사, Digital Me는 Microsoft Research 프로젝트 페이지 확인. Muse는 검색 요약만 확인).' },
     ],
   },
   {
@@ -436,6 +437,9 @@ const SECTIONS: Section[] = [
         ['Wang et al. Mitigating Identity Essentialism in LLM Agents with Longitudinal Life Trajectories (LifeMem). arXiv:2608.19621 (2026)', '원문 확인'],
         ['He et al. PERSONAJUDGE: Simulating Individual Human Preference Judgments. arXiv:2607.05742 (2026)', '원문 확인'],
         ['Wei et al. (Mindverse). AI-native Memory 2.0: Second Me. arXiv:2503.08102 (2025)', '본문·부록 직접 확인'],
+        ['Microsoft Research. Digital Me (project page, 2016-04 시작)', '프로젝트 페이지 확인(2026-10-19)'],
+        ['TechCrunch. OpenAI launches Dots, its bubbly agentic avatar (2026-09-29)', '기사 확인(2026-10-19). 공식 발표문은 미확인'],
+        ['Axios. Meta gives Muse an adorable mascot amid AI doomerism (2026-09-25)', '검색 요약만 확인(원문 접속 불가)'],
         ['Du. Memory for Autonomous LLM Agents: Mechanisms, Evaluation, and Emerging Frontiers. arXiv:2603.07670 (2026)', '초록 확인(2026-10-11)'],
         ['Du, Guo, He, Ye, Zhu, Su, Zhu, Zhou, Zhang, Ai, Liu. TwinVoice: A Multi-dimensional Benchmark Towards Digital Twins via LLM Persona Simulation. arXiv:2510.25536 (2025)', '초록 확인(2026-10-11)'],
         ['Li, Xia, Yuan, Dong, Sha, Li, Sui. How Far are LLMs from Being Our Digital Twins? A Benchmark for Persona-Based Behavior Chain Simulation (BehaviorChain). arXiv:2502.14642 (2025)', '초록 확인(2026-10-11)'],

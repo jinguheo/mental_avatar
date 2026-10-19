@@ -71,6 +71,39 @@ const PRODUCTS: Ref[] = [
     note: '2026-02 법정관리(KPMG 수탁인 지정) 후 AppDirect가 인수했다고 보도.' },
 ]
 
+// 2026-10-19 추가: 빅테크의 "개인 에이전트·아바타" 서비스. 에이전트(일을 하는 몸)와 아바타(보이는 얼굴·정체성)를 구분해서 본다.
+const AGENT_PRODUCTS: Ref[] = [
+  { cite: 'OpenAI Dots (2026-09-29 DevDay, GPT-6 Astra)', href: 'https://techcrunch.com/2026/09/29/openai-launches-dots-its-bubbly-agentic-avatar/', check: 'checked',
+    note: '항상 켜져 있는 개인 에이전트. 목표를 받아 배경에서 스스로 일하고 Slack·Teams로 메시지를 주고받는다. 아바타는 둥둥 떠다니는 점 모양의 귀여운 캐릭터로, 사용자를 닮은 모습이 아니라 AI를 친근하게 보이게 하는 얼굴이다. 이 기사 기준으로 ChatGPT Pro·Business Premium에서 제공되고, 역할·자격증명·도구를 가진 “전문 Dot”과 Dot 팀 협업이 예고됐다. 안전 기본값(읽기 전용 등)은 이 기사에서 확인하지 못했다.' },
+  { cite: 'Meta Muse · 마스코트 Jolly (2026-09)', href: 'https://axios.com/2026/09/25/ai-doom-meta-muse-mascot', check: 'summary',
+    note: '개인 AI 에이전트 Muse의 기본 아바타가 마스코트 Jolly. 이름·외형·말투를 사용자가 고르고, 실시간 아바타 영상 대화(Muse Realtime Avatar)와 아바타를 보여 주는 소형 기기(Muse Charm)가 예고됐다는 보도. 원문은 접속이 막혀 검색 결과 요약만 확인했다. 출시 여부는 확인하지 못했다.' },
+  { cite: 'Microsoft Research, Digital Me (2016-04 시작)', href: 'https://www.microsoft.com/en-us/research/project/digital-me/', check: 'checked',
+    note: '각 사람의 지식을 디지털화해 개인 “Avatar”를 만들고, 그 사람의 DM 에이전트가 본인을 대신해 디지털 업무·생활에 참여한다는 연구 프로젝트. 사람이 자기 에이전트를 직접 키우는 기여자이고, 문서에 없는 지식도 사람과 환경에서 배우며, 하나의 정답이 아니라 사람마다 다른 의견을 준다는 점을 차별점으로 든다. 페이지는 Avatar(개인의 디지털 표상)와 에이전트(행동하는 소프트웨어)를 구분해 쓴다.' },
+  { cite: 'Microsoft Digital, DigitalMe (사내 IT 에이전트)', href: 'https://windowsnews.ai/article/microsoft-digitalme-twin-agent-cuts-meeting-time-and-email-overload.425455', check: 'summary',
+    note: '직원이 바쁠 때 일을 이어 가는 개인 가상 대리인. Copilot Studio와 Microsoft 365 데이터(Graph)로 Teams 회의·Outlook에서 질문에 답하고 일을 처리한다는 보도. “90% 정확도” 수치는 보도 하나의 주장이고 확인하지 못했다. 위 연구 프로젝트(2016)와 이름만 같고 별개 사내 사례다.' },
+  { cite: 'Coll et al., Towards the “Digital Me” (arXiv:2506.23826)', href: 'https://arxiv.org/abs/2506.23826', check: 'summary',
+    note: '위 Microsoft 프로젝트와 이름만 같은 별개 논문(개인 데이터 기반 디지털 트윈 구조 제안). 기억 계층 목록에 이미 있다.' },
+]
+
+// "그냥 에이전트"와 "아바타"를 가르는 기능 기준. 위 서비스를 이 표에 놓고 본다.
+const AVATAR_FEATURES = [
+  { f: '보이는 얼굴·캐릭터', agentOnly: '있어도 장식(Dots·Muse의 만화 마스코트)', avatar: '대상 인물을 알아볼 수 있는 외형' },
+  { f: '정체성', agentOnly: '“누구를 닮았는가”가 없음. 이름·성격은 사용자가 고르는 설정', avatar: '특정인(본인·고인·역사 인물)의 지식·말투·가치관·판단을 닮는 것' },
+  { f: '지식의 출처', agentOnly: '일반 모델 + 연결된 앱·메일·문서', avatar: '그 사람의 기록·기억·판단 사례' },
+  { f: '하는 일', agentOnly: '업무 대행(예약, 메일, 코드 수정, 모니터링)', avatar: '그 사람처럼 답하고 판단하기. 일 대행은 선택 기능' },
+  { f: '평가 기준', agentOnly: '과업 성공률, 자동화한 시간', avatar: '본인 재현도, 지인 블라인드 구별, 가치·판단 일치' },
+  { f: '동의·안전', agentOnly: '권한 범위, 자격증명 관리', avatar: '본인·유족 동의, AI 표시, 즉시 중지, 초상·음성 권리' },
+]
+
+const AGENT_VS_US = [
+  { who: '같은 점', text: '개인 데이터를 계속 모으고(기억), 사용자를 대신해 말하고 일하게 하며(대리), 얼굴이라는 표현 계층을 붙인다. Digital Me가 가장 가까워서 “지식 디지털화 → 개인 Avatar → 대리 행동”이라는 목표 구조가 이 프로젝트와 같다.' },
+  { who: '다른 점', text: 'Dots·Muse는 에이전트의 얼굴이고 정체성은 사용자가 고르는 설정이다. 이 프로젝트는 “누구와 얼마나 같은가”가 핵심 지표이고, 그래서 외형·지식·행동 세 축의 일치를 따로 잰다. 다른 아바타 연구(Park 외, Second Me 등)와 비교하면 이 프로젝트는 본인뿐 아니라 고인·역사 인물까지 같은 구조로 다루고 근거(원문·전언·추정·리뷰)를 분리해 보인다.' },
+  { who: '다른 점', text: '상용 에이전트는 권한과 보안(Agent 365 연동 등)을 안전의 중심에 두고, 이 프로젝트는 초상·음성·유족 동의와 “AI 표시”를 중심에 둔다. 실존 인물을 모사하므로 4모드(텍스트 전용·역사·가상 AI·본인 동의)로 허용 범위를 나눈다.' },
+  { who: '지향할 점', text: '에이전트 기능(일 대행)보다 “닮음의 측정 가능성”을 먼저 확보한다. 기본 LLM 대조군과 지인 블라인드로 일치를 재고, 근거가 없는 질문은 추정·기록 없음으로 표시한다. 상용 서비스가 주지 않는 이 투명성이 차별점이다.' },
+  { who: '지향할 점', text: '표현 계층은 Digital Me처럼 “아바타(표상)와 에이전트(행동)를 분리”해 설계한다. 대리 행동은 읽기 전용에서 시작해 권한을 단계적으로 열고, 고인·유명인은 대리 행동 없이 대화만 한다.' },
+  { who: '지향할 점', text: 'Muse Realtime Avatar 같은 실시간 영상 아바타가 정착해도 얼굴만 닮은 아바타가 되지 않도록, 지식·판단 일치 평가를 얼굴 품질과 따로 보고한다. 실시간·립싱크는 후순위로 두고 근거 기반 답변의 신뢰도를 먼저 올린다.' },
+]
+
 const REGS: Ref[] = [
   { cite: 'EU AI Act 제50조 · 표시·라벨링 행동강령 (2026-06-10)', href: 'https://digital-strategy.ec.europa.eu/en/policies/code-practice-ai-generated-content', check: 'agent',
     note: '딥페이크 고지 등 투명성 의무가 2026-08-02부터 적용 중. 일부 표시 유예 날짜는 출처마다 다르다.' },
@@ -170,7 +203,7 @@ export default function ResearchTrends() {
   return <div className="view-canvas h-full overflow-y-auto">
     <div className="mx-auto max-w-5xl space-y-5 px-4 py-6 pb-24 sm:px-6">
       <header>
-        <p className="dashboard-kicker">2026-10-18 기준</p>
+        <p className="dashboard-kicker">2026-10-19 기준</p>
         <h1 className="mt-1 text-2xl font-semibold text-gray-950">아바타 연구 동향</h1>
         <p className="mt-2 text-sm leading-6 text-gray-600">“나를 닮은 아바타”는 보통 말·성격, 기억, 목소리, 얼굴·몸 네 층을 따로 만들어 이어 붙입니다. 층마다 연구 흐름이 다르고, 아래에 이 프로젝트의 현재 상태를 나란히 적었습니다.</p>
         <p className="mt-2 rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-900">출처 표시: <strong>1차 출처 확인</strong>은 arXiv 초록 또는 논문 본문에서 해당 서지와 주장을 확인한 것입니다. 초록만 확인한 연구와 본문까지 검토한 연구는 본문 메모에서 구분해야 하며, 이 표시는 재현 검증을 뜻하지 않습니다. <strong>조사 에이전트 확인</strong>과 <strong>요약만 확인</strong>은 정식 인용 전에 반드시 원문을 다시 확인해야 합니다.</p>
@@ -232,6 +265,23 @@ export default function ResearchTrends() {
         <h2 className="text-lg font-semibold">상용 제품은 무엇을 하나</h2>
         <p className="mt-1 text-sm text-gray-600">상용 제품은 콘텐츠 검색, 출처 인용, 동의 검증에 무게를 둡니다.</p>
         <RefList items={PRODUCTS} />
+      </section>
+
+      <section className="view-panel p-4 sm:p-5">
+        <h2 className="text-lg font-semibold">빅테크의 개인 에이전트·아바타: 아바타인가, 그냥 에이전트인가</h2>
+        <p className="mt-1 text-sm text-gray-600">OpenAI Dots, Meta Muse, Microsoft Digital Me는 모두 “나를 대신하는 AI”를 내세웁니다. 그러나 아바타(누군가를 닮은 표상)보다 에이전트(일을 하는 소프트웨어)에 가깝고, 얼굴은 대부분 장식입니다. 아래 표는 그 구분 기준입니다.</p>
+        <RefList items={AGENT_PRODUCTS} />
+        <h3 className="mt-4 font-semibold">아바타의 주요 기능 vs 그냥 에이전트</h3>
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full min-w-[640px] border-collapse text-left text-xs">
+            <thead><tr className="border-b border-gray-300 text-gray-600"><th className="p-2 font-medium">기능</th><th className="p-2 font-medium">에이전트(Dots·Muse 등)</th><th className="p-2 font-medium">아바타(이 프로젝트가 지향)</th></tr></thead>
+            <tbody>{AVATAR_FEATURES.map(row => <tr key={row.f} className="border-b border-gray-200 align-top">
+              <td className="p-2 font-medium text-gray-900">{row.f}</td><td className="p-2 text-gray-700">{row.agentOnly}</td><td className="p-2 text-gray-700">{row.avatar}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+        <h3 className="mt-4 font-semibold">다른 아바타 연구와의 차이, 그리고 지향할 점 (내 해석)</h3>
+        <ul className="mt-2 space-y-2 text-sm">{AGENT_VS_US.map(item => <li key={item.text} className="flex items-start gap-2"><span className={'mt-0.5 whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium ' + (item.who === '지향할 점' ? 'bg-indigo-100 text-indigo-800' : item.who === '같은 점' ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700')}>{item.who}</span><span className="text-gray-800">{item.text}</span></li>)}</ul>
       </section>
 
       <section className="view-panel p-4 sm:p-5">
