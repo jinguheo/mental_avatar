@@ -44,11 +44,17 @@ if ($latestBundle) {
     Write-Host "Restoring data bundle: $($latestBundle.FullName)" -ForegroundColor Yellow
     & (Join-Path $ScriptDir "restore_data.ps1") $latestBundle.FullName
 } else {
-    Write-Host "No data_bundle_*.zip found. Skipping data restore for a fresh install." -ForegroundColor DarkYellow
+    Write-Host "No data bundle found. Rebuilding public-person knowledge.db records from the repository..." -ForegroundColor Yellow
+    conda run -n avatar python (Join-Path $ProjectRoot "scripts\rebuild_persona_knowledge.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Public-person knowledge rebuild failed. Run scripts\rebuild_persona_knowledge.py after resolving the error."
+    }
+    Write-Host "Public-person knowledge records were rebuilt. Personal conversations, KG, and vector search still require a data bundle." -ForegroundColor DarkYellow
 }
 
 Write-Host "`n==== Done ====" -ForegroundColor Green
 Write-Host "Next steps:"
+Write-Host "  - Rebuild public-person knowledge later: conda run -n avatar python scripts\rebuild_persona_knowledge.py"
 Write-Host "  - Optional Ollama model: ollama pull gemma4:e2b"
 Write-Host "  - Start API: conda run -n avatar python api\server.py"
 Write-Host "  - Optional watcher: conda run -n avatar python watcher\file_watcher.py"
