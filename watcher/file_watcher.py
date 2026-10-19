@@ -55,6 +55,9 @@ MANUAL_BACKUP_KEEP   = 10    # 작업 전 백업(pre_delete_* 등)은 별도로 
 # preference(MBTI/성격/선호도) 자동측정 — 실제 주기는 /preference/due가 사용자 설정(preference_interval_days)으로 판단,
 # watcher는 그 판단을 부담없는 간격(1시간)으로 확인만 함
 PREFERENCE_CHECK_INTERVAL_SEC = 3600
+# 공개 인물 코퍼스의 새 원문을 감지해 질문 근거를 다시 찾고, 아직 빈 영역은 다음 수집
+# 후보로만 기록한다. 외부 웹에서 찾은 내용을 자동 사실화하지는 않는다.
+PERSONA_IMPROVEMENT_CHECK_INTERVAL_SEC = 3600
 
 
 class DocHandler(FileSystemEventHandler):
@@ -140,6 +143,15 @@ def _check_preference_schedule():
         print(f"[watcher] preference 자동측정 오류: {e}")
 
 
+def _check_persona_improvement_schedule():
+    try:
+        data = requests.post(f"{API_BASE}/persona/improvement/run", json={}, timeout=15).json()
+        if data.get("started"):
+            print("[watcher] persona 자율 보강 루프 시작")
+    except Exception as e:
+        print(f"[watcher] persona 자율 보강 오류: {e}")
+
+
 def _prune_old_backups():
     """오래된 백업 정리 — 시간별 백업과 작업 전 백업(pre_*)을 각각 따로 센다.
 
@@ -168,6 +180,7 @@ def start():
     tick = 0
     backup_tick = 0
     pref_tick = 0
+    persona_tick = 0
     try:
         while True:
             time.sleep(2)
@@ -175,6 +188,7 @@ def start():
             tick += 2
             backup_tick += 2
             pref_tick += 2
+            persona_tick += 2
             if tick >= 30:
                 tick = 0
                 _process_queue()
@@ -184,6 +198,9 @@ def start():
             if pref_tick >= PREFERENCE_CHECK_INTERVAL_SEC:
                 pref_tick = 0
                 _check_preference_schedule()
+            if persona_tick >= PERSONA_IMPROVEMENT_CHECK_INTERVAL_SEC:
+                persona_tick = 0
+                _check_persona_improvement_schedule()
     except KeyboardInterrupt:
         observer.stop()
     observer.join()

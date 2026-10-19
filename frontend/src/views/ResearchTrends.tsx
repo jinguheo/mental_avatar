@@ -1,19 +1,28 @@
-// "나를 닮은 아바타"의 구현·연구 동향 요약 (2026-10-10 기준).
+// "나를 닮은 아바타"의 구현·연구 동향 요약 (2026-10-18 기준).
 // checked = 내가 arXiv 초록·논문 본문 등 원문으로 확인, agent = 조사 에이전트가 원문 확인했다고 보고(내가 재확인 전), summary = 검색 결과·다른 창 조사 글의 요약만 확인(인용 전 원문 확인 필요).
 type Check = 'checked' | 'agent' | 'summary'
 type Ref = { cite: string; note: string; href?: string; check: Check }
 
 const CHECK: Record<Check, { text: string; cls: string }> = {
-  checked: { text: '원문 확인', cls: 'bg-green-100 text-green-800' },
+  checked: { text: '1차 출처 확인', cls: 'bg-green-100 text-green-800' },
   agent: { text: '조사 에이전트 확인', cls: 'bg-sky-100 text-sky-800' },
   summary: { text: '요약만 확인', cls: 'bg-amber-100 text-amber-800' },
 }
 
 const LAYERS = [
-  { layer: '① 말·성격', what: '말투, 의견, 가치관', tech: 'LLM 파인튜닝, 인터뷰·메시지 기반 프롬프트', ours: '승인한 통합 요약 + 말투 블록 + 검색(RAG). 파인튜닝은 안 함' },
-  { layer: '② 기억', what: '내가 겪은 일, 지식', tech: 'RAG, 계층 기억(원본 → 구조화된 정체성 → 모델)', ours: 'KG + 핵심 기억 + 자문자답 + 통합 요약' },
-  { layer: '③ 목소리', what: '음색, 억양', tech: '제로샷 음성 복제 TTS', ours: 'XTTS 상주 워커(8768), 내 목소리 등록됨' },
-  { layer: '④ 얼굴·몸', what: '외모, 표정', tech: '3D Gaussian 헤드 아바타, 립싱크', ours: '얼굴 사진 + LivePortrait/SadTalker, MICA→Streamoji 3D Mix' },
+  { layer: '① 말·성격', what: '말투, 의견, 가치관', tech: 'LLM 파인튜닝, 인터뷰·메시지 기반 프롬프트', ours: '11명 데모는 자료 검색(RAG) + 수정 가능한 12축 가설. 개인 일치도는 아직 측정하지 않음' },
+  { layer: '② 기억', what: '겪은 일, 지식, 판단 사례', tech: 'RAG, 계층 기억(원본 → 구조화된 요약 → 모델)', ours: '인물별 원문·추정·검토 의견을 분리 저장. 시간순 생애 기억과 충돌 해결은 미완료' },
+  { layer: '③ 목소리', what: '음색, 억양', tech: '제로샷 음성 복제 TTS', ours: '11명 데모는 브라우저 일반 TTS. 인물별 음성 복제는 연결하지 않음' },
+  { layer: '④ 얼굴·몸', what: '외모, 표정', tech: '3D Gaussian 헤드 아바타, 립싱크', ours: '11명 데모는 2D 5시점 시각화. 실제 3D 리그·표정·립싱크는 미완료' },
+]
+
+const RESEARCH_CORRECTIONS = [
+  '연구 목표를 “사람의 복제”가 아니라 “남아 있는 기록과 검토된 기억 안에서 그 사람다운 답변 가능성을 제시하는 수정 가능한 페르소나”로 한정한다.',
+  '78개 항목이 채워졌다는 사실을 재현 성공으로 해석하지 않는다. 원문·전언·추정·사용자 검토를 분리해 보고한다.',
+  'MBTI는 진단이나 정답이 아니라 낮은 우선순위의 편집 가능한 가설로만 둔다. 가치·판단 기준·예외·확신도·시간 변화가 핵심 변수다.',
+  '“1차 출처 확인”은 링크와 초록 또는 본문을 확인했다는 뜻일 뿐, 결과가 재현되었거나 이 프로젝트에 그대로 적용된다는 뜻이 아니다.',
+  '“선행연구를 찾지 못했다”는 표현은 체계적 문헌고찰 전까지 신규성 증명이 아니라 제한된 검색에서의 미발견으로만 기술한다.',
+  '평가는 말투의 그럴듯함과 사실 회수, 가치·판단 일치, 보류 정확도, 장기 일관성, 지인 블라인드를 분리하고 기본 LLM과 비교한다.',
 ]
 
 const MIND: Ref[] = [
@@ -92,11 +101,11 @@ const SECOND_ME_CAVEATS = [
 ]
 
 const SECOND_ME_FIT = [
-  { who: '이미 같은 구조', text: '우리의 KG + RAG는 L0, 승인한 통합 요약은 L1(자기소개·선호 요약)과 같다. 다만 Second Me의 L1은 자동 요약이고 우리는 “내가 승인한 것만”이라는 게이트가 있다.' },
+  { who: '구조만 유사', text: 'KG + RAG는 L0, 승인한 통합 요약은 L1과 구조적으로 비슷하다. 그러나 11명 공개 인물 데모의 의견은 아직 실제 당사자 승인 데이터가 아니므로 동등한 개인 모델이라고 볼 수 없다.' },
   { who: '가져올 만함', text: '컨텍스트 비평(Context Critic) 패턴: 외부 전문가 LLM이 답을 내면 “내 노트·기준”을 아는 개인 모델이 그 답을 비평한다. 우리 판단 워크플로우의 ③ 내 기준 적용 단계를 이런 비평 단계로 만들 수 있다(내 해석).' },
   { who: '가져올 만함', text: '평가 항목을 1인칭과 제3자로 나눠 재는 것. 우리는 방문자에게도 답하므로 “남이 물었을 때”를 따로 재야 한다.' },
   { who: '지금은 이름', text: 'L2(개인 모델 학습)는 데이터가 모자란다. 그들의 시험 사용자도 노트 132개·할 일 62개였고, 우리는 노트 31개에 의미 있는 발언이 거의 없다. 학습 재료도 노트(지식)라서 가치·판단 기준이 아니라 “노트에 있는 내용”을 익힌다.' },
-  { who: '다른 목표', text: 'Second Me는 대신 결정하는 시스템이 아니라 컨텍스트 제공자다. 판단을 내 기준으로 대신 내린다는 우리 목표와는 겹치지 않고, 평가도 우리의 보류 사례 일치·재판단 천장·지인 블라인드가 더 엄격하다.' },
+  { who: '다른 목표', text: 'Second Me는 컨텍스트 제공자이고 이 프로젝트는 판단 보조까지 지향한다. 보류 사례·재검사 상한·지인 블라인드를 결합한 평가는 아직 설계이며, 더 엄격하다고 주장하려면 실제 실험이 필요하다.' },
 ]
 
 const MEMORY: Ref[] = [
@@ -161,11 +170,16 @@ export default function ResearchTrends() {
   return <div className="view-canvas h-full overflow-y-auto">
     <div className="mx-auto max-w-5xl space-y-5 px-4 py-6 pb-24 sm:px-6">
       <header>
-        <p className="dashboard-kicker">2026-10-10 기준</p>
+        <p className="dashboard-kicker">2026-10-18 기준</p>
         <h1 className="mt-1 text-2xl font-semibold text-gray-950">아바타 연구 동향</h1>
         <p className="mt-2 text-sm leading-6 text-gray-600">“나를 닮은 아바타”는 보통 말·성격, 기억, 목소리, 얼굴·몸 네 층을 따로 만들어 이어 붙입니다. 층마다 연구 흐름이 다르고, 아래에 이 프로젝트의 현재 상태를 나란히 적었습니다.</p>
-        <p className="mt-2 rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-900">출처 표시: <strong>원문 확인</strong>은 arXiv 초록이나 논문 본문을 내가 직접 확인한 것, <strong>조사 에이전트 확인</strong>은 별도 조사가 원문을 확인했다고 보고했지만 내가 재확인하지 않은 것, <strong>요약만 확인</strong>은 검색 결과나 다른 조사 글의 요약에서 가져온 것이라 인용 전에 원문을 확인해야 합니다. 수치는 모두 보고된 값입니다.</p>
+        <p className="mt-2 rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-900">출처 표시: <strong>1차 출처 확인</strong>은 arXiv 초록 또는 논문 본문에서 해당 서지와 주장을 확인한 것입니다. 초록만 확인한 연구와 본문까지 검토한 연구는 본문 메모에서 구분해야 하며, 이 표시는 재현 검증을 뜻하지 않습니다. <strong>조사 에이전트 확인</strong>과 <strong>요약만 확인</strong>은 정식 인용 전에 반드시 원문을 다시 확인해야 합니다.</p>
       </header>
+
+      <section className="view-panel border-indigo-200 bg-indigo-50/50 p-4 sm:p-5">
+        <h2 className="text-lg font-semibold">이번 감사에서 바로잡은 연구 기준</h2>
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-700">{RESEARCH_CORRECTIONS.map(item => <li key={item}>{item}</li>)}</ul>
+      </section>
 
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">한눈에 보기: 네 층과 이 프로젝트</h2>
