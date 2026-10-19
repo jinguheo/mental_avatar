@@ -265,12 +265,56 @@ Question (Korean): {question}
 Rules:
 - Reply in Korean, in first person, 2 to 4 short sentences, in the speaking style above. {lang_rule}
 - Use ONLY what the passages support. Never invent facts, numbers, dates or quotations.
+- For a general question in your field of expertise, answer like the expert: combine the relevant principles found across the passages into a clear, direct answer. Passages that are only an audience question or an off-topic aside should be ignored.
 - Show real expertise: be specific, name the actual principle or example from the passages.
-- If the passages do not actually address the question, reply with exactly: NO_RECORD
+- Reply with exactly NO_RECORD only if no passage contains anything usable for the question.
 - Do not mention passage numbers or say "the passages". Never refer to yourself by name or in the third person."""
 
 
+EXPERT_DRAFT = """Role: {name_en} - {field}. Field of expertise: {expertise}.
+
+Answer the question below as a recognized expert holding that role would, from well-established general knowledge of the field (not as a quotation of {name_en}). 3 to 5 sentences in English. State the standard criteria, principles or steps. Do not invent quotes, numbers, dates or events.
+If the question is about private or personal facts of the person (what they ate, felt, did on some day, relationships) rather than field knowledge, reply with exactly: NO_RECORD
+
+Question (Korean): {question}"""
+
+SYNTH = """You are an AI avatar built from public materials about {name_en}. Write the final reply that avatar would give.
+
+Speaking style (publicly known manner, not a quotation): {style}
+Field of expertise: {expertise}.
+
+A) General expert answer to the question (background knowledge, NOT verified as {name_en}'s own words):
+{draft}
+
+B) Passages from {name_en}'s own writings/talks or biographies (verified records):
+{passages}
+
+C) Persona knowledge record (may include estimates; never present an estimate as a quotation or fact):
+{persona_knowledge}
+
+Question (Korean): {question}
+
+How to combine:
+- Use A for the structure and completeness of the answer, and B/C for {name_en}'s own stance, emphasis, examples and wording.
+- Where B shows what {name_en} actually stresses, lead with that. Where B conflicts with A, follow B. Add nothing from A that clashes with B.
+- Never present content that only comes from A as a quotation, a specific fact, number, date or event of {name_en}'s life.
+- Reply in Korean, in first person, 3 to 5 short sentences, in the speaking style above. {lang_rule}
+- If A is "(none)" and B/C do not directly answer the question (e.g. a private personal fact), reply with exactly: NO_RECORD. Never dodge a question by talking about something else.
+- Do not mention "passages", "A/B/C" or "general answer". Never refer to yourself by name or in the third person."""
+
+
+def _expert_draft(person: str, info: dict, question: str):
+    """질문을 '그 사람의 직책·분야를 가진 전문가'의 질문으로 바꿔 일반 지식 답을 먼저 받는다(검증 전 초안)."""
+    try:
+        text = _ollama(EXPERT_DRAFT.format(name_en=info["name_en"], field=info["field"], expertise=EXPERTISE[person]["expertise"],
+                                           question=question), 280, 0.3)
+    except Exception:  # noqa: BLE001 — 초안이 없으면 자료만으로 답한다
+        return ""
+    return None if "NO_RECORD" in text.upper() else text
+
+
 def ask(person: str, question: str) -> dict:
+    """일반 전문가 답(초안)과 이 사람의 자료를 합성해 답한다. basis: records(자료 근거) / expert(자료 없이 분야 지식만) / none."""
     info = PEOPLE.get(person)
     if info is None:
         raise ValueError("알 수 없는 인물")
@@ -282,18 +326,31 @@ def ask(person: str, question: str) -> dict:
 
     index = _indexes[person]
     query = _search_query(question, info)
-    hits = _direct_hits(question, index.search(query + " " + question, k=5), info)
-    if not hits:
-        return {"state": "ready", "answer": NO_RECORD_TEXT, "sources": [], "grounded": False, "query": query}
+    draft = _expert_draft(person, info, question)
+    found = index.search(query + " " + question, k=12)
+    if draft is None:
+        # 개인 사실(어제 점심, 첫 투자 등)을 묻는 질문: 분야 지식으로 메우지 않고 '직접 답하는' 자료가 있을 때만 답한다.
+        hits = _direct_hits(question, found, info, strict=True)
+        if not hits:
+            return {"state": "ready", "answer": NO_RECORD_TEXT, "sources": [], "grounded": False, "basis": "none", "query": query}
+        draft = ""
+    else:
+        hits = _direct_hits(question, found, info)
+    if not hits and draft:
+        hits = found[:3]   # 판정이 전부 탈락해도 초안이 있으면 상위 후보를 합성 재료로 넘긴다
+    if not hits and not draft:
+        return {"state": "ready", "answer": NO_RECORD_TEXT, "sources": [], "grounded": False, "basis": "none", "query": query}
 
-    passages = "\n\n".join(f"[{i + 1}] ({h['title']}) {h['text'][:700]}" for i, (_, h) in enumerate(hits))
+    passages = "\n\n".join(f"[{i + 1}] ({h['title']}) {h['text'][:700]}" for i, (_, h) in enumerate(hits)) or "(none)"
     lang_rule = "" if info["lang"] == "en" else "Passages are Korean; paraphrase them naturally."
-    prompt = ANSWER.format(name_en=info["name_en"], style=info["style"], expertise=EXPERTISE[person]["expertise"],
-                           passages=passages, persona_knowledge=persona_knowledge.context(person)["text"], question=question, lang_rule=lang_rule)
-    text = _ollama(prompt, 320, 0.3)
-    grounded = "NO_RECORD" not in text.upper()
-    return {"state": "ready", "answer": text if grounded else NO_RECORD_TEXT, "sources": _cite(person, hits) if grounded else [],
-            "grounded": grounded, "query": query}
+    prompt = SYNTH.format(name_en=info["name_en"], style=info["style"], expertise=EXPERTISE[person]["expertise"], draft=draft or "(none)",
+                          passages=passages, persona_knowledge=persona_knowledge.context(person)["text"], question=question, lang_rule=lang_rule)
+    text = _ollama(prompt, 380, 0.3)
+    if not text or "NO_RECORD" in text.upper():
+        return {"state": "ready", "answer": NO_RECORD_TEXT, "sources": [], "grounded": False, "basis": "none", "query": query}
+    grounded = bool(hits)
+    return {"state": "ready", "answer": text, "sources": _cite(person, hits) if grounded else [], "grounded": grounded,
+            "basis": "records" if grounded else "expert", "query": query}
 
 
 RELEVANT = """Question: "{q}"
@@ -301,16 +358,24 @@ RELEVANT = """Question: "{q}"
 Passage (from a document by or about {name}):
 \"\"\"{p}\"\"\"
 
+Does this passage contain something a recognized expert on this subject could use to answer the question - a principle, example, criterion or the speaker's own stated view (not merely the same era or an unrelated mention of a keyword)? A general question may be answered by combining several passages, so a passage that supplies one part of the answer counts. Reply with exactly one word: YES or NO."""
+
+
+RELEVANT_STRICT = """Question: "{q}"
+
+Passage (from a document by or about {name}):
+\"\"\"{p}\"\"\"
+
 Does this passage contain information that DIRECTLY answers the question (not merely the same general topic or era)? Reply with exactly one word: YES or NO."""
 
 
-def _direct_hits(question: str, hits: list, info: dict, keep: int = 3) -> list:
+def _direct_hits(question: str, hits: list, info: dict, keep: int = 3, strict: bool = False) -> list:
     """검색에 걸린 문단 중 질문에 직접 답하는 것만 남긴다. 주제만 비슷한 문단을 근거로 쓰면
     그럴듯하지만 엉뚱한 답이 나오기 때문이다(실측: '신하들의 반대' 질문에 온천 청원 기사를 인용)."""
     kept = []
     for score, chunk in hits:
         try:
-            verdict = _ollama(RELEVANT.format(q=question, p=chunk["text"][:900], name=info["name_en"]), 4, 0)
+            verdict = _ollama((RELEVANT_STRICT if strict else RELEVANT).format(q=question, p=chunk["text"][:900], name=info["name_en"]), 4, 0)
         except Exception:  # noqa: BLE001 — 판정이 안 되면 그 문단은 믿지 않는다
             continue
         if verdict.upper().startswith("YES"):
