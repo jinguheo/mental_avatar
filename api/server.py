@@ -845,6 +845,54 @@ def persona_qbank_status():
     return jsonify(persona_qbank.status())
 
 
+@app.route("/persona/policy", methods=["GET"])
+def persona_policy():
+    """인물 유형별 허용 매체 정책. 클라이언트가 우회하지 않도록 API에도 명시한다."""
+    from core.persona_policy import MODES, PUBLIC_PERSON_MODES
+    return jsonify({"modes": MODES, "public_people": {
+        person: {"mode": mode, **MODES[mode]} for person, mode in PUBLIC_PERSON_MODES.items()
+    }})
+
+
+PERSONA_VISUALS_DIR = Path(__file__).resolve().parent.parent / "data" / "persona_visuals"
+VIRTUAL_PRESENTER_DIR = PERSONA_VISUALS_DIR / "virtual_presenter"
+HISTORICAL_VISUAL_LABELS = [
+    ("01.png", "정면 · 3D 입력"), ("02.png", "좌 30° · 전환 미리보기"),
+    ("03.png", "좌 90° · 3D 입력"), ("04.png", "우 30° · 전환 미리보기"),
+    ("05.png", "우 90° · 3D 입력"),
+]
+
+
+@app.route("/persona/visuals/<person>", methods=["GET"])
+def persona_visuals(person):
+    """역사 인물은 사료 기반 시안, 공개 인물은 비식별 가상 진행자만 제공한다."""
+    from core.persona_policy import HISTORICAL, public_person_policy
+    policy = public_person_policy(person)
+    historical = policy["mode"] == HISTORICAL
+    base = PERSONA_VISUALS_DIR / person if historical else VIRTUAL_PRESENTER_DIR
+    if not base.is_dir() or not (base / "preview.mp4").exists():
+        return jsonify({"ready": False, "message": "가상 진행자 시각자료를 준비 중입니다."})
+    disclaimer = ("실제 초상·사진·음성이 아닌 사료 기반 AI 역사 재현 시안입니다. 30도 프레임은 영상 전환용 보간 시각화이며 3D 입력에는 정면·90도 측면만 사용합니다."
+                  if historical else
+                  "특정 인물의 외모·음성·식별 특징과 무관한 독립 가상 진행자입니다. 대화 내용만 공개 자료 기반의 가상 AI 페르소나입니다.")
+    return jsonify({"ready": True, "generic_presenter": not historical, "disclaimer": disclaimer,
+                    "video": f"/persona/visuals/{person}/preview.mp4",
+                    "videos": [{"label": label, "url": f"/persona/visuals/{person}/{name.replace('.png', '.mp4')}"} for name, label in HISTORICAL_VISUAL_LABELS],
+                    "frames": [{"label": label, "url": f"/persona/visuals/{person}/{name}"} for name, label in HISTORICAL_VISUAL_LABELS]})
+
+
+@app.route("/persona/visuals/<person>/<filename>", methods=["GET"])
+def persona_visual_file(person, filename):
+    from core.persona_policy import HISTORICAL, public_person_policy
+    allowed = {name for name, _ in HISTORICAL_VISUAL_LABELS} | {name.replace(".png", ".mp4") for name, _ in HISTORICAL_VISUAL_LABELS} | {"preview.mp4"}
+    if filename not in allowed:
+        return jsonify({"error": "허용되지 않은 시각자료입니다."}), 404
+    path = (PERSONA_VISUALS_DIR / person if public_person_policy(person)["mode"] == HISTORICAL else VIRTUAL_PRESENTER_DIR) / filename
+    if not path.is_file():
+        return jsonify({"error": "시각자료가 없습니다."}), 404
+    return send_file(str(path), mimetype="video/mp4" if filename.endswith(".mp4") else "image/png", conditional=True)
+
+
 @app.route("/persona/qbank/run/<person>", methods=["POST"])
 def persona_qbank_run(person):
     """질문 은행으로 해당 인물의 자료에서 본인이 직접 답한 대목을 찾는다(백그라운드)"""
@@ -854,9 +902,80 @@ def persona_qbank_run(person):
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/persona/qbank/run_historical", methods=["POST"])
+def persona_qbank_run_historical():
+    """역사 인물군을 한 번에 분석하되, 로컬 모델은 한 사람씩만 사용한다."""
+    return jsonify(persona_qbank.start_historical())
+
+
+@app.route("/persona/qbank/run_all", methods=["POST"])
+def persona_qbank_run_all():
+    """수집된 전체 인물의 질문 은행을 한 대기열로 실행한다."""
+    return jsonify(persona_qbank.start_all())
+
+
+@app.route("/persona/qbank/infer_missing/<person>", methods=["POST"])
+def persona_qbank_infer_missing(person):
+    """직접 답변이 없는 질문만 수집 원문에 한정해 추정한다.
+
+    결과는 보조 파일에 저장되고, 뒤에 직접 원문 근거가 생기면 자동으로 가려진다.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(persona_qbank.start_infer_missing(person, overwrite=bool(body.get("overwrite"))))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/persona/improvement/status", methods=["GET"])
+def persona_improvement_status():
+    """자율 보강 루프의 최근 실행과 인물별 근거 보강 대기 수."""
+    return jsonify(persona_qbank.improvement_status())
+
+
+@app.route("/persona/improvement/run", methods=["POST"])
+def persona_improvement_run():
+    """새 코퍼스 자료를 재판정하고, 부족한 근거의 수집 후보를 갱신한다.
+
+    외부에서 찾은 정보는 이 API가 자동으로 사실화하지 않는다.
+    """
+    body = request.get_json(silent=True) or {}
+    return jsonify(persona_qbank.start_improvement_cycle(force=bool(body.get("force"))))
+
+
 @app.route("/persona/qbank/answers/<person>", methods=["GET"])
 def persona_qbank_answers(person):
     return jsonify({"summary": persona_qbank.summary(person), "rows": persona_qbank.load(person)})
+
+
+@app.route("/persona/qbank/materials/<person>", methods=["GET"])
+def persona_qbank_materials(person):
+    """질문 은행의 전체 수집 자료 목록. 본문은 필요할 때만 별도 조회한다."""
+    try:
+        return jsonify({"materials": persona_qbank.materials(person)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.route("/persona/qbank/materials/<person>/<doc_id>", methods=["GET"])
+def persona_qbank_material(person, doc_id):
+    """매니페스트에 등록된 수집 원문 하나를 화면에서 읽기 위해 반환한다."""
+    try:
+        return jsonify(persona_qbank.material_text(person, doc_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.route("/persona/qbank/profile/<person>", methods=["GET", "POST"])
+def persona_qbank_profile(person):
+    """공개 질문·답 근거로 만든 인물 프로필 지도. POST만 새 추정을 실행한다."""
+    try:
+        body = request.get_json(silent=True) or {}
+        return jsonify(persona_qbank.profile(person, regenerate=request.method == "POST", fallback_only=bool(body.get("fallback_only"))))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # 로컬 모델이 준비되지 않은 경우
+        return jsonify({"error": "프로필 추정 실패: " + str(exc)}), 503
 
 
 @app.route("/persona/qbank/review/<person>", methods=["POST"])
@@ -867,6 +986,20 @@ def persona_qbank_review(person):
         return jsonify(persona_qbank.review_add(person, body.get("qid", ""), body.get("key", ""), body.get("reviewer", ""), body.get("relation", ""),
                                                 body.get("verdict", ""), body.get("text", "")))
     except (ValueError, KeyError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/persona/qbank/conversation_feedback/<person>", methods=["POST"])
+def persona_qbank_conversation_feedback(person):
+    """대화 화면에서 남긴 명시적 피드백을 검토 근거로 저장하고 초기 프로필을 갱신한다."""
+    body = request.get_json(silent=True) or {}
+    try:
+        feedback = persona_qbank.conversation_feedback(person, body.get("question", ""), body.get("answer", ""),
+                                                        body.get("verdict", ""), body.get("text", ""),
+                                                        body.get("reviewer", ""), body.get("relation", ""))
+        profile = persona_qbank.profile(person, regenerate=True, fallback_only=True)
+        return jsonify({"feedback": feedback, "profile": profile})
+    except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
 

@@ -13,6 +13,8 @@ import ResearchTrends from './ResearchTrends'
 import InterviewPanel from './InterviewPanel'
 import AvatarPaper from './AvatarPaper'
 import PersonaAvatars from './PersonaAvatars'
+import PersonaStage from './PersonaStage'
+import PersonaLibrary from './PersonaLibrary'
 
 type SectionKey = 'judgment' | 'memory' | 'authority' | 'verification' | 'identity'
 type Section = { section: SectionKey; draft: string; approved: string; updated_at: string | null; approved_at: string | null }
@@ -339,11 +341,13 @@ function StatusView() {
   </div>
 }
 
-type SubTab = 'status' | 'interview' | 'persona' | 'trends' | 'paper'
+type SubTab = 'status' | 'interview' | 'persona' | 'stage' | 'library' | 'trends' | 'paper'
 const SUB_TABS: { id: SubTab; label: string }[] = [
   { id: 'status', label: '진행 현황' },
   { id: 'interview', label: '심층 인터뷰' },
   { id: 'persona', label: '유명인 아바타' },
+  { id: 'stage', label: '그대로' },
+  { id: 'library', label: '인물 지식' },
   { id: 'trends', label: '아바타 연구 동향' },
   { id: 'paper', label: '아바타논문' },
 ]
@@ -355,6 +359,6 @@ export default function InProgress() {
       {SUB_TABS.map(item => <button key={item.id} role="tab" aria-selected={sub === item.id} onClick={() => setSub(item.id)}
         className={'rounded-t-lg px-4 py-2 text-sm font-medium ' + (sub === item.id ? 'border border-b-white border-gray-200 bg-white text-gray-950' : 'text-gray-500 hover:text-gray-800')}>{item.label}</button>)}
     </div>
-    <div className="min-h-0 flex-1">{sub === 'status' ? <StatusView /> : sub === 'interview' ? <InterviewPanel /> : sub === 'persona' ? <PersonaAvatars /> : sub === 'paper' ? <AvatarPaper /> : <ResearchTrends />}</div>
+    <div className="min-h-0 flex-1">{sub === 'status' ? <StatusView /> : sub === 'interview' ? <InterviewPanel /> : sub === 'persona' ? <PersonaAvatars /> : sub === 'stage' ? <PersonaStage /> : sub === 'library' ? <PersonaLibrary /> : sub === 'paper' ? <AvatarPaper /> : <ResearchTrends />}</div>
   </div>
 }

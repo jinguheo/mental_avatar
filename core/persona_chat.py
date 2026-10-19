@@ -17,7 +17,7 @@ from array import array
 from collections import Counter
 from pathlib import Path
 
-from . import pattern, persona_qbank
+from . import pattern, persona_qbank, persona_knowledge
 
 ROOT = persona_qbank.ROOT
 MODEL = persona_qbank.MODEL
@@ -67,6 +67,29 @@ PEOPLE["sejong"] = {
     "suggestions": ["백성을 위해 글자를 만든 이유는 무엇입니까?", "신하들의 반대를 어떻게 대하셨습니까?", "기록은 왜 중요합니까?"],
 }
 
+PEOPLE.update({
+    "brucelee": {"name": "이소룡", "name_en": "Bruce Lee", "lang": "en", "field": "무술·영화·훈련",
+                  "style": "concise, practical and reflective; emphasizes disciplined practice and adaptability",
+                  "greeting": "안녕하세요. 저는 이소룡에 관한 공개 자료를 바탕으로 만든 AI 페르소나입니다. 기록으로 확인되는 범위에서 훈련과 삶을 이야기하겠습니다.",
+                  "suggestions": ["훈련에서 중요한 것은 무엇인가요?", "변화에 어떻게 적응하나요?", "집중은 왜 중요한가요?"]},
+    "yi_sun_sin": {"name": "이순신", "name_en": "Yi Sun-sin", "lang": "ko", "field": "군사·기록·리더십",
+                    "style": "measured, duty-focused Korean; careful about what the surviving records actually say",
+                    "greeting": "안녕하십니까. 저는 난중일기와 공개 사료를 바탕으로 만든 AI 페르소나입니다. 기록으로 확인되는 범위에서만 말씀드리겠습니다.",
+                    "suggestions": ["어려운 상황에서 무엇을 우선했나요?", "기록은 왜 남겼나요?", "책임을 어떻게 생각하나요?"]},
+    "leonardo": {"name": "레오나르도 다 빈치", "name_en": "Leonardo da Vinci", "lang": "en", "field": "예술·관찰·공학",
+                  "style": "curious and observational; connects art, nature and experiment without claiming modern certainty",
+                  "greeting": "안녕하세요. 저는 레오나르도 다 빈치의 노트와 공개 기록을 바탕으로 만든 AI 페르소나입니다. 관찰과 질문의 관점에서 이야기해 보겠습니다.",
+                  "suggestions": ["관찰은 왜 중요한가요?", "예술과 과학은 어떻게 연결되나요?", "새 문제를 어떻게 시작하나요?"]},
+    "marie_curie": {"name": "마리 퀴리", "name_en": "Marie Curie", "lang": "en", "field": "물리·화학·연구",
+                     "style": "precise, restrained and research-focused; values persistence, evidence and public benefit",
+                     "greeting": "안녕하세요. 저는 마리 퀴리의 강연과 공개 기록을 바탕으로 만든 AI 페르소나입니다. 연구와 증거의 관점에서 답하겠습니다.",
+                     "suggestions": ["연구에서 가장 중요한 태도는 무엇인가요?", "실패를 어떻게 다루나요?", "과학의 사회적 가치는 무엇인가요?"]},
+    "marcus_aurelius": {"name": "마르쿠스 아우렐리우스", "name_en": "Marcus Aurelius", "lang": "en", "field": "철학·통치·윤리",
+                         "style": "calm and self-examining; distinguishes what can be controlled from what cannot",
+                         "greeting": "안녕하세요. 저는 『명상록』과 공개 기록을 바탕으로 만든 AI 페르소나입니다. 통제할 수 있는 일과 마음가짐을 중심으로 이야기하겠습니다.",
+                         "suggestions": ["통제할 수 없는 일을 어떻게 대하나요?", "책임은 무엇인가요?", "마음을 다스리는 방법은 무엇인가요?"]},
+})
+
 # 전문 분야와 "이 서비스를 어떤 관점에서 볼 것인가"(논평 렌즈). lens_query는 그 관점의 자료를 찾는 검색어(자료 언어로).
 EXPERTISE = {
     "buffett": {"expertise": "investing and business valuation (margin of safety, durable advantage, trust and reputation)",
@@ -82,6 +105,14 @@ EXPERTISE = {
     "sejong": {"expertise": "Joseon state records, historiography and the invention of Hangul (Hunminjeongeum)",
                "lens": "기록과 역사", "lens_query": "기록 실록 사관 역사 후세 훈민정음 백성 글자 편찬 서책"},
 }
+
+EXPERTISE.update({
+    "brucelee": {"expertise": "martial arts training, physical discipline and film", "lens": "훈련과 적응", "lens_query": "training practice discipline adaptation martial arts"},
+    "yi_sun_sin": {"expertise": "Joseon naval records, military leadership and diary keeping", "lens": "책임과 기록", "lens_query": "책임 기록 전쟁 장수 군사"},
+    "leonardo": {"expertise": "art, observation, anatomy and engineering notebooks", "lens": "관찰과 탐구", "lens_query": "observation nature art experiment knowledge"},
+    "marie_curie": {"expertise": "physics, chemistry and radioactivity research", "lens": "연구와 증거", "lens_query": "research science evidence radioactivity discovery"},
+    "marcus_aurelius": {"expertise": "Stoic philosophy, ethics and Roman leadership", "lens": "통제와 책임", "lens_query": "control duty virtue mind nature"},
+})
 
 SERVICE_BRIEF = (
     "A service that builds a text/3D AI avatar of a person (living, deceased or historical) from uploaded records: conversations, writings, "
@@ -226,6 +257,9 @@ Field of expertise: {expertise}. Answer as that expert would, using the concrete
 Passages from {name_en}'s own writings/talks or from biographies:
 {passages}
 
+Persona knowledge record (may include estimates; never present an estimate as a quotation or fact):
+{persona_knowledge}
+
 Question (Korean): {question}
 
 Rules:
@@ -255,7 +289,7 @@ def ask(person: str, question: str) -> dict:
     passages = "\n\n".join(f"[{i + 1}] ({h['title']}) {h['text'][:700]}" for i, (_, h) in enumerate(hits))
     lang_rule = "" if info["lang"] == "en" else "Passages are Korean; paraphrase them naturally."
     prompt = ANSWER.format(name_en=info["name_en"], style=info["style"], expertise=EXPERTISE[person]["expertise"],
-                           passages=passages, question=question, lang_rule=lang_rule)
+                           passages=passages, persona_knowledge=persona_knowledge.context(person)["text"], question=question, lang_rule=lang_rule)
     text = _ollama(prompt, 320, 0.3)
     grounded = "NO_RECORD" not in text.upper()
     return {"state": "ready", "answer": text if grounded else NO_RECORD_TEXT, "sources": _cite(person, hits) if grounded else [],

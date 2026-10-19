@@ -9,6 +9,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from .persona_policy import HISTORICAL_FIVE, public_person_policy
+
 ROOT = Path(__file__).resolve().parent.parent / "data" / "persona_corpus"
 
 PEOPLE = {
@@ -17,7 +19,12 @@ PEOPLE = {
     "feynman": "파인만",
     "jobs": "스티브 잡스",
     "songhae": "송해(후보 배우·방송인, 한국어)",
+    "brucelee": "이소룡(공개 녹취 거의 없음 — 위키 자료 위주)",
     "sejong": "세종대왕(직접 평가 불가 — 기록·추정 기반, 리뷰 대기)",
+    "yi_sun_sin": "이순신",
+    "leonardo": "레오나르도 다 빈치",
+    "marie_curie": "마리 퀴리",
+    "marcus_aurelius": "마르쿠스 아우렐리우스",
 }
 HOLDOUT_FROM_YEAR = 2018      # 버핏: 이 해 이후 주주총회는 시험용. 같은 해 이후 주주서한도 구성 자료에서 뺀다
 
@@ -43,8 +50,9 @@ def corpus_status() -> dict:
         qa = ROOT / key / "qa_pairs.jsonl"
         pairs = [json.loads(l) for l in qa.read_text(encoding="utf-8").splitlines() if l.strip()] if qa.exists() else []
         out.append({"id": key, "name": name, "docs": len(rows), "chars": sum(r["chars"] for r in rows), "by_kind": by_kind,
+                    "policy": public_person_policy(key),
                     "qa_total": len(pairs), "qa_build": sum(1 for p in pairs if p["split"] == "build"), "qa_test": sum(1 for p in pairs if p["split"] == "test")})
-    return {"people": out, "root": str(ROOT)}
+    return {"people": out, "root": str(ROOT), "historical_five": list(HISTORICAL_FIVE)}
 
 
 SPEAKER = re.compile(r"^([A-Z][A-Z .'\-0-9]{2,40}):\s*(.*)$")

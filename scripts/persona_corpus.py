@@ -263,11 +263,40 @@ SOURCES = {
         ("bio", "위키문헌: 세종실록 25년(1443, 훈민정음 창제)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/25년")),
         ("bio", "위키문헌: 세종실록 28년(1446, 훈민정음 반포)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/28년")),
     ],
+    # 역사 인물군: 본인 저작·발언이 남은 경우 primary, 그 외의 사실은 bio로 구분한다.
+    # 역사 기록은 현대 인터뷰처럼 내면을 확정하지 못하므로 질문 은행의 미확인 영역은 그대로 비워 둔다.
+    "yi_sun_sin": lambda: [
+        ("bio", "위키백과: 이순신", ("wiki", "ko.wikipedia.org", "이순신")),
+        ("bio", "위키백과: 난중일기", ("wiki", "ko.wikipedia.org", "난중일기")),
+        ("primary", "위키문헌: 난중일기", ("wiki", "ko.wikisource.org", "난중일기")),
+        ("quotes", "위키인용: 이순신", ("wikiquote", "Yi Sun-sin")),
+    ],
+    "leonardo": lambda: [
+        ("bio", "Wikipedia: Leonardo da Vinci", ("wiki", "en.wikipedia.org", "Leonardo da Vinci")),
+        ("bio", "Wikipedia: Leonardo's notebooks", ("wiki", "en.wikipedia.org", "Leonardo's notebooks")),
+        ("quotes", "Wikiquote: Leonardo da Vinci", ("wikiquote", "Leonardo da Vinci")),
+        # eBook 5000 is Leonardo's notebooks. The former 49910 URL was a Dutch work by Joost van den Vondel.
+        ("primary", "Project Gutenberg: The Notebooks of Leonardo da Vinci - Complete (eBook 5000)", ("url", "https://www.gutenberg.org/cache/epub/5000/pg5000.html")),
+    ],
+    "marie_curie": lambda: [
+        ("bio", "Wikipedia: Marie Curie", ("wiki", "en.wikipedia.org", "Marie Curie")),
+        ("bio", "Wikipedia: Radioactivity", ("wiki", "en.wikipedia.org", "Radioactivity")),
+        ("quotes", "Wikiquote: Marie Curie", ("wikiquote", "Marie Curie")),
+        # The 1903 physics page says that Curie delivered no lecture; the actual lecture is Chemistry 1911.
+        ("lecture", "Nobel Prize: Marie Curie 1911 Nobel lecture - Radium and the New Concepts in Chemistry", ("url", "https://www.nobelprize.org/prizes/chemistry/1911/marie-curie/lecture/?print=1")),
+    ],
+    "marcus_aurelius": lambda: [
+        ("bio", "Wikipedia: Marcus Aurelius", ("wiki", "en.wikipedia.org", "Marcus Aurelius")),
+        ("bio", "Wikipedia: Meditations", ("wiki", "en.wikipedia.org", "Meditations")),
+        ("quotes", "Wikiquote: Marcus Aurelius", ("wikiquote", "Marcus Aurelius")),
+        ("primary", "Project Gutenberg: Meditations", ("url", "https://www.gutenberg.org/files/2680/2680-h/2680-h.htm")),
+    ],
     "brucelee": lambda: [
         ("bio", "Wikipedia: Bruce Lee", ("wiki", "en.wikipedia.org", "Bruce Lee")),
         ("bio", "Wikipedia: Jeet Kune Do", ("wiki", "en.wikipedia.org", "Jeet Kune Do")),
         ("bio", "Wikipedia: Longstreet (TV series)", ("wiki", "en.wikipedia.org", "Longstreet (TV series)")),
         ("quotes", "Wikiquote: Bruce Lee", ("wikiquote", "Bruce Lee")),
+        ("interview", "Pierre Berton Show 1971 interview transcript", ("url", "https://powerplace.org/blog/the-lost-interview-bruce-lee-on-philosophy-fame-and-being-like-water")),
     ],
 }
 
