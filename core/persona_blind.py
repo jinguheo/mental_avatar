@@ -71,6 +71,20 @@ def eligible_people() -> list:
     return out
 
 
+def covered_questions(persons: list | None = None, min_persons: int = 4) -> list:
+    """질문은행에서 확인된 답이 있는 인물이 min_persons명 이상인 질문만 고른다.
+    일반 주제 질문(NEUTRAL_QUESTIONS)은 자료에서 직접 답을 못 찾아 B1이 거의 전부 "기록 없음"이 되므로(2026-10-19 첫 세트: 48건 중 44건),
+    B1과 B0를 견줄 수 있도록 여러 인물에게 자료로 답할 수 있는 질문만 쓴다. 한 인물에게만 답할 수 있는 질문은 질문 자체가 정체를 드러내므로 뺀다."""
+    persons = persons or eligible_people()
+    covered = {}
+    for person in persons:
+        for row in persona_qbank.load(person):
+            if any(e.get("tier") in persona_qbank.REAL_TIERS for e in row.get("evidence", [])):
+                covered.setdefault(row["qid"], {"question": row["question"], "who": set()})["who"].add(person)
+    picked = [v["question"] for _, v in sorted(covered.items()) if len(v["who"]) >= min_persons]
+    return picked
+
+
 def _name_patterns(person: str) -> list:
     info = persona_chat.PEOPLE[person]
     names = {info["name"], info["name_en"]}
