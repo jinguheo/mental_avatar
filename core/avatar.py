@@ -1103,6 +1103,10 @@ def _conversation_label(node: dict) -> str | None:
 _QUESTION_END = re.compile(r"[?？]\s*$")
 _TASK_END = re.compile(r"(줘|주고|주세요|주면\s*되|해\s*둬|해\s*봐|진행해|커밋해|푸시해)[.!\s]*$")
 _criteria_cache: dict = {"at": 0.0, "rows": [], "idf": {}}
+# 문서(참고 지식) 검색 결과의 거리 상한(KURE-v1 cosine distance, 2026-10-23 실측):
+# 관련 문서 0.30~0.48(MICA 리타겟 설계 0.31, STEP 견적 0.35, 이미지 정렬 0.43),
+# 관련 문서가 없는 질문("반말은 언제 써?", "ollama 모델은…")의 1위 문서 0.51~0.61.
+DOC_MAX_DISTANCE = 0.5
 
 
 def _grams(text: str) -> set[str]:
@@ -1214,7 +1218,9 @@ def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: d
         # 문서 지식이 밀려나기 쉽다 — 소스별 쿼터로 균형을 맞춘다.
         # 자문자답(self_interview)은 "내가 실제로 믿는 것"이라 최우선으로 먼저 확보한다.
         self_hits = embeddings.search(query, n_results=2, where={"source_type": "self_interview"})
-        doc_hits  = embeddings.search(query, n_results=3, where={"source_type": {"$nin": ["conversation", "self_interview"]}})
+        # 문서는 질문과 관련된 게 없어도 쿼터를 채우면 엉뚱한 조각이 들어간다 — 거리 상한으로 거른다.
+        doc_hits  = [r for r in embeddings.search(query, n_results=3, where={"source_type": {"$nin": ["conversation", "self_interview"]}})
+                     if r["distance"] <= DOC_MAX_DISTANCE]
         conv_hits = _rank_conversation_hits(embeddings.search(query, n_results=12, where={"$and": [{"source_type": "conversation"}, {"role": "user"}]}))
         matched_ids = []
         seen_ids: set = set()

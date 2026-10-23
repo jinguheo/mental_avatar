@@ -1,29 +1,115 @@
 """임베딩 생성 + Chroma 벡터 저장"""
 import os
+import threading
 from typing import Optional
 import chromadb
-from chromadb.utils import embedding_functions
+from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 
 CHROMA_PATH = os.path.join(os.path.dirname(__file__), "..", "db", "vectors")
 _chroma_client = None
 _collection = None
 
-# ChromaDB 기본 임베딩(ONNXMiniLM)은 onnxruntime을 쓰는데, 이 환경엔 faceswap용 onnxruntime-gpu가
-# 깔려 있어 기본값이면 CUDA/TensorRT 프로바이더를 탐색하다 깨진 cudnn/nvinfer DLL을 만나 프로세스가
-# 통째로 죽는다(try/except로 못 잡는 네이티브 크래시). CPU 프로바이더만 쓰도록 강제해 회피한다.
-# name()을 'default'로 맞춰 기존 컬렉션(기본 임베딩으로 생성됨)과의 임베딩 함수 충돌도 회피한다.
-class _CPUEmbedFn(embedding_functions.ONNXMiniLM_L6_V2):
-    def name(self) -> str:
-        return "default"
+# 임베딩 모델: KURE-v1(bge-m3를 한국어 검색용으로 미세조정, 1024차원).
+# 이전 기본값 MiniLM(all-MiniLM-L6-v2)은 영어 전용이라 한국어 문장을 뜻이 아니라 문장 모양("~해?")으로 묶었다.
+# 2026-10-23 실측(내가 밝힌 기준 16개를 다른 말로 물어 대화 1,151개 중 정답 순위): MiniLM MRR 0.011
+# → KURE-v1 0.566(16개 중 14개가 5위 안). multilingual-e5-base(0.593)는 1위 적중은 비슷하지만
+# 거리가 0.12~0.21에 몰려 엔티티 병합 임계값을 잡을 수 없었다(Raspberry Pi 4 vs 5가 0.054).
+# 모델을 바꾸면 벡터 공간이 달라지므로 컬렉션 이름도 바꾸고 scripts/reindex_embeddings.py로 다시 색인한다.
+EMBED_MODEL = "nlpai-lab/KURE-v1"
+COLLECTION_NAME = "mental_avatar_kure"
+ENTITY_COLLECTION_NAME = "mental_avatar_entities_kure"
+# 실행은 ONNX(onnxruntime CPU) + tokenizers로만 한다. torch·transformers(sentence-transformers)를 서버
+# 프로세스에 올리면 faceswap의 onnxruntime-gpu와 충돌한다 — torch 먼저면 faceswap 모델 파싱이 깨지고
+# (protobuf DecodeError), faceswap 먼저면 torch 추론이 네이티브 크래시(exit 139)로 서버째 죽는다(실측).
+# onnxruntime도 기본값이면 CUDA/TensorRT 프로바이더를 탐색하다 깨진 cudnn/nvinfer DLL을 만나 죽으므로
+# CPU 프로바이더만 쓴다(예전 MiniLM 때와 같은 이유). ONNX 파일은 scripts/export_embed_onnx.py가 만든다.
+ONNX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "embed", "kure-v1"))
+# 문서는 2,000자로 잘라 넣는다. 토큰 상한을 두지 않으면 CPU에서 긴 청크 하나에 수 초가 걸린다.
+EMBED_MAX_TOKENS = 512
 
-_embed_fn = _CPUEmbedFn(preferred_providers=["CPUExecutionProvider"])
+_model = None
+_model_lock = threading.Lock()
+
+
+def _get_model():
+    """(tokenizer, onnx session). 모델 파일이 없으면 별도 프로세스로 내보내기부터 한다(수 분)."""
+    global _model
+    if _model is None:
+        with _model_lock:
+            if _model is None:
+                import onnxruntime as ort
+                from tokenizers import Tokenizer
+                if not os.path.exists(os.path.join(ONNX_DIR, "model.onnx")):
+                    import subprocess
+                    import sys
+                    print(f"[embeddings] {ONNX_DIR} 없음 — {EMBED_MODEL} ONNX 내보내기 시작", flush=True)
+                    script = os.path.join(os.path.dirname(__file__), "..", "scripts", "export_embed_onnx.py")
+                    subprocess.run([sys.executable, script], check=True)
+                tok = Tokenizer.from_file(os.path.join(ONNX_DIR, "tokenizer.json"))
+                tok.enable_truncation(EMBED_MAX_TOKENS)
+                tok.enable_padding(pad_id=tok.token_to_id("<pad>"), pad_token="<pad>")
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)
+                sess = ort.InferenceSession(os.path.join(ONNX_DIR, "model.onnx"), opts,
+                                            providers=["CPUExecutionProvider"])
+                _model = (tok, sess)
+    return _model
+
+
+def _encode(texts: list[str], batch_size: int = 16):
+    import numpy as np
+    tok, sess = _get_model()
+    out = []
+    for s in range(0, len(texts), batch_size):
+        enc = tok.encode_batch(texts[s:s + batch_size])
+        ids = np.array([e.ids for e in enc], dtype=np.int64)
+        mask = np.array([e.attention_mask for e in enc], dtype=np.int64)
+        cls = sess.run(None, {"input_ids": ids, "attention_mask": mask})[0][:, 0]   # KURE는 CLS 풀링
+        out.append(cls / np.linalg.norm(cls, axis=1, keepdims=True))
+    return np.concatenate(out) if out else np.zeros((0, 1024), dtype=np.float32)
+
+
+def _preload():
+    try:
+        _encode(["워밍업"])
+    except Exception as e:
+        print(f"[embeddings] 임베딩 모델 로드 실패: {e}", flush=True)
+
+
+class _KureEmbedFn(EmbeddingFunction[Documents]):
+    def __init__(self) -> None:
+        pass
+
+    def __call__(self, input: Documents) -> Embeddings:
+        return list(_encode(list(input)))
+
+    @staticmethod
+    def name() -> str:
+        return "kure_v1"
+
+    def get_config(self) -> dict:
+        return {"model": EMBED_MODEL}
+
+    @staticmethod
+    def build_from_config(config: dict) -> "_KureEmbedFn":
+        return _KureEmbedFn()
+
+    def default_space(self):
+        return "cosine"
+
+
+_embed_fn = _KureEmbedFn()
 _entity_collection = None
+# 첫 질문이 모델 로드를 기다리지 않도록 import 시 백그라운드에서 미리 띄운다(내보내기 스크립트는 끔).
+if not os.environ.get("MA_EMBED_NO_PRELOAD"):
+    threading.Thread(target=_preload, daemon=True, name="embed-preload").start()
 
-# 엔티티명 의미유사 매칭 임계값(cosine distance). 실측 보정: 대소문자/사소한 표기차이
-# (camera vs Camera, computer vision vs Computer Vision)는 distance~0.0, 관련되지만
-# 다른 개념(Neural Network vs Deep Learning)은 0.33 → 그 사이인 0.08로 안전하게 설정.
-# 이 모델(MiniLM, 영어중심)은 한↔영 동의어/약어(CV vs Computer Vision)는 못 잡는다.
-ENTITY_SIMILARITY_THRESHOLD = 0.08
+# 엔티티명 의미유사 매칭 임계값(cosine distance). KURE-v1 실측 보정(2026-10-23):
+# 같은 것 — camera~Camera 0.045, 얼굴인식~얼굴 인식 0.070, 얼굴 인식~face recognition 0.072,
+#   computer vision~Computer Vision 0.096, ChromaDB~Chroma DB 0.112, 지식 그래프~Knowledge Graph 0.134
+# 다른 것 — 2D~3D 0.155, 단기 기억~장기 기억 0.161, Raspberry Pi 4~5 0.192, Neural Network~Deep Learning 0.202
+# → 다른 것 중 가장 가까운 0.155 아래로 여유를 두고 0.12. 약어(CV, KG, LLM)는 0.45 이상이라 못 잡는다.
+ENTITY_SIMILARITY_THRESHOLD = 0.12
 
 
 def _get_client():
@@ -37,7 +123,7 @@ def _get_collection():
     global _collection
     if _collection is None:
         _collection = _get_client().get_or_create_collection(
-            name="mental_avatar",
+            name=COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
             embedding_function=_embed_fn,
         )
@@ -45,11 +131,11 @@ def _get_collection():
 
 
 def _get_entity_collection():
-    """엔티티명 전용 컬렉션 — 문서 청크(mental_avatar)와 분리해 엔티티끼리만 비교."""
+    """엔티티명 전용 컬렉션 — 문서 청크(COLLECTION_NAME)와 분리해 엔티티끼리만 비교."""
     global _entity_collection
     if _entity_collection is None:
         _entity_collection = _get_client().get_or_create_collection(
-            name="mental_avatar_entities",
+            name=ENTITY_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
             embedding_function=_embed_fn,
         )
@@ -85,7 +171,7 @@ def find_similar_entity(name: str, threshold: float = ENTITY_SIMILARITY_THRESHOL
 
 
 def add_document(node_id: str, title: str, content: str, metadata: dict = None):
-    """노드를 벡터 DB에 추가 (sentence-transformers 기반)"""
+    """노드를 벡터 DB에 추가 (KURE-v1 임베딩)"""
     col = _get_collection()
     text = f"{title}\n{content}"[:2000]
     try:
