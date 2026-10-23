@@ -1003,6 +1003,13 @@ def persona_qbank_conversation_feedback(person):
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/persona/qbank/adequacy", methods=["GET"])
+def persona_qbank_adequacy():
+    """인물별 질문 자료 충분성(개수·영역 폭·인용문/단일 자료 의존)과 11명 누구도 답하지 못한 질문"""
+    from core import persona_adequacy
+    return jsonify(persona_adequacy.adequacy_all())
+
+
 @app.route("/persona/blind/sets", methods=["GET"])
 def persona_blind_sets():
     """이름을 가린 인물 식별 평가(논문 12절 E1): 평가 세트 목록"""

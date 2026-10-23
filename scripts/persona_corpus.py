@@ -251,6 +251,13 @@ SOURCES = {
         ("interview", "송해 기사 (노컷뉴스 5769015)", "https://nocutnews.co.kr/news/5769015"),
         ("interview", "송해 기사 (전북일보 2011)", "https://jjan.kr/article/20110704402334"),
         ("interview", "송해 기사 (서울시 미디어허브)", "https://mediahub.seoul.go.kr/archives/2006590"),
+        # 2026-10-23 보강(확인된 답 10개뿐): 인터뷰·발언이 직접 담긴 기사들. 2007 RFA 인터뷰는 고향·가족·음악 입문 회상.
+        ("interview", "송해: 고향 황해도 재령서, 밥 한 그릇, 국 한 그릇 나누고파 (RFA 2007)", "https://www.rfa.org/korean/daily/seoul_plaza/songhae_interview-20070904.html"),
+        ("interview", "송해 건강 지키는 것 어려운 일 (머니투데이 2021)", "https://news.mt.co.kr/mtview.php?no=2021050719438289496"),
+        ("interview", "힐링캠프 88세 송해 장수 비결 BMW와 목욕 (엑스포츠뉴스)", "https://www.xportsnews.com/article/496557"),
+        ("interview", "송해의 건강비결은 BMW (코메디닷컴)", "https://kormedi.com/1209389/"),
+        ("interview", "인생 마지막 꿈은 고향 황해 재령서 노래자랑 (한국일보 2015)", "https://www.hankookilbo.com/news/article/201504301664693815"),
+        ("interview", "나는 딴따라다 송해 고향 땅 못 밟고 잠들다 (이모작뉴스)", "http://www.emozak.co.kr/news/articleView.html?idxno=5309"),
     ]],
     # 세종: 훈민정음은 직접 저술(primary), 실록은 동시대 관찬 기록(record)으로 분리한다.
     # 관찬 기록은 가치관의 확정 근거가 아니라 '그 기록이 전하는 정책·발언'의 근거이며, 본인 저술과 같은 층위로 취급하지 않는다.
