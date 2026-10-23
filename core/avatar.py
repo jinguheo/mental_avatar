@@ -217,13 +217,16 @@ def _memory_age_days(value: str | None) -> int:
 
 def _refresh_memory_lifecycle(conn) -> dict:
     """비고정 기억만 사용 시점에 따라 강등한다. 원문은 절대 삭제하지 않는다."""
-    rows = conn.execute("""SELECT id, memory_state, last_used_at, created_at
+    rows = conn.execute("""SELECT id, memory_state, last_used_at, last_reviewed_at, created_at
                            FROM core_memory WHERE COALESCE(is_pinned, 1)=0""").fetchall()
     changed = 0
+    rank = {"active": 0, "summary": 1, "archive": 2}
     for row in rows:
-        age = _memory_age_days(row["last_used_at"] or row["created_at"])
+        latest = max(filter(None, (row["last_used_at"], row["last_reviewed_at"], row["created_at"])))
+        age = _memory_age_days(latest)
         target = "archive" if age >= _MEMORY_ARCHIVE_DAYS else "summary" if age >= _MEMORY_ACTIVE_DAYS else "active"
-        if row["memory_state"] != target:
+        # 강등만 한다 — 사용자가 직접 내린 상태(요약·보관)를 자동 갱신이 되돌리지 않도록.
+        if rank.get(target, 0) > rank.get(row["memory_state"], 0):
             conn.execute("UPDATE core_memory SET memory_state=? WHERE id=?", (target, row["id"]))
             changed += 1
     return {"checked": len(rows), "changed": changed}
@@ -301,6 +304,7 @@ def update_memory(mid: str, data: dict) -> dict:
         if state not in MEMORY_STATES:
             raise ValueError("invalid memory_state")
         fields.append("memory_state=?"); values.append(state)
+        fields.append("last_reviewed_at=datetime('now','localtime')")
     if "review_after" in data:
         review_after = str(data["review_after"] or "").strip()
         fields.append("review_after=?"); values.append(review_after or None)
