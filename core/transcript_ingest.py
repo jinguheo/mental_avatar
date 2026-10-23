@@ -339,7 +339,9 @@ def _llm_label(text: str) -> str | None:
 
 def decide_keep(label: str, text: str) -> tuple[str, bool]:
     """모델 판정 + 키워드 표지로 최종 라벨과 KG 저장 여부. 선호 표지가 뚜렷하면 모델이 놓쳐도 남긴다."""
-    strong = bool(STANCE.search(text)) and len(text) >= 14 and not COMMAND_END.search(text)
+    # 물음표로 끝나는 문장은 "해야해?"처럼 선호 표지가 있어도 질문이다(실측: "ollama 로 꼭 해야해?"가 기준으로 올라감)
+    strong = (bool(STANCE.search(text)) and len(text) >= 14 and not COMMAND_END.search(text)
+              and not re.search(r"[?？]\s*$", text))
     if label in KEEP_LABELS:
         return label, True
     if strong and label in ("질문", "반응", "잡담", "지시"):
@@ -370,7 +372,7 @@ def label_pending(limit: int = LABEL_BATCH) -> dict:
         logged = 0
         if keep and not dup:
             try:
-                reason = avatar.log_conversation(r["view"], "user", r["text"], created_at=r["created_at"])
+                reason = avatar.log_conversation(r["view"], "user", r["text"], created_at=r["created_at"], label=label)
                 logged = 0 if reason else 1
             except Exception:  # noqa: BLE001
                 res["errors"] += 1
@@ -394,11 +396,31 @@ def promote(key: str) -> dict:
         conn.close()
         raise ValueError("메시지를 찾을 수 없습니다")
     if not row["logged"]:
-        avatar.log_conversation(row["view"], "user", row["text"], created_at=row["created_at"])
+        avatar.log_conversation(row["view"], "user", row["text"], created_at=row["created_at"], label="기준(직접)")
     conn.execute("UPDATE transcript_ingested SET kept=1, logged=1, label='기준(직접)' WHERE key=?", (key,))
     conn.commit()
     conn.close()
+    sync_conversation_labels()
     return {"promoted": key}
+
+
+def sync_conversation_labels() -> int:
+    """KG에 넣은 메시지의 종류를 대화 행(conversations.label)에 맞춘다. 라벨을 쓰기 전 저장된 행과 직접 승격한 행을 채운다.
+    같은 화면·같은 시각·같은 글로 짝을 짓는다(가져온 기록은 원래 시각으로 저장되므로 짝이 하나로 정해진다)."""
+    from . import memory_filter
+    conn = get_conn()
+    _init(conn)
+    memory_filter.ensure_schema(conn)
+    cur = conn.execute(
+        "UPDATE conversations SET label=(SELECT t.label FROM transcript_ingested t WHERE t.logged=1 AND t.view=conversations.view "
+        "AND t.created_at=conversations.created_at AND trim(t.text)=conversations.content LIMIT 1) "
+        "WHERE role='user' AND EXISTS (SELECT 1 FROM transcript_ingested t WHERE t.logged=1 AND t.view=conversations.view "
+        "AND t.created_at=conversations.created_at AND trim(t.text)=conversations.content "
+        "AND COALESCE(t.label,'')<>COALESCE(conversations.label,''))")
+    conn.commit()
+    changed = cur.rowcount
+    conn.close()
+    return changed
 
 
 def excluded(limit: int = 80, label: str = "", saved: bool = False) -> list[dict]:
@@ -466,6 +488,7 @@ def run_once(backfill: bool = True, label_limit: int = LABEL_BATCH) -> dict:
         coll = collect(backfill)
         _status["phase"] = "분류·저장"
         lab = label_pending(label_limit)
+        lab["labels_synced"] = sync_conversation_labels()
         result = {"backup": backup, "collect": coll, "label": lab}
         _status.update(last_run=time.strftime("%Y-%m-%d %H:%M:%S"), last_error=None, last_result=result)
         return result

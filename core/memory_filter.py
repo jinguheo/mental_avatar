@@ -87,6 +87,9 @@ def ensure_schema(conn) -> None:
         conn.execute("ALTER TABLE conversations ADD COLUMN quarantine_reason TEXT")
     if "quarantined_at" not in cols:
         conn.execute("ALTER TABLE conversations ADD COLUMN quarantined_at TEXT")
+    # 대화 기록 가져오기에서 붙인 종류(기준·결정·목표·사실) — 검색할 때 "내 기준"과 일반 대화를 구분한다
+    if "label" not in cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN label TEXT")
     conn.commit()
 
 

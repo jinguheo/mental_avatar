@@ -1300,10 +1300,22 @@ def memory_add():
         return jsonify({"error": "content required"}), 400
     try:
         mid = avatar_core.add_memory(content, is_pinned=bool(data.get("is_pinned", True)),
-                                    summary=data.get("summary", ""), review_after=data.get("review_after"))
+                                    summary=data.get("summary", ""), review_after=data.get("review_after"),
+                                    source_kind=data.get("source_kind") or "direct_input",
+                                    source_ref=data.get("source_ref") or "사용자 직접 입력",
+                                    observed_at=data.get("observed_at"))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"id": mid})
+
+
+@app.route("/memory/candidates/dismiss", methods=["POST"])
+def memory_candidate_dismiss():
+    """상시 기억 후보에서 뺀다(다시 제안하지 않음). 원문 기록과 KG는 그대로 둔다."""
+    try:
+        return jsonify(autodraft.dismiss_memory_candidate((request.get_json(silent=True) or {}).get("text", "")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/memory/<mid>", methods=["PUT"])

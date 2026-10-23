@@ -143,27 +143,87 @@ DIRECTIVE = re.compile(r"(해\s*줘|해주세요|보여\s*줘|알려\s*줘|기�
 SELF_REFERENCE = re.compile(r"(?<![가-힣])(나는|내가|나의|내\s*(?:일|회사|프로젝트|기준|원칙|선호|경험|전문|목표)|우리\s*(?:회사|팀))")
 
 
-def memory_candidates(limit: int = 6) -> dict:
-    """핵심 기억 후보: 사용자가 3-2에서 직접 승격한 진술만 제안한다."""
+# 상시 기억 후보의 "오래 갈 진술" 표지와 "그때만의 작업" 표지. 점수로만 쓰고 최종 판단은 사용자가 한다.
+DURABLE = re.compile(r"(항상|늘\s|절대|반드시|원칙|기본적으로|선호|방향이\s*좋|좋겠|싫어|좋아해|하지\s*않아|안\s*써|사용하지|사용해\s*[.!]?$|"
+                     r"우선|중요해|가치|신념|철학|습관|성격)")
+TRANSIENT = re.compile(r"(이번|오늘|지금|현재|다음에|내일|방금|탭|버튼|화면|커밋|푸시|평가|진행|작업|세션|창에서|파일|폴더|코드|서버)")
+PROBLEM = re.compile(r"(갑자기|에러|오류|안\s*돼|안\s*되|안\s*나와|깨져|멈춰|느려|이상해|틀렸)")
+QUESTION_END = re.compile(r"[?？]\s*$")
+TASK_END = re.compile(r"(줘|주고|주세요|주면\s*되|해\s*둬|해\s*봐|진행해|커밋해|푸시해)[.!\s]*$")
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _dismissed(conn) -> set[str]:
+    conn.execute("CREATE TABLE IF NOT EXISTS memory_candidate_dismissed (text TEXT PRIMARY KEY, "
+                 "dismissed_at TEXT NOT NULL DEFAULT (datetime('now','localtime')))")
+    return {r[0] for r in conn.execute("SELECT text FROM memory_candidate_dismissed")}
+
+
+def dismiss_memory_candidate(text: str) -> dict:
+    """후보에서 뺀 진술은 다시 제안하지 않는다(원문 기록과 KG에는 그대로 남는다)."""
+    norm = _norm(text)
+    if not norm:
+        raise ValueError("text required")
     conn = get_conn()
-    have = {re.sub(r"\s+", " ", (r[0] or "").strip()) for r in conn.execute("SELECT content FROM core_memory")} if _has(conn, "core_memory") else set()
-    rows = [dict(r) for r in conn.execute(
-        "SELECT created_at, text, label, source, project FROM transcript_ingested WHERE label='기준(직접)' "
-        "AND length(text) BETWEEN 15 AND 300 ORDER BY created_at DESC LIMIT 200")]
+    _dismissed(conn)
+    conn.execute("INSERT OR IGNORE INTO memory_candidate_dismissed (text) VALUES (?)", (norm,))
+    conn.commit()
     conn.close()
-    items, seen = [], set()
+    return {"dismissed": norm}
+
+
+def _durability(text: str, label: str) -> tuple[int, list[str]]:
+    score, why = 0, []
+    if label == "기준(직접)":
+        score += 3; why.append("직접 고른 기준")
+    elif label == "기준":
+        score += 1
+    if DURABLE.search(text):
+        score += 2; why.append("오래 갈 표현")
+    if SELF_REFERENCE.search(text):
+        score += 1; why.append("나에 대한 진술")
+    if PROBLEM.search(text):
+        score -= 3; why.append("문제 보고")
+    transient = len(set(TRANSIENT.findall(text)))
+    if transient:
+        score -= min(transient, 2) * 2; why.append("작업·시점 표현 있음")
+    return score, why
+
+
+def memory_candidates(limit: int = 8) -> dict:
+    """상시 기억 후보: 대화 기록에서 기준·사실로 분류된 내 진술 중 오래 갈 것을 고른다.
+    이미 저장했거나 후보에서 뺀 진술, 물음표로 끝나는 질문, 작업 요청은 제외한다. 저장은 사용자가 고른 것만 한다."""
+    conn = get_conn()
+    ti._init(conn)
+    have = {_norm(r[0]) for r in conn.execute("SELECT content FROM core_memory")} if _has(conn, "core_memory") else set()
+    dismissed = _dismissed(conn)
+    conn.commit()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT key, created_at, text, label, source, project FROM transcript_ingested "
+        "WHERE kept=1 AND label IN ('기준(직접)','기준','사실') AND length(text) BETWEEN 12 AND 300 "
+        "ORDER BY created_at DESC LIMIT 2000")]
+    conn.close()
+    scored, seen = [], set()
     for r in rows:
-        norm = re.sub(r"\s+", " ", r["text"].strip())
-        if norm in have or norm in seen or QUESTIONISH.search(norm) or DIRECTIVE.search(norm):
+        norm = _norm(r["text"])
+        if norm in have or norm in dismissed or norm in seen:
             continue
-        if not SELF_REFERENCE.search(norm):
+        if QUESTION_END.search(norm) or TASK_END.search(norm) or DIRECTIVE.search(norm):
+            continue
+        score, why = _durability(norm, r["label"])
+        if score < 2:
             continue
         seen.add(norm)
-        items.append({"text": r["text"], "date": (r["created_at"] or "")[:10], "source": r["source"], "label": r["label"], "project": r["project"]})
-        if len(items) >= limit:
-            break
-    msg = "3-2에서 직접 승격한 진술입니다. 지금도 유효한지 확인한 뒤 저장하세요." if items else "3-2에서 직접 승격한 핵심 기억 후보가 없습니다."
-    return {"candidates": items, "message": msg}
+        scored.append((score, r["created_at"] or "", {"text": norm, "key": r["key"], "date": (r["created_at"] or "")[:10], "source": r["source"],
+                                                      "label": r["label"], "project": r["project"], "why": why}))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    items = [x[2] for x in scored[:limit]]
+    msg = (f"대화 기록에서 오래 갈 만한 내 진술 {len(scored)}개 중 상위 {len(items)}개입니다. 지금도 맞는지 확인하고 저장하거나 빼세요."
+           if items else "상시 기억으로 올릴 만한 후보가 없습니다.")
+    return {"candidates": items, "message": msg, "total": len(scored)}
 
 
 def case_candidates(limit: int = 5) -> dict:

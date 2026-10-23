@@ -309,7 +309,7 @@ function StatusView() {
           <input value={newMemory} onChange={event => setNewMemory(event.target.value)} placeholder="예: 내가 가장 중요하게 여기는 원칙은…" className="min-w-0 flex-1 rounded-lg border border-gray-300 p-2 text-sm" />
           <button onClick={addMemory} disabled={!!busy || !newMemory.trim()} className="rounded-lg bg-gray-950 px-4 py-2 text-sm text-white disabled:opacity-50">핵심 기억 저장</button>
         </div>
-        <AutoDraft kind="memory" onPick={text => setNewMemory(text)} />
+        <AutoDraft kind="memory" onPick={text => setNewMemory(text)} onSaved={() => { void api('/memory').then(data => setMemoryCount((data.items || []).length)) }} />
       </section>
       <section className="view-panel p-4 sm:p-5">
         <h2 className="text-lg font-semibold">5. 나와 비교해서 검증</h2>

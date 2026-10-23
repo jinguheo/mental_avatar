@@ -239,7 +239,9 @@ def _memory_row(row) -> dict:
     return item
 
 
-def add_memory(content: str, *, is_pinned: bool = True, summary: str = "", review_after: str | None = None) -> str:
+def add_memory(content: str, *, is_pinned: bool = True, summary: str = "", review_after: str | None = None,
+               source_kind: str = "direct_input", source_ref: str = "사용자 직접 입력", observed_at: str | None = None) -> str:
+    """source_kind/source_ref/observed_at: 대화 기록에서 승격한 기억이면 그 출처와 원래 말한 시각을 남긴다."""
     import uuid as _uuid
     content = (content or "").strip()
     if not content:
@@ -253,11 +255,11 @@ def add_memory(content: str, *, is_pinned: bool = True, summary: str = "", revie
     conn = get_conn()
     conn.execute(
         """INSERT INTO core_memory
-        (id, content, summary, is_pinned, memory_state, source_kind, source_ref, confidence,
+        (id, content, summary, is_pinned, memory_state, source_kind, source_ref, observed_at, confidence,
          approval_status, conflict_status, review_after, last_reviewed_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
-        (mid, content, summary, int(bool(is_pinned)), "active", "direct_input", "사용자 직접 입력", 1.0,
-         "approved", "unchecked", review_after or None),
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+        (mid, content, summary, int(bool(is_pinned)), "active", source_kind or "direct_input", (source_ref or "사용자 직접 입력")[:300],
+         observed_at or None, 1.0, "approved", "unchecked", review_after or None),
     )
     conn.commit()
     conn.close()
@@ -444,10 +446,11 @@ def list_synced(source: str = "", limit: int = 50) -> list:
 _last_conv_node: dict[str, str] = {}
 
 
-def log_conversation(view: str, role: str, content: str, created_at: str | None = None) -> str | None:
+def log_conversation(view: str, role: str, content: str, created_at: str | None = None, label: str | None = None) -> str | None:
     """채팅 turn 저장 (행동/말투 학습의 원재료) + 지식 그래프 노드/엣지/임베딩으로도 연결.
     이렇게 하면 /search, /avatar/context의 시멘틱 검색에서 과거 대화도 결과로 나온다.
-    created_at을 주면(과거 기록 가져오기) 그 시각으로 저장하고, 오염 필터에 걸려 격리했다면 그 사유를 돌려준다."""
+    created_at을 주면(과거 기록 가져오기) 그 시각으로 저장하고, 오염 필터에 걸려 격리했다면 그 사유를 돌려준다.
+    label은 대화 기록 가져오기의 종류 판정(기준·결정·목표·사실)이며 검색 순위와 표시에 쓴다."""
     if not content or not content.strip():
         return None
     import uuid
@@ -459,9 +462,9 @@ def log_conversation(view: str, role: str, content: str, created_at: str | None 
     # 정상 발언은 그대로 자동 저장된다.
     reason = memory_filter.classify_for_write(conn, view, content) if role == "user" else None
     conn.execute(
-        "INSERT INTO conversations (id, view, role, content, created_at, quarantine_reason, quarantined_at) "
-        "VALUES (?,?,?,?, COALESCE(?, datetime('now','localtime')), ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now','localtime') END)",
-        (conv_id, view, role, content, created_at, reason, reason)
+        "INSERT INTO conversations (id, view, role, content, created_at, quarantine_reason, quarantined_at, label) "
+        "VALUES (?,?,?,?, COALESCE(?, datetime('now','localtime')), ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now','localtime') END, ?)",
+        (conv_id, view, role, content, created_at, reason, reason, label)
     )
     conn.commit()
     conn.close()
@@ -1072,18 +1075,123 @@ LENGTH_RULES = {
 }
 
 
+# 대화 기록 가져오기의 종류별 표시 이름과 검색 가산점(거리에서 뺀다). 기준·결정은 "내가 밝힌 것"이라 일반 대화보다 앞에 둔다.
+# 목표·사실은 시간이 지나면 바뀔 수 있어 가산점을 작게 두고 날짜와 함께 보인다.
+CONVERSATION_KIND = {
+    "기준(직접)": ("내가 직접 고른 기준", 0.08),
+    "기준": ("내가 밝힌 기준", 0.05),
+    "결정": ("내가 내린 결정", 0.05),
+    "목표": ("내 목표(당시)", 0.03),
+    "사실": ("내가 말한 사실", 0.03),
+}
+
+
+def _conversation_label(node: dict) -> str | None:
+    """대화 노드(conversation://<view>/<대화 id>)에 붙은 종류를 대화 행에서 읽는다."""
+    path = node.get("file_path") or ""
+    if not path.startswith("conversation://"):
+        return None
+    conn = get_conn()
+    try:
+        memory_filter.ensure_schema(conn)
+        row = conn.execute("SELECT label FROM conversations WHERE id=?", (path.rsplit("/", 1)[-1],)).fetchone()
+    finally:
+        conn.close()
+    return row["label"] if row else None
+
+
+_QUESTION_END = re.compile(r"[?？]\s*$")
+_TASK_END = re.compile(r"(줘|주고|주세요|주면\s*되|해\s*둬|해\s*봐|진행해|커밋해|푸시해)[.!\s]*$")
+_criteria_cache: dict = {"at": 0.0, "rows": [], "idf": {}}
+
+
+def _grams(text: str) -> set[str]:
+    """낱말 안의 2글자 조각. 띄어쓰기를 넘는 조각("기억은 어떻게"→"은어")은 뜻이 없어 만들지 않는다."""
+    out = set()
+    for w in re.findall(r"[\w가-힣]+", (text or "").lower()):
+        out.update(w[i:i + 2] for i in range(len(w) - 1))
+    return out
+
+
+def _criteria_rows() -> tuple[list[dict], dict]:
+    """라벨이 붙은 내 진술(기준·결정)과 2-gram 희소도(IDF). 1분 캐시."""
+    import math
+    import time as _time
+    if _time.time() - _criteria_cache["at"] < 60 and _criteria_cache["rows"]:
+        return _criteria_cache["rows"], _criteria_cache["idf"]
+    conn = get_conn()
+    try:
+        memory_filter.ensure_schema(conn)
+        raw = conn.execute("SELECT id, content, label, created_at FROM conversations WHERE role='user' "
+                           "AND quarantine_reason IS NULL AND label IN ('기준(직접)','기준','결정') "
+                           "AND length(content) BETWEEN 10 AND 400").fetchall()
+    finally:
+        conn.close()
+    rows, df = [], {}
+    for r in raw:
+        text = r["content"].strip()
+        if _QUESTION_END.search(text) or _TASK_END.search(text):
+            continue   # 물음표로 끝나는 질문·작업 지시는 기준이 아니다
+        g = _grams(text)
+        rows.append({**dict(r), "grams": g})
+        for x in g:
+            df[x] = df.get(x, 0) + 1
+    n = max(len(rows), 1)
+    idf = {x: math.log((n + 1) / (c + 0.5)) for x, c in df.items()}
+    _criteria_cache.update(at=_time.time(), rows=rows, idf=idf)
+    return rows, idf
+
+
+def _stated_criteria(query: str, limit: int = 3) -> list[dict]:
+    """질문과 겹치는 내가 밝힌 기준·결정을 희소도(IDF) 가중 2-gram 겹침으로 찾는다.
+    벡터 검색 모델(MiniLM)은 영어 중심이라 한국어 문장을 뜻이 아니라 문장 모양("~해?")으로 묶는다 — 실측.
+    그래서 라벨이 붙은 내 진술은 임베딩과 별도로 직접 찾는다. "해야해"·"어떻게" 같은 흔한 조각은 희소도가 낮아 거의 반영되지 않는다."""
+    q = _grams(query)
+    if len(q) < 2:
+        return []
+    rows, idf = _criteria_rows()
+    top = max(idf.values(), default=1.0)
+    q_weight = sum(idf.get(x, top) for x in q)
+    scored = []
+    for r in rows:
+        shared = q & r["grams"]
+        if len(shared) < 2:
+            continue
+        coverage = sum(idf.get(x, top) for x in shared) / q_weight
+        if coverage < 0.3:
+            continue
+        score = coverage + CONVERSATION_KIND.get(r["label"], ("", 0))[1]
+        scored.append((score, r["created_at"] or "", r))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    out, seen = [], set()
+    for _, _, r in scored:
+        norm = re.sub(r"\s+", " ", r["content"].strip())
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _rank_conversation_hits(hits: list[dict], limit: int = 3) -> list[dict]:
-    """Balance semantic similarity with when a user statement was last corrected."""
+    """의미 유사도에 최신성과 종류(기준·결정 우선)를 더해 순위를 매긴다. 각 결과에 node·label을 붙여 돌려준다."""
     now = datetime.now()
     def score(hit: dict) -> float:
-        node = graph.get_node(hit["id"]) or {}
+        node = hit["node"]
         stamp = node.get("updated_at") or node.get("created_at") or ""
         try:
             age_days = max(0, (now - datetime.fromisoformat(stamp)).days)
         except (ValueError, TypeError):
             age_days = 365
-        return float(hit.get("distance", 1)) + min(age_days / 365, 3) * 0.04
-    return sorted(hits, key=score)[:limit]
+        bonus = CONVERSATION_KIND.get(hit["label"] or "", ("", 0.0))[1]
+        return float(hit.get("distance", 1)) + min(age_days / 365, 3) * 0.04 - bonus
+    enriched = []
+    for hit in hits:
+        node = graph.get_node(hit["id"]) or {}
+        enriched.append({**hit, "node": node, "label": _conversation_label(node)})
+    return sorted(enriched, key=score)[:limit]
 
 
 def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: dict | None = None) -> dict:
@@ -1097,6 +1205,7 @@ def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: d
 
     # 쿼리 관련 KG 검색
     self_relevant: list[str] = []   # 자문자답(암묵지) — 1인칭·최우선 신뢰, 별도 섹션
+    stated: list[str] = []          # 대화 기록에서 내가 밝힌 기준·결정 — 별도 섹션
     relevant = []
     graph_facts: list[str] = []
     community_labels = ""
@@ -1106,7 +1215,7 @@ def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: d
         # 자문자답(self_interview)은 "내가 실제로 믿는 것"이라 최우선으로 먼저 확보한다.
         self_hits = embeddings.search(query, n_results=2, where={"source_type": "self_interview"})
         doc_hits  = embeddings.search(query, n_results=3, where={"source_type": {"$nin": ["conversation", "self_interview"]}})
-        conv_hits = _rank_conversation_hits(embeddings.search(query, n_results=8, where={"$and": [{"source_type": "conversation"}, {"role": "user"}]}))
+        conv_hits = _rank_conversation_hits(embeddings.search(query, n_results=12, where={"$and": [{"source_type": "conversation"}, {"role": "user"}]}))
         matched_ids = []
         seen_ids: set = set()
         # ① 자문자답 먼저 (최대 2, 별도 섹션)
@@ -1118,15 +1227,28 @@ def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: d
             if node and node.get("content"):
                 self_relevant.append(f"- {node['content'][:250]}")
                 matched_ids.append(r["id"])
-        # ② 나머지는 문서+대화로 채움 (자문자답 포함 총 5)
+        # ② 내가 밝힌 기준·결정(라벨이 붙은 내 진술) — 임베딩과 별도로 글자 겹침으로 찾는다(최대 3, 별도 섹션)
+        stated_texts: set[str] = set()
+        for r in _stated_criteria(query):
+            stated_texts.add(r["content"].strip())
+            kind = CONVERSATION_KIND.get(r["label"], ("내가 밝힌 기준", 0))[0]
+            stated.append(f"- [{kind} {(r['created_at'] or '')[:10]}] {r['content'][:240]}")
+        # ③ 나머지는 문서+대화로 채움 (자문자답 포함 총 5)
         budget = 5 - len(self_relevant)
         for r in doc_hits + conv_hits:
             if r["id"] in seen_ids or len(relevant) >= budget:
                 continue
             seen_ids.add(r["id"])
-            node = graph.get_node(r["id"])
+            node = r.get("node") or graph.get_node(r["id"])
             if node and node.get("content"):
-                kind = "내 과거 대화 사례" if node.get("source_type") == "conversation" else "참고 지식"
+                if node["content"].strip() in stated_texts:
+                    continue
+                if node.get("source_type") == "conversation":
+                    text = node["content"].strip()
+                    label = None if _QUESTION_END.search(text) or _TASK_END.search(text) else r.get("label")
+                    kind = CONVERSATION_KIND.get(label or "", ("내 과거 대화 사례", 0))[0]
+                else:
+                    kind = "참고 지식"
                 when = (node.get("updated_at") or node.get("created_at") or "")[:10]
                 relevant.append(f"- [{kind} {when}] {node['content'][:240]}")
                 matched_ids.append(r["id"])
@@ -1211,8 +1333,14 @@ def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: d
             "내가 실제로 믿는 것이니, 관련 질문엔 이 생각을 우선해서 내 목소리로 답하세요.\n"
             + "\n".join(self_relevant)
         )
+    if stated:
+        system += ("\n\n## 내가 대화에서 밝힌 기준·결정 (질문과 관련)\n"
+                   "아래는 내가 직접 한 말입니다. 관련된 질문이면 이 기준을 따르되, 날짜가 오래됐거나 지금 상황과 다르면 그 차이를 밝히세요.\n"
+                   + "\n".join(stated))
     if relevant:
-        system += "\n\n## 질문과 관련된 내 지식 (참고 자료)\n" + "\n".join(relevant)
+        system += ("\n\n## 질문과 관련된 내 지식 (참고 자료)\n"
+                   "“내가 밝힌 기준”·“내가 내린 결정”은 내가 직접 한 말이니 일반 대화 사례보다 우선하세요. "
+                   "“목표(당시)”·“내가 말한 사실”은 날짜를 보고 지금도 맞는지 판단하세요.\n" + "\n".join(relevant))
     if graph_facts:
         system += (
             "\n\n## 관련 개념 간 연결 (지식그래프, 답변에 자연스럽게 참고)\n"
