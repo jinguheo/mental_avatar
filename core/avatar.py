@@ -199,23 +199,62 @@ def update_profile(updates: dict) -> dict:
     return get_profile()
 
 
-# ── 핵심 기억(core memory) ──────────────────────────────
-# PROFILE_KEYS처럼 정해진 필드가 아니라, 사용자가 그때그때 "꼭 기억해야 할 것"이라고
-# 알려주는 자유형식 사실 목록. 개수가 적어(수십 개 이내) 벡터검색 없이 매 프롬프트에
-# 그대로 전부 주입 — KG 전체를 뒤지는 embeddings.search()보다 항상 빠르고 확실하다.
+# ── 기억 수명 주기(core memory) ──────────────────────────
+# 고정(pinned) 기억은 항상 유지한다. 나머지는 원문을 지우지 않고 활성→요약→보관으로
+# 내려간다. 보관 기억은 프롬프트에서는 제외되지만 관리 화면에서 언제든 되살릴 수 있다.
 
-def add_memory(content: str) -> str:
+MEMORY_STATES = {"active", "summary", "archive"}
+_MEMORY_ACTIVE_DAYS = 90
+_MEMORY_ARCHIVE_DAYS = 365
+
+
+def _memory_age_days(value: str | None) -> int:
+    try:
+        return max(0, (datetime.now() - datetime.fromisoformat((value or "").replace("Z", "+00:00")).replace(tzinfo=None)).days)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _refresh_memory_lifecycle(conn) -> dict:
+    """비고정 기억만 사용 시점에 따라 강등한다. 원문은 절대 삭제하지 않는다."""
+    rows = conn.execute("""SELECT id, memory_state, last_used_at, created_at
+                           FROM core_memory WHERE COALESCE(is_pinned, 1)=0""").fetchall()
+    changed = 0
+    for row in rows:
+        age = _memory_age_days(row["last_used_at"] or row["created_at"])
+        target = "archive" if age >= _MEMORY_ARCHIVE_DAYS else "summary" if age >= _MEMORY_ACTIVE_DAYS else "active"
+        if row["memory_state"] != target:
+            conn.execute("UPDATE core_memory SET memory_state=? WHERE id=?", (target, row["id"]))
+            changed += 1
+    return {"checked": len(rows), "changed": changed}
+
+
+def _memory_row(row) -> dict:
+    item = dict(row)
+    item["is_pinned"] = bool(item.get("is_pinned", 1))
+    item["needs_review"] = bool(item.get("review_after") and item["review_after"][:10] <= datetime.now().strftime("%Y-%m-%d"))
+    return item
+
+
+def add_memory(content: str, *, is_pinned: bool = True, summary: str = "", review_after: str | None = None) -> str:
     import uuid as _uuid
     content = (content or "").strip()
     if not content:
         raise ValueError("content required")
+    if len(content) > 4000:
+        raise ValueError("memory content must be at most 4000 characters")
+    summary = (summary or "").strip()
+    if len(summary) > 1000:
+        raise ValueError("memory summary must be at most 1000 characters")
     mid = _uuid.uuid4().hex
     conn = get_conn()
     conn.execute(
         """INSERT INTO core_memory
-        (id, content, source_kind, source_ref, confidence, approval_status, conflict_status)
-        VALUES (?,?,?,?,?,?,?)""",
-        (mid, content, "direct_input", "사용자 직접 입력", 1.0, "approved", "unchecked"),
+        (id, content, summary, is_pinned, memory_state, source_kind, source_ref, confidence,
+         approval_status, conflict_status, review_after, last_reviewed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+        (mid, content, summary, int(bool(is_pinned)), "active", "direct_input", "사용자 직접 입력", 1.0,
+         "approved", "unchecked", review_after or None),
     )
     conn.commit()
     conn.close()
@@ -224,13 +263,72 @@ def add_memory(content: str) -> str:
 
 def list_memory() -> list[dict]:
     conn = get_conn()
+    _refresh_memory_lifecycle(conn)
     rows = conn.execute(
-        """SELECT id, content, source_kind, source_ref, observed_at, confidence,
-                  approval_status, conflict_status, created_at
-           FROM core_memory ORDER BY created_at DESC"""
+        """SELECT id, content, summary, is_pinned, memory_state, use_count, last_used_at,
+                  last_reviewed_at, review_after, source_kind, source_ref, observed_at,
+                  confidence, approval_status, conflict_status, created_at
+           FROM core_memory
+           ORDER BY is_pinned DESC,
+                    CASE memory_state WHEN 'active' THEN 0 WHEN 'summary' THEN 1 ELSE 2 END,
+                    COALESCE(last_used_at, created_at) DESC"""
     ).fetchall()
+    conn.commit()
     conn.close()
-    return [dict(r) for r in rows]
+    return [_memory_row(r) for r in rows]
+
+
+def update_memory(mid: str, data: dict) -> dict:
+    """기억의 고정 여부, 상태, 요약과 재확인일을 사용자가 직접 관리한다."""
+    fields, values = [], []
+    if "content" in data:
+        content = str(data["content"] or "").strip()
+        if not content or len(content) > 4000:
+            raise ValueError("memory content must be 1–4000 characters")
+        fields.append("content=?"); values.append(content)
+    if "summary" in data:
+        summary = str(data["summary"] or "").strip()
+        if len(summary) > 1000:
+            raise ValueError("memory summary must be at most 1000 characters")
+        fields.append("summary=?"); values.append(summary)
+    pinned = data.get("is_pinned") if "is_pinned" in data else None
+    if pinned is not None:
+        fields.append("is_pinned=?"); values.append(int(bool(pinned)))
+        if bool(pinned):
+            fields.append("memory_state=?"); values.append("active")
+    if "memory_state" in data and not bool(pinned):
+        state = str(data["memory_state"] or "")
+        if state not in MEMORY_STATES:
+            raise ValueError("invalid memory_state")
+        fields.append("memory_state=?"); values.append(state)
+    if "review_after" in data:
+        review_after = str(data["review_after"] or "").strip()
+        fields.append("review_after=?"); values.append(review_after or None)
+    if "mark_reviewed" in data and data["mark_reviewed"]:
+        fields.append("last_reviewed_at=datetime('now','localtime')")
+    if not fields:
+        raise ValueError("no memory fields to update")
+    conn = get_conn()
+    values.append(mid)
+    conn.execute("UPDATE core_memory SET " + ", ".join(fields) + " WHERE id=?", values)
+    row = conn.execute("SELECT id FROM core_memory WHERE id=?", (mid,)).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("memory not found")
+    conn.commit()
+    conn.close()
+    return next(item for item in list_memory() if item["id"] == mid)
+
+
+def refresh_memory_lifecycle() -> dict:
+    conn = get_conn()
+    result = _refresh_memory_lifecycle(conn)
+    counts = {state: conn.execute("SELECT count(*) FROM core_memory WHERE COALESCE(is_pinned, 1)=0 AND memory_state=?", (state,)).fetchone()[0]
+              for state in MEMORY_STATES}
+    counts["pinned"] = conn.execute("SELECT count(*) FROM core_memory WHERE COALESCE(is_pinned, 1)=1").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return {**result, "counts": counts}
 
 
 def delete_memory(mid: str) -> None:
@@ -240,11 +338,45 @@ def delete_memory(mid: str) -> None:
     conn.close()
 
 
-def memory_section_text() -> str:
+def _memory_terms(text: str) -> set[str]:
+    words = set(re.findall(r"[A-Za-z0-9_]{2,}|[가-힣]{2,}", (text or "").lower()))
+    for run in re.findall(r"[가-힣]{3,}", (text or "")):
+        words.update(run[i:i + 2] for i in range(len(run) - 1))
+    return words
+
+
+def memory_section_text(query: str = "") -> str:
+    """고정 기억은 항상, 일반 기억은 관련성이 높은 소수만 프롬프트에 넣는다."""
     rows = list_memory()
-    if not rows:
+    pinned = [r for r in rows if r["is_pinned"]]
+    candidates = [r for r in rows if not r["is_pinned"] and r["memory_state"] != "archive"]
+    query_terms = _memory_terms(query)
+
+    def rank(item: dict) -> tuple:
+        overlap = len(query_terms & _memory_terms(item["content"] + " " + item.get("summary", "")))
+        return (overlap, 1 if item["memory_state"] == "active" else 0, item.get("use_count", 0))
+
+    ranked = sorted(candidates, key=rank, reverse=True)
+    selected = pinned + ([r for r in ranked if rank(r)[0] > 0][:4] if query_terms else ranked[:3])
+    if not selected:
         return ""
-    return "\n".join(f"- {r['content']}" for r in rows)
+    conn = get_conn()
+    for item in selected:
+        conn.execute("""UPDATE core_memory SET use_count=COALESCE(use_count, 0)+1,
+                        last_used_at=datetime('now','localtime') WHERE id=?""", (item["id"],))
+    conn.commit()
+    conn.close()
+    lines = []
+    for item in selected:
+        if item["is_pinned"]:
+            prefix, text = "고정", item["content"]
+        elif item["memory_state"] == "summary":
+            prefix, text = "요약", item.get("summary") or item["content"][:240]
+        else:
+            prefix, text = "활성", item["content"]
+        review = " (재확인 필요)" if item["needs_review"] else ""
+        lines.append(f"- [{prefix} 기억{review}] {text}")
+    return "\n".join(lines)
 
 
 # ── Daily Sync ────────────────────────────────────────
@@ -1029,7 +1161,7 @@ def build_avatar_context(query: str = "", verbosity: str = "concise", what_if: d
 
     preference_section = preference_section_text() or "- (직접입력/자동측정 모두 없음)"
     behavior_section = bigfive_behavior_guidance() or "- (Big Five 미설정 — 기본 어조 사용)"
-    memory_section = memory_section_text() or "- (등록된 핵심 기억 없음)"
+    memory_section = memory_section_text(query) or "- (등록된 핵심 기억 없음)"
 
     interests_section = "\n".join([
         f"- {i['topic']} (중요도 {i['importance']:.1f}, 문서 {i['doc_count']}개)"

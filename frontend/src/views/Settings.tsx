@@ -32,10 +32,16 @@ export default function SettingsView({ settings, onChange }: Props) {
   } | null>(null)
   const [styleApplyMsg, setStyleApplyMsg] = useState('')
 
-  // ── 핵심 기억(memory) — 매 아바타 프롬프트에 항상 주입되는 자유형식 사실 목록 ──
-  interface MemoryItem { id: string; content: string; created_at: string }
+  // ── 기억 수명 주기 — 고정 / 활성 / 요약 / 보관을 사용자가 직접 관리 ──
+  interface MemoryItem {
+    id: string; content: string; summary?: string; is_pinned: boolean; memory_state: 'active' | 'summary' | 'archive'
+    use_count: number; last_used_at?: string | null; last_reviewed_at?: string | null; review_after?: string | null; needs_review?: boolean
+  }
+  type MemoryDraft = Partial<MemoryItem> & { mark_reviewed?: boolean }
   const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([])
   const [memoryInput, setMemoryInput] = useState('')
+  const [memoryPinned, setMemoryPinned] = useState(true)
+  const [memoryDrafts, setMemoryDrafts] = useState<Record<string, MemoryDraft>>({})
   const [memoryBusy, setMemoryBusy] = useState(false)
   const fetchMemory = () => {
     fetch(`${API}/memory`).then(r => r.json()).then(d => setMemoryItems(d.items || [])).catch(() => {})
@@ -48,14 +54,27 @@ export default function SettingsView({ settings, onChange }: Props) {
     try {
       await fetch(`${API}/memory`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, is_pinned: memoryPinned }),
       })
-      setMemoryInput(''); fetchMemory()
+      setMemoryInput(''); setMemoryPinned(true); fetchMemory()
     } finally { setMemoryBusy(false) }
   }
   const deleteMemory = async (id: string) => {
     await fetch(`${API}/memory/${id}`, { method: 'DELETE' }).catch(() => {})
     fetchMemory()
+  }
+  const saveMemory = async (item: MemoryItem) => {
+    const draft = memoryDrafts[item.id] || {}
+    await fetch(`${API}/memory/${item.id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft),
+    }).catch(() => {})
+    setMemoryDrafts(drafts => { const next = { ...drafts }; delete next[item.id]; return next })
+    fetchMemory()
+  }
+  const refreshMemoryLifecycle = async () => {
+    setMemoryBusy(true)
+    try { await fetch(`${API}/memory/lifecycle/refresh`, { method: 'POST' }); fetchMemory() }
+    finally { setMemoryBusy(false) }
   }
 
   useEffect(() => {
@@ -146,10 +165,10 @@ export default function SettingsView({ settings, onChange }: Props) {
     <div className="p-8 max-w-lg space-y-6 h-full overflow-y-auto">
       <h2 className="text-base font-semibold text-gray-900">설정</h2>
 
-      {/* 핵심 기억 — 매 아바타 대화마다 항상 최우선으로 주입되는 사실 목록 */}
+      {/* 기억 수명 주기 */}
       <div className="space-y-2">
-        <label className={labelCls}>꼭 기억할 것 (memory)</label>
-        <p className="text-xs text-gray-400">아바타가 답할 때마다 항상 참고하는 핵심 사실. 예: "나는 허진구 아바타입니다"</p>
+        <div className="flex items-center justify-between gap-2"><label className={labelCls}>기억 관리</label><button onClick={refreshMemoryLifecycle} disabled={memoryBusy} className="text-xs text-gray-500 hover:text-gray-900 disabled:opacity-40">상태 정리</button></div>
+        <p className="text-xs text-gray-400">고정 기억은 항상 입력합니다. 일반 기억은 사용·시간에 따라 활성 → 요약 → 보관으로 내려가며 원문은 삭제하지 않습니다.</p>
         <div className="flex gap-2">
           <input value={memoryInput} onChange={e => setMemoryInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && addMemory()}
@@ -160,13 +179,20 @@ export default function SettingsView({ settings, onChange }: Props) {
             추가
           </button>
         </div>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600"><input type="checkbox" checked={memoryPinned} onChange={e => setMemoryPinned(e.target.checked)} /> 항상 기억(고정)</label>
         {memoryItems.length > 0 && (
-          <ul className="space-y-1">
+          <ul className="space-y-2">
             {memoryItems.map(m => (
-              <li key={m.id} className="flex items-start gap-2 bg-gray-50 border border-gray-100 rounded-lg px-3 py-1.5 text-sm text-gray-700">
-                <span className="flex-1">{m.content}</span>
-                <button onClick={() => deleteMemory(m.id)}
-                  className="text-gray-400 hover:text-red-500 text-xs shrink-0">✕</button>
+              <li key={m.id} className="space-y-2 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2 text-sm text-gray-700">
+                <div className="flex items-start gap-2"><span className="flex-1 leading-5">{m.content}</span><button onClick={() => deleteMemory(m.id)} className="text-gray-400 hover:text-red-500 text-xs shrink-0">삭제</button></div>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <label className="flex items-center gap-1"><input type="checkbox" checked={memoryDrafts[m.id]?.is_pinned ?? m.is_pinned} onChange={e => setMemoryDrafts(d => ({ ...d, [m.id]: { ...d[m.id], is_pinned: e.target.checked } }))} /> 고정</label>
+                  <select disabled={memoryDrafts[m.id]?.is_pinned ?? m.is_pinned} value={memoryDrafts[m.id]?.memory_state ?? m.memory_state} onChange={e => setMemoryDrafts(d => ({ ...d, [m.id]: { ...d[m.id], memory_state: e.target.value as MemoryItem['memory_state'] } }))} className="rounded border border-gray-200 bg-white px-1 py-0.5 disabled:opacity-40"><option value="active">활성</option><option value="summary">요약</option><option value="archive">보관</option></select>
+                  <span className="text-gray-400">사용 {m.use_count || 0}회{m.last_used_at ? ` · 최근 ${m.last_used_at.slice(0, 10)}` : ''}</span>
+                  {m.needs_review && <span className="text-amber-700">재확인 필요</span>}
+                </div>
+                <input value={memoryDrafts[m.id]?.summary ?? m.summary ?? ''} onChange={e => setMemoryDrafts(d => ({ ...d, [m.id]: { ...d[m.id], summary: e.target.value } }))} placeholder="요약 상태에서 LLM에 줄 짧은 요약" className="w-full rounded border border-gray-200 bg-white px-2 py-1 text-xs" />
+                <div className="flex items-center gap-2 text-xs"><label className="text-gray-500">재확인일</label><input type="date" value={(memoryDrafts[m.id]?.review_after ?? m.review_after ?? '').slice(0, 10)} onChange={e => setMemoryDrafts(d => ({ ...d, [m.id]: { ...d[m.id], review_after: e.target.value } }))} className="rounded border border-gray-200 bg-white px-1 py-0.5" /><button onClick={() => setMemoryDrafts(d => ({ ...d, [m.id]: { ...d[m.id], mark_reviewed: true } }))} className="text-gray-500 hover:text-gray-900">오늘 확인</button><button onClick={() => saveMemory(m)} className="ml-auto rounded bg-gray-800 px-2 py-1 text-white hover:bg-gray-700">저장</button></div>
               </li>
             ))}
           </ul>

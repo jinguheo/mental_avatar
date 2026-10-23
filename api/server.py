@@ -1288,7 +1288,7 @@ def sync_list():
 
 @app.route("/memory", methods=["GET"])
 def memory_list():
-    """핵심 기억(자유형식 사실) 목록 — 매 아바타 프롬프트에 항상 주입됨"""
+    """기억 목록 — 고정 기억은 항상, 일반 기억은 수명 주기에 따라 선택적으로 주입된다."""
     return jsonify({"items": avatar_core.list_memory()})
 
 
@@ -1298,14 +1298,32 @@ def memory_add():
     content = (data.get("content") or "").strip()
     if not content:
         return jsonify({"error": "content required"}), 400
-    mid = avatar_core.add_memory(content)
+    try:
+        mid = avatar_core.add_memory(content, is_pinned=bool(data.get("is_pinned", True)),
+                                    summary=data.get("summary", ""), review_after=data.get("review_after"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"id": mid})
+
+
+@app.route("/memory/<mid>", methods=["PUT"])
+def memory_update(mid):
+    try:
+        return jsonify(avatar_core.update_memory(mid, request.get_json(silent=True) or {}))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/memory/<mid>", methods=["DELETE"])
 def memory_delete(mid):
     avatar_core.delete_memory(mid)
     return jsonify({"success": True})
+
+
+@app.route("/memory/lifecycle/refresh", methods=["POST"])
+def memory_lifecycle_refresh():
+    """비고정 기억을 마지막 사용 시점 기준으로 활성·요약·보관 상태로 갱신한다."""
+    return jsonify(avatar_core.refresh_memory_lifecycle())
 
 
 # ── 자문자답(암묵지) 캡처 ──────────────────────────────

@@ -144,6 +144,13 @@ def init():
     CREATE TABLE IF NOT EXISTS core_memory (
         id          TEXT PRIMARY KEY,
         content     TEXT NOT NULL,
+        summary     TEXT NOT NULL DEFAULT '',
+        is_pinned   INTEGER NOT NULL DEFAULT 1,
+        memory_state TEXT NOT NULL DEFAULT 'active',
+        use_count   INTEGER NOT NULL DEFAULT 0,
+        last_used_at DATETIME,
+        last_reviewed_at DATETIME,
+        review_after DATETIME,
         source_kind TEXT NOT NULL DEFAULT 'direct_input',
         source_ref  TEXT DEFAULT '사용자 직접 입력',
         observed_at DATETIME DEFAULT (datetime('now','localtime')),
@@ -253,6 +260,15 @@ def init():
         ("core_memory", "confidence", "REAL DEFAULT 1.0"),
         ("core_memory", "approval_status", "TEXT NOT NULL DEFAULT 'approved'"),
         ("core_memory", "conflict_status", "TEXT NOT NULL DEFAULT 'unchecked'"),
+        # 기억 수명 주기: 고정 기억은 항상 유지하고, 나머지는 활성→요약→보관으로만
+        # 내려간다. 원문(content)은 어떤 상태에서도 삭제하지 않는다.
+        ("core_memory", "summary", "TEXT NOT NULL DEFAULT ''"),
+        ("core_memory", "is_pinned", "INTEGER NOT NULL DEFAULT 1"),
+        ("core_memory", "memory_state", "TEXT NOT NULL DEFAULT 'active'"),
+        ("core_memory", "use_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("core_memory", "last_used_at", "DATETIME"),
+        ("core_memory", "last_reviewed_at", "DATETIME"),
+        ("core_memory", "review_after", "DATETIME"),
         ("self_interview", "source_kind", "TEXT NOT NULL DEFAULT 'self_report'"),
         ("self_interview", "source_ref", "TEXT DEFAULT '심층 인터뷰 직접 입력'"),
         ("self_interview", "observed_at", "DATETIME"),
@@ -274,6 +290,7 @@ def init():
 
     # 기존 DB에는 위 마이그레이션으로 policy_version을 먼저 만든 뒤 인덱스를 생성한다.
     c.execute("CREATE INDEX IF NOT EXISTS idx_decision_cases_policy ON decision_cases(policy_version)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_core_memory_lifecycle ON core_memory(is_pinned, memory_state, last_used_at)")
 
     conn.commit()
     conn.close()
