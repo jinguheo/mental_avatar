@@ -255,6 +255,10 @@ def save_decision_case(data: dict) -> dict:
         "rejected_options", "exception_rule", "policy_version",
     )}
     values["policy_version"] = values["policy_version"][:40] or "v1"
+    source_kind = (data.get("source_kind") or "self_report").strip()
+    source_ref = (data.get("source_ref") or "심층 인터뷰 직접 입력").strip()
+    evidence_state = (data.get("evidence_state") or "direct").strip()
+    observed_at = (data.get("observed_at") or "").strip() or None
     if values["decision_type"] not in DECISION_TYPES:
         raise ValueError("invalid decision_type")
     for key in ("situation", "choice", "rationale"):
@@ -283,17 +287,75 @@ def save_decision_case(data: dict) -> dict:
     conn.execute(
         """INSERT INTO decision_cases
         (id, self_interview_id, topic, decision_type, situation, options_text, choice, rationale,
-         rejected_options, exception_rule, confidence, source_kind, source_ref, approval_status,
+         rejected_options, exception_rule, confidence, source_kind, source_ref, observed_at, approval_status,
          conflict_status, policy_version, evidence_state)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now','localtime')),?,?,?,?)""",
         (case_id, saved["id"], values["topic"], values["decision_type"], values["situation"],
          values["options_text"], values["choice"], values["rationale"], values["rejected_options"],
-         values["exception_rule"], confidence, "self_report", "심층 인터뷰 직접 입력", "approved",
-         "unchecked", values["policy_version"], "direct"),
+         values["exception_rule"], confidence, source_kind, source_ref, observed_at, "approved",
+         "unchecked", values["policy_version"], evidence_state),
     )
     conn.commit()
     conn.close()
     return {**saved, "case_id": case_id}
+
+
+# ── 판단 사례 후보(승인 대기) ─────────────────────────────
+# 대화 기록에서 뽑은 후보는 사용자가 승인하기 전까지 자문자답·KG·검색·프롬프트 어디에도 들어가지 않는다.
+
+CANDIDATE_FIELDS = ("topic", "decision_type", "situation", "options_text", "choice", "rationale",
+                    "rejected_options", "exception_rule")
+
+
+def list_candidates(status: str = "pending", decision_type: str = "", limit: int = 200) -> dict:
+    conn = get_conn()
+    where, params = "status=?", [status]
+    if decision_type:
+        where += " AND decision_type=?"
+        params.append(decision_type)
+    rows = conn.execute(
+        f"SELECT * FROM decision_case_candidates WHERE {where} ORDER BY observed_at DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    counts = {r["status"]: r["n"] for r in conn.execute(
+        "SELECT status, COUNT(*) n FROM decision_case_candidates GROUP BY status")}
+    conn.close()
+    return {"items": [dict(r) for r in rows], "counts": counts}
+
+
+def approve_candidate(cid: str, edits: dict | None = None) -> dict:
+    """후보를 (수정 반영해) 판단 사례로 확정한다. 확신도는 본인 확인이 없으므로 비워 둔다."""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM decision_case_candidates WHERE id=?", (cid,)).fetchone()
+    conn.close()
+    if not row:
+        raise ValueError("candidate not found")
+    if row["status"] != "pending":
+        raise ValueError("candidate already reviewed")
+    payload = {key: row[key] for key in CANDIDATE_FIELDS}
+    for key in CANDIDATE_FIELDS:
+        if edits and key in edits:
+            payload[key] = edits[key]
+    payload.update({
+        "source_kind": "conversation_extracted",
+        "source_ref": f"대화 기록 {row['pair_key']} · {row['source_project']} · {row['extracted_by'] or '추출'}",
+        "evidence_state": row["evidence_state"],
+        "observed_at": row["observed_at"],
+    })
+    saved = save_decision_case(payload)
+    conn = get_conn()
+    conn.execute("UPDATE decision_case_candidates SET status='approved', case_id=?, reviewed_at=datetime('now','localtime') WHERE id=?",
+                 (saved["case_id"], cid))
+    conn.commit()
+    conn.close()
+    return saved
+
+
+def reject_candidate(cid: str) -> None:
+    conn = get_conn()
+    conn.execute("UPDATE decision_case_candidates SET status='rejected', reviewed_at=datetime('now','localtime') WHERE id=? AND status='pending'", (cid,))
+    conn.commit()
+    conn.close()
 
 
 # ── 목록/삭제 ─────────────────────────────────────────

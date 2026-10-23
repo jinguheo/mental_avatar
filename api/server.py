@@ -1393,6 +1393,27 @@ def interview_coverage():
     return jsonify(self_interview.decision_coverage())
 
 
+@app.route("/interview/candidates", methods=["GET"])
+def interview_candidates():
+    """대화 기록에서 추출한 판단 사례 후보(승인 전). status=pending|approved|rejected"""
+    return jsonify(self_interview.list_candidates(
+        request.args.get("status", "pending"), request.args.get("decision_type", "")))
+
+
+@app.route("/interview/candidates/<cid>/approve", methods=["POST"])
+def interview_candidate_approve(cid):
+    try:
+        return jsonify(self_interview.approve_candidate(cid, request.get_json(silent=True) or {}))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/interview/candidates/<cid>/reject", methods=["POST"])
+def interview_candidate_reject(cid):
+    self_interview.reject_candidate(cid)
+    return jsonify({"success": True})
+
+
 @app.route("/interview/followup", methods=["POST"])
 def interview_followup():
     """저장한 답변의 근거·사례·예외를 확인하는 심층 후속 질문 하나를 생성한다."""

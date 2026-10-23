@@ -203,6 +203,34 @@ def init():
         created_at        DATETIME DEFAULT (datetime('now','localtime'))
     );
 
+    -- 대화 기록(decision_pairs)에서 추출한 판단 사례 후보. 승인 전에는 자문자답·KG·프롬프트에 들어가지 않는다.
+    -- 승인하면 decision_cases(+자문자답·KG)로 옮기고, 거절한 후보는 보존해 같은 후보가 다시 뜨지 않게 한다.
+    CREATE TABLE IF NOT EXISTS decision_case_candidates (
+        id               TEXT PRIMARY KEY,
+        pair_key         TEXT NOT NULL,
+        decision_type    TEXT NOT NULL,
+        topic            TEXT DEFAULT '',
+        situation        TEXT NOT NULL,
+        options_text     TEXT DEFAULT '',
+        choice           TEXT NOT NULL,
+        rationale        TEXT NOT NULL,
+        rejected_options TEXT DEFAULT '',
+        exception_rule   TEXT DEFAULT '',
+        evidence_state   TEXT NOT NULL DEFAULT 'direct',
+        extractor_conf   INTEGER,
+        source_context   TEXT DEFAULT '',
+        source_reply     TEXT DEFAULT '',
+        source_project   TEXT DEFAULT '',
+        observed_at      TEXT,
+        extracted_by     TEXT DEFAULT '',
+        status           TEXT NOT NULL DEFAULT 'pending',
+        reviewed_at      DATETIME,
+        case_id          TEXT,
+        created_at       DATETIME DEFAULT (datetime('now','localtime')),
+        UNIQUE(pair_key, choice)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dc_candidates_status ON decision_case_candidates(status, decision_type);
+
     CREATE INDEX IF NOT EXISTS idx_decision_cases_created ON decision_cases(created_at);
     CREATE INDEX IF NOT EXISTS idx_decision_cases_type ON decision_cases(decision_type);
 
