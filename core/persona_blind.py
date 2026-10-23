@@ -123,30 +123,69 @@ def _answer_b0(person: str, question: str) -> str:
     return _chat(persona_qbank.MODEL, prompt, 320, 0.3)
 
 
-def create_set(persons: list | None = None, questions: list | None = None, progress=None) -> str:
-    """질문 × 인물 × 조건(B0·B1) 답을 만들어 이름을 가리고 섞어 저장한다. 오래 걸리므로 별도 프로세스에서 호출한다."""
+def _ask_with_retry(person: str, question: str, tries: int = 3) -> dict:
+    """Ollama가 바쁠 때 생기는 시간 초과를 몇 번 다시 시도한다. 끝내 실패하면 예외를 그대로 올린다."""
+    for attempt in range(tries):
+        try:
+            return persona_chat.ask(person, question)
+        except Exception:  # noqa: BLE001
+            if attempt == tries - 1:
+                raise
+            time.sleep(20 * (attempt + 1))
+
+
+def create_set(persons: list | None = None, questions: list | None = None, progress=None, resume_id: str | None = None) -> str:
+    """질문 × 인물 × 조건(B0·B1) 답을 만들어 이름을 가리고 섞어 저장한다. 오래 걸리므로 별도 프로세스에서 호출한다.
+    한 쌍(인물×질문)을 끝낼 때마다 partial.jsonl에 저장하므로, 중간에 멈춰도 resume_id로 이어서 만들 수 있다."""
     persons = persons or eligible_people()
     questions = questions or NEUTRAL_QUESTIONS
-    set_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+    set_id = resume_id or (time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4])
     folder = EVAL_ROOT / set_id
     folder.mkdir(parents=True, exist_ok=True)
-    rows, norecord = [], []
+    plan = folder / "plan.json"   # 이어서 만들 때 질문·인물 목록이 달라지지 않게 처음 계획을 저장해 둔다(질문은행이 바뀔 수 있다)
+    if plan.exists():
+        saved = json.loads(plan.read_text(encoding="utf-8"))
+        persons, questions = saved["persons"], saved["questions"]
+    else:
+        plan.write_text(json.dumps({"persons": persons, "questions": questions}, ensure_ascii=False), encoding="utf-8")
+    partial = folder / "partial.jsonl"
+    finished = {}
+    if partial.exists():
+        for line in partial.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                finished[(r["person"], r["question"])] = r
     total = len(persons) * len(questions)
-    done = 0
     for person in persons:
         for question in questions:
-            b1 = persona_chat.ask(person, question)
-            if b1.get("grounded"):
-                rows.append({"person": person, "question": question, "condition": "B1", "answer": b1["answer"]})
-            else:
-                norecord.append({"person": person, "question": question, "condition": "B1"})
-            try:
-                rows.append({"person": person, "question": question, "condition": "B0", "answer": _answer_b0(person, question)})
-            except Exception as exc:  # noqa: BLE001 — 한 문항 실패가 전체를 막지 않게 한다
-                norecord.append({"person": person, "question": question, "condition": "B0", "error": str(exc)[:120]})
-            done += 1
+            if (person, question) not in finished:
+                rec = {"person": person, "question": question, "b1": None, "b0": None, "errors": []}
+                try:
+                    b1 = _ask_with_retry(person, question)
+                    rec["b1"] = b1["answer"] if b1.get("grounded") else None
+                except Exception as exc:  # noqa: BLE001 — 한 문항 실패가 전체를 막지 않게 한다
+                    rec["errors"].append("B1: " + str(exc)[:120])
+                try:
+                    rec["b0"] = _answer_b0(person, question)
+                except Exception as exc:  # noqa: BLE001
+                    rec["errors"].append("B0: " + str(exc)[:120])
+                with open(partial, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+                finished[(person, question)] = rec
             if progress:
-                progress(done, total)
+                progress(len(finished), total)
+    rows, norecord = [], []
+    for (person, question), rec in finished.items():
+        if rec["b1"]:
+            rows.append({"person": person, "question": question, "condition": "B1", "answer": rec["b1"]})
+        else:
+            norecord.append({"person": person, "question": question, "condition": "B1",
+                             **({"error": "; ".join(e for e in rec["errors"] if e.startswith("B1"))} if any(e.startswith("B1") for e in rec["errors"]) else {})})
+        if rec["b0"]:
+            rows.append({"person": person, "question": question, "condition": "B0", "answer": rec["b0"]})
+        else:
+            norecord.append({"person": person, "question": question, "condition": "B0", "error": "; ".join(e for e in rec["errors"] if e.startswith("B0"))[:120]})
+    rows.sort(key=lambda r: (r["person"], r["question"], r["condition"]))   # 같은 입력이면 같은 순서에서 섞이게 한다
     random.Random(set_id).shuffle(rows)
     items, key = [], {}
     for index, row in enumerate(rows, start=1):

@@ -2,9 +2,9 @@
   "axes": [
     {
       "name": "가치관·신념",
-      "score": 85,
-      "confidence": 37,
-      "summary": "연구의 엄밀함, 끈기, 공적 책임 및 자신이 중요하게 둔 기준을 중시하는 경향이 강함.",
+      "score": 59,
+      "confidence": 33,
+      "summary": "자료 기반 초기 추정: often, before they can secure possible working conditions, they have to exhaust their youth and their powers in daily anxieties. Our society, in which reigns an eager desire for ri",
       "qids": [
         "v15"
       ],
@@ -12,9 +12,9 @@
     },
     {
       "name": "판단·결정",
-      "score": 80,
-      "confidence": 37,
-      "summary": "연구의 본질과 공익을 우선시하며, 객관적 사실에 기반하여 결정을 내리는 경향이 있음.",
+      "score": 59,
+      "confidence": 33,
+      "summary": "자료 기반 초기 추정: Gamma-rays. For this we also possess in my laboratory a suitable equipment. It is easier and more satisfactory to measure the radium by the emitted rays, than to weigh it in a bala",
       "qids": [
         "w04"
       ],
@@ -22,110 +22,130 @@
     },
     {
       "name": "전문지식·사고법",
-      "score": 95,
-      "confidence": 61,
-      "summary": "과학적 탐구의 엄밀함과 논리적 추론을 매우 중요하게 여기며, 과학적 정신을 강조함.",
-      "qids": [
-        "v15"
-      ],
-      "checked_answers": 3
-    },
-    {
-      "name": "MBTI·인지·에너지",
-      "score": 60,
-      "confidence": 30,
-      "summary": "제공된 정보만으로는 MBTI를 추론하기에 충분한 근거가 부족함.",
-      "qids": [],
-      "checked_answers": 2
-    },
-    {
-      "name": "성격·기질",
-      "score": 75,
+      "score": 63,
       "confidence": 20,
-      "summary": "엄격한 자기 통제력과 내면의 고독 속에서도 끈기를 유지하는 강인한 기질을 보임.",
+      "summary": "자료 기반 초기 추정: 추정: Marie Curie의 과학자·연구자라는 역할과 근대 과학의 맥락을 보면, ‘자신의 분야에서 가장 중요한 원리나 법칙은 무엇인가요?’에는 연구의 엄밀함, 끈기, 공공 기여 및 분야의 방법론과 문제 해결 방식을 중시하는 쪽으로 답했을 가능성이 있습니다. 직접 확인된 발언이 아닌 역할 기반 평균 추정입니다.",
       "qids": [
-        "e01",
-        "e04"
+        "x01",
+        "x02",
+        "x03"
       ],
       "checked_answers": 0
     },
     {
-      "name": "시기·변화",
-      "score": 50,
+      "name": "MBTI·인지·에너지",
+      "score": 63,
       "confidence": 20,
-      "summary": "특정 시기나 변화에 대한 직접적인 언급은 없으나, 과학 발전의 맥락 속에서 삶을 경험함.",
-      "qids": [],
+      "summary": "자료 기반 초기 추정: 추정: Marie Curie의 과학자·연구자라는 역할과 근대 과학의 맥락을 보면, ‘사람들과 함께 있을 때와 혼자 있을 때, 어느 쪽에서 에너지를 얻나요?’에는 연구의 엄밀함, 끈기, 공공 기여 및 공적 활동에서 관찰되는 사고·에너지 경향을 중시하는 쪽으로 답했을 가능성이 있습니다. 직접 확인된 발언이 아닌 역할 기반 평",
+      "qids": [
+        "m01",
+        "m02",
+        "m03"
+      ],
+      "checked_answers": 0
+    },
+    {
+      "name": "성격·기질",
+      "score": 59,
+      "confidence": 33,
+      "summary": "자료 기반 초기 추정: life of a great scientist in his laboratory is not, as many may think, a peaceful idyll. More often it is a bitter battle with things, with one's surroundings, and above all with o",
+      "qids": [
+        "t04"
+      ],
+      "checked_answers": 1
+    },
+    {
+      "name": "시기·변화",
+      "score": 63,
+      "confidence": 20,
+      "summary": "자료 기반 초기 추정: 추정: Marie Curie의 과학자·연구자라는 역할과 근대 과학의 맥락을 보면, ‘시간이 지나며 가장 크게 바뀐 생각은 무엇인가요?’에는 연구의 엄밀함, 끈기, 공공 기여 및 경험과 시대 변화에 따른 관점의 변화을 중시하는 쪽으로 답했을 가능성이 있습니다. 직접 확인된 발언이 아닌 역할 기반 평균 추정입니다.",
+      "qids": [
+        "z01",
+        "z02",
+        "z03"
+      ],
       "checked_answers": 0
     },
     {
       "name": "대인관계",
-      "score": 65,
-      "confidence": 37,
-      "summary": "개인적인 관계보다는 아이디어와 사상에 대한 탐구를 우선시하며, 대중과의 관계에 대해 신중한 태도를 보임.",
-      "qids": [
-        "r06"
-      ],
-      "checked_answers": 1
-    },
-    {
-      "name": "감정·갈등",
-      "score": 70,
+      "score": 63,
       "confidence": 20,
-      "summary": "외부의 비판이나 압박 속에서도 절제하고 회복하려는 내적 노력을 보임.",
+      "summary": "자료 기반 초기 추정: 추정: Marie Curie의 과학자·연구자라는 역할과 근대 과학의 맥락을 보면, ‘가족에 대해 어떻게 생각하나요?’에는 연구의 엄밀함, 끈기, 공공 기여 및 동료·공동체·대중을 대하는 태도을 중시하는 쪽으로 답했을 가능성이 있습니다. 직접 확인된 발언이 아닌 역할 기반 평균 추정입니다.",
       "qids": [
-        "e03"
+        "r01",
+        "r02",
+        "r03"
       ],
       "checked_answers": 0
     },
     {
-      "name": "습관·일상",
-      "score": 75,
-      "confidence": 37,
-      "summary": "연구에 몰두하며, 결과보다는 과정 자체의 아름다움을 추구하는 태도를 보임.",
+      "name": "감정·갈등",
+      "score": 59,
+      "confidence": 33,
+      "summary": "자료 기반 초기 추정: wanted such a little home.\" But owning a house was secondary in the life of both Pierre and Marie Curie. They simply made a home wherever they lived, for such money as might have g",
       "qids": [
-        "w04"
+        "e07"
       ],
       "checked_answers": 1
     },
     {
-      "name": "표현·문체",
-      "score": 90,
-      "confidence": 20,
-      "summary": "간결하고 단호하며, 자신의 신념을 명확하게 전달하는 문체를 사용함.",
+      "name": "습관·일상",
+      "score": 75,
+      "confidence": 49,
+      "summary": "자료 기반 초기 추정: happiest years of our life, devoting our entire days to our work. Often I had to prepare our lunch in the shed, so as not to interrupt some particularly important operation. Someti",
       "qids": [
-        "r06"
+        "a01",
+        "a06"
+      ],
+      "checked_answers": 2
+    },
+    {
+      "name": "표현·문체",
+      "score": 63,
+      "confidence": 20,
+      "summary": "자료 기반 초기 추정: 추정: Marie Curie의 과학자·연구자라는 역할과 근대 과학의 맥락을 보면, ‘설명할 때 자주 쓰는 문장 방식이나 비유가 있나요?’에는 연구의 엄밀함, 끈기, 공공 기여 및 저작·강연·업무에서 드러난 설명 방식을 중시하는 쪽으로 답했을 가능성이 있습니다. 직접 확인된 발언이 아닌 역할 기반 평균 추정입니다.",
+      "qids": [
+        "s01",
+        "s02",
+        "s03"
       ],
       "checked_answers": 0
     },
     {
       "name": "인생 이력",
-      "score": 85,
-      "confidence": 37,
-      "summary": "과학적 발견과 공적 기여라는 명확한 인생의 궤적을 가지고 있음.",
+      "score": 63,
+      "confidence": 20,
+      "summary": "자료 기반 초기 추정: 추정: Marie Curie의 과학자·연구자라는 역할과 근대 과학의 맥락을 보면, ‘어린 시절은 어땠나요? 무엇이 영향을 주었나요?’에는 연구의 엄밀함, 끈기, 공공 기여 및 대표 업적과 전환점을 중시하는 쪽으로 답했을 가능성이 있습니다. 직접 확인된 발언이 아닌 역할 기반 평균 추정입니다.",
       "qids": [
-        "v15"
+        "l01",
+        "l02",
+        "l03"
       ],
-      "checked_answers": 1
+      "checked_answers": 0
     },
     {
       "name": "모순·한계",
-      "score": 100,
-      "confidence": 37,
-      "summary": "직접적인 발언은 없으나, 과학적 진보와 인간적 가치 사이에서 균형을 찾으려는 내적 긴장감이 존재함.",
-      "qids": [],
-      "checked_answers": 1
+      "score": 63,
+      "confidence": 20,
+      "summary": "자료 기반 초기 추정: 추정: Marie Curie의 과학자·연구자라는 역할과 근대 과학의 맥락을 보면, ‘스스로의 단점이나 약점은 무엇인가요?’에는 연구의 엄밀함, 끈기, 공공 기여 및 시대와 역할에서 생긴 제약과 한계을 중시하는 쪽으로 답했을 가능성이 있습니다. 직접 확인된 발언이 아닌 역할 기반 평균 추정입니다.",
+      "qids": [
+        "c01",
+        "c02",
+        "c03"
+      ],
+      "checked_answers": 0
     }
   ],
   "mbti": {
     "type": "unknown",
-    "confidence": 10,
-    "reason": "제공된 증거만으로는 MBTI를 추론하기에 충분한 근거가 부족합니다."
+    "confidence": 15,
+    "reason": "직접 검증된 심리검사 자료가 없어 MBTI 유형을 확정하지 않습니다."
   },
-  "personality": "이 인물은 연구의 엄밀함과 공적 책임을 최우선 가치로 두며, 내면의 고독 속에서도 끈기와 절제를 유지하는 강인한 성향을 보입니다. 객관적인 사실에 기반하여 판단하고 삶의 의미를 탐구하는 태도가 두드러집니다.",
-  "expertise": "과학적 연구의 엄밀함과 논리적 추론에 깊이 관여하며, 발견의 가치가 실용성을 넘어선 순수한 과학적 아름다움에 있음을 강조합니다. 이는 그녀가 과학적 진실을 추구하는 데 있어 높은 수준의 전문성을 보여줍니다.",
-  "disclaimer": "본 분석은 제공된 증거 발췌문만을 기반으로 한 추정이며, 실제 인물의 성격이나 사상을 확정하는 것이 아님을 명시합니다.",
-  "checked_answers": 11,
+  "personality": "공개 자료와 질문은행 답변을 묶은 초기 페르소나 초안입니다. 추정 항목은 원문 근거나 리뷰로 수정할 수 있습니다.",
+  "expertise": "수집 자료에서 드러난 활동 분야와 답변을 바탕으로 정리한 초기 추정입니다.",
+  "disclaimer": "공개 자료·추정 답변으로 만든 수정 가능한 AI 페르소나 초안이며, 실제 성격·MBTI의 확정 판정이 아닙니다.",
+  "checked_answers": 6,
   "ready": true,
   "person": "marie_curie",
-  "generated_at": "2026-10-18T20:48:52"
+  "generated_at": "2026-10-19T22:17:29"
 }
