@@ -317,7 +317,7 @@ Does this passage state {name}'s own view, feeling, habit or experience on the t
 
 # 1차 판정은 빠른 MODEL, YES만 CONFIRM_MODEL로 다시 확인한다. 대부분이 NO라 속도는 거의 그대로이고,
 # 같은 16건 시험에서 e2b 단독 YES 6건 중 오탐 2건이 두 모델 모두 YES인 4건(오탐 0)으로 줄었다.
-CONFIRM_MODEL = "gemma4:e4b"
+CONFIRM_MODEL = "gemma4:e4b"   # None이면 확인 단계를 건너뛴다(메모리가 빠듯해 e4b를 못 올릴 때). 이때 근거에는 judge="e2b만"이 표시된다
 
 
 def _ask_yes(model: str, prompt: str) -> bool:
@@ -345,7 +345,12 @@ def _ask_yes(model: str, prompt: str) -> bool:
 
 def _judge(question: str, passage: str, name: str, own: bool = False) -> bool:
     prompt = (JUDGE_OWN if own else JUDGE).format(q=question, p=passage[:1100], name=name)
-    return _ask_yes(MODEL, prompt) and _ask_yes(CONFIRM_MODEL, prompt)
+    return _ask_yes(MODEL, prompt) and (CONFIRM_MODEL is None or _ask_yes(CONFIRM_MODEL, prompt))
+
+
+def judge_label() -> str:
+    """근거를 어떤 판정으로 통과시켰는지 표시한다(작은 모델 단독은 오탐이 늘어난다: 2026-10-16 시험에서 YES 6건 중 명백한 오탐 2건)."""
+    return MODEL + ("만" if CONFIRM_MODEL is None else "+" + CONFIRM_MODEL)
 
 
 REAL_TIERS = {"own", "reported"}   # 수집·저장한 자료에서 확인된 근거. secondary(원문 미확인)·general(출처 미확인)·estimate(추정)는 실제 정보로 세지 않는다
@@ -374,7 +379,7 @@ def run(person: str, candidates: int = 5) -> dict:
                     _state["last_error"] = str(exc)
                     ok = False
                 if ok:
-                    found.append({"text": ch["text"], "doc": ch["doc"], "title": ch["title"], "kind": ch["kind"], "tier": tier, "score": round(score, 2)})
+                    found.append({"text": ch["text"], "doc": ch["doc"], "title": ch["title"], "kind": ch["kind"], "tier": tier, "score": round(score, 2), "judge": judge_label()})
             if found and tier == "own":
                 break   # 본인 글에서 찾았으면 전기 단계는 보지 않는다
         with _lock:
