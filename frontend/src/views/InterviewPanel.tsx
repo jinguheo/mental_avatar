@@ -41,6 +41,12 @@ type DecisionCoverage = {
   needs_review?: Array<DecisionForm & { id: string; review_reasons: string[] }>
 }
 
+type CandidateField = 'situation' | 'choice' | 'rationale' | 'rejected_options' | 'options_text' | 'exception_rule'
+type Candidate = Record<CandidateField, string> & {
+  id: string; decision_type: DecisionType; topic: string; evidence_state: string
+  source_reply: string; source_project: string; observed_at: string | null
+}
+
 const EMPTY_DECISION: DecisionForm = {
   topic: '', decision_type: '업무·품질', situation: '', options_text: '', choice: '', rationale: '',
   rejected_options: '', exception_rule: '', confidence: 70, policy_version: 'v1',
@@ -59,6 +65,12 @@ export default function InterviewPanel() {
   const [decision, setDecision] = useState<DecisionForm>(EMPTY_DECISION)
   const [coverage, setCoverage] = useState<DecisionCoverage | null>(null)
   const [savingDecision, setSavingDecision] = useState(false)
+  const [candidates, setCandidates] = useState<Candidate[]>([])
+  const [candidateCounts, setCandidateCounts] = useState<Record<string, number>>({})
+  const [candidateFilter, setCandidateFilter] = useState('')
+  const [candidateEdits, setCandidateEdits] = useState<Record<string, Partial<Record<CandidateField, string>>>>({})
+  const [candidateLimit, setCandidateLimit] = useState(10)
+  const [candidateBusy, setCandidateBusy] = useState('')
 
   const loadList = useCallback(async () => {
     try {
@@ -80,10 +92,42 @@ export default function InterviewPanel() {
     }
   }, [])
 
+  const loadCandidates = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/interview/candidates${candidateFilter ? `?decision_type=${encodeURIComponent(candidateFilter)}` : ''}`)
+      if (!r.ok) return
+      const d = await r.json()
+      setCandidates(d.items || [])
+      setCandidateCounts(d.counts || {})
+    } catch {
+      /* 서버 미연결 — 무시 */
+    }
+  }, [candidateFilter])
+
+  const reviewCandidate = useCallback(async (id: string, action: 'approve' | 'reject', edits?: Partial<Record<CandidateField, string>>) => {
+    setCandidateBusy(id)
+    setError('')
+    try {
+      const r = await fetch(`${API_BASE}/interview/candidates/${id}/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(edits || {}),
+      })
+      const d = await r.json()
+      if (!r.ok) setError(d.error || '처리하지 못했습니다.')
+      setCandidateEdits(previous => { const next = { ...previous }; delete next[id]; return next })
+      await Promise.all([loadCandidates(), loadCoverage(), loadList()])
+    } catch {
+      setError('처리하지 못했습니다 (서버 연결 확인).')
+    } finally {
+      setCandidateBusy('')
+    }
+  }, [loadCandidates, loadCoverage, loadList])
+
   useEffect(() => {
     loadList()
     loadCoverage()
   }, [loadList, loadCoverage])
+
+  useEffect(() => { void loadCandidates() }, [loadCandidates])
 
   const getQuestion = useCallback(async () => {
     setLoadingQ(true)
@@ -280,6 +324,45 @@ export default function InterviewPanel() {
           </div>
           <div className="mt-4 rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-xs leading-5 text-indigo-950">
             <strong>사례가 닮음을 만드는 방식:</strong> 실제 사례를 증거 묶음으로 저장 → 정책 버전별로 관련 사례·이유·예외를 우선 참고 → 다른 상황에서 본인의 재판단과 비교 → 차이가 난 경우 새 버전의 기준이나 사례를 보강합니다. 단순히 사례 수가 많아졌다고 일치도가 높다고 표시하지 않습니다.
+          </div>
+        </section>
+
+        <section className="view-panel p-4 sm:p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="dashboard-kicker">승인 대기</p>
+              <h2 className="mt-1 text-base font-semibold text-gray-950">대화 기록에서 추출한 판단 사례 후보</h2>
+              <p className="mt-1 text-xs leading-5 text-gray-500">내 대화에서 제안을 고치거나 거절한 순간을 AI가 읽어 구조화한 후보입니다. 승인하기 전에는 검색·프롬프트·판단 사례 집계에 들어가지 않습니다. 사실과 다르면 고쳐서 승인하세요. 이유 항목의 (추정)은 대화에 드러나지 않은 부분을 AI가 짐작한 것입니다.</p>
+            </div>
+            <span className="rounded-full bg-amber-100 px-3 py-1 text-xs text-amber-900">대기 {candidateCounts.pending ?? 0}건 · 승인 {candidateCounts.approved ?? 0} · 거절 {candidateCounts.rejected ?? 0}</span>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {['전체', ...DECISION_TYPES].map(name => <button key={name} type="button" onClick={() => setCandidateFilter(name === '전체' ? '' : name)} className={'rounded-full border px-3 py-1 text-xs ' + ((candidateFilter || '전체') === name ? 'border-gray-950 bg-gray-950 text-white' : 'border-gray-300 bg-white text-gray-700')}>{name}</button>)}
+          </div>
+          <div className="mt-3 space-y-3">
+            {candidates.slice(0, candidateLimit).map(item => {
+              const edit = candidateEdits[item.id] || {}
+              const value = (key: CandidateField) => edit[key] ?? item[key] ?? ''
+              const patch = (key: CandidateField, text: string) => setCandidateEdits(previous => ({ ...previous, [item.id]: { ...previous[item.id], [key]: text } }))
+              return <article key={item.id} className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
+                  <span><strong className="text-gray-800">{item.decision_type}</strong> · {item.topic} · {(item.observed_at || '').slice(0, 10)} · {item.source_project.replace(/^(D--MyWork-|codex--)/, '')}</span>
+                  <span className={item.evidence_state === 'direct' ? 'text-green-700' : 'text-amber-700'}>{item.evidence_state === 'direct' ? '내 말에 직접 근거' : '추정 포함'}</span>
+                </div>
+                <p className="mt-2 rounded border border-gray-200 bg-white p-2 text-xs leading-5 text-gray-700"><span className="text-gray-400">내가 한 말 · </span>{item.source_reply}</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {([['situation', '상황'], ['choice', '내 선택'], ['rationale', '판단 이유'], ['rejected_options', '선택하지 않은 대안'], ['options_text', '선택지'], ['exception_rule', '예외·적용 조건']] as [CandidateField, string][]).map(([key, label]) => <label key={key} className="text-xs font-medium text-gray-600">{label}
+                    <textarea value={value(key)} onChange={event => patch(key, event.target.value)} rows={2} className="mt-1 block w-full resize-y rounded border border-gray-300 bg-white px-2 py-1 text-xs font-normal text-gray-900" />
+                  </label>)}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button type="button" disabled={candidateBusy === item.id} onClick={() => { void reviewCandidate(item.id, 'approve', candidateEdits[item.id]) }} className="rounded-lg bg-gray-950 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50">{candidateEdits[item.id] ? '고쳐서 승인' : '승인'}</button>
+                  <button type="button" disabled={candidateBusy === item.id} onClick={() => { void reviewCandidate(item.id, 'reject') }} className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 disabled:opacity-50">거절</button>
+                </div>
+              </article>
+            })}
+            {candidates.length === 0 && <p className="text-sm text-gray-500">승인 대기 중인 후보가 없습니다.</p>}
+            {candidates.length > candidateLimit && <button type="button" onClick={() => setCandidateLimit(limit => limit + 10)} className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700">더 보기 ({candidates.length - candidateLimit}건 남음)</button>}
           </div>
         </section>
 
