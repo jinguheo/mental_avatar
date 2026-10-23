@@ -9,6 +9,7 @@
   interview  인터뷰·질의응답 녹취 (질문과 실제 답 — 시험 문제의 원천)
   quotes     출처가 붙은 발언 모음(위키인용). 'Misattributed/Disputed' 구역은 제외한다
   lecture    강의·강연 (사고방식과 말투)
+  record     동시대 관찬 기록 (정책·발언이 기록된 사실; 본인 저술과 구분)
   bio        전기·백과 (일반 정보 층)
 
 사용: python scripts/persona_corpus.py run [인물...]     (인물 생략하면 전부)
@@ -251,8 +252,8 @@ SOURCES = {
         ("interview", "송해 기사 (전북일보 2011)", "https://jjan.kr/article/20110704402334"),
         ("interview", "송해 기사 (서울시 미디어허브)", "https://mediahub.seoul.go.kr/archives/2006590"),
     ]],
-    # 세종대왕: 영상·녹음이 없고 본인이 직접 쓴 글도 훈민정음 서문 정도라서 전부 '기록에 적힌 것(bio)'으로 둔다.
-    # 실록은 관찬 사서(제3자 기록)이므로 본인 발언으로 취급하지 않는다. 출처는 위키문헌·위키백과(공개).
+    # 세종: 훈민정음은 직접 저술(primary), 실록은 동시대 관찬 기록(record)으로 분리한다.
+    # 관찬 기록은 가치관의 확정 근거가 아니라 '그 기록이 전하는 정책·발언'의 근거이며, 본인 저술과 같은 층위로 취급하지 않는다.
     "sejong": lambda: [
         ("bio", "위키백과: 세종", ("wiki", "ko.wikipedia.org", "세종")),
         ("bio", "위키백과: 집현전", ("wiki", "ko.wikipedia.org", "집현전")),
@@ -260,8 +261,10 @@ SOURCES = {
         ("bio", "위키문헌: 훈민정음(해례본)", ("wiki", "ko.wikisource.org", "훈민정음")),
         ("bio", "위키문헌: 훈민정음언해", ("wiki", "ko.wikisource.org", "훈민정음언해")),
         ("bio", "위키문헌: 용비어천가", ("wiki", "ko.wikisource.org", "용비어천가")),
-        ("bio", "위키문헌: 세종실록 25년(1443, 훈민정음 창제)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/25년")),
-        ("bio", "위키문헌: 세종실록 28년(1446, 훈민정음 반포)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/28년")),
+        ("record", "위키문헌: 세종실록 12년(1430, 공법 논의)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/12년")),
+        ("record", "위키문헌: 세종실록 25년(1443, 훈민정음 창제)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/25년")),
+        ("record", "위키문헌: 세종실록 26년(1444, 언문 반대 상소)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/26년")),
+        ("record", "위키문헌: 세종실록 28년(1446, 훈민정음 반포)", ("wiki", "ko.wikisource.org", "조선왕조실록/세종장헌대왕실록/28년")),
     ],
     # 역사 인물군: 본인 저작·발언이 남은 경우 primary, 그 외의 사실은 bio로 구분한다.
     # 역사 기록은 현대 인터뷰처럼 내면을 확정하지 못하므로 질문 은행의 미확인 영역은 그대로 비워 둔다.
@@ -292,6 +295,9 @@ SOURCES = {
         ("lecture", "Nobel Prize: Marie Curie 1911 Nobel lecture - Radium and the New Concepts in Chemistry", ("url", "https://www.nobelprize.org/prizes/chemistry/1911/marie-curie/lecture/?print=1")),
         # 본인 저술: 남편 피에르 퀴리 전기(1923). 말미에 마리 퀴리 본인의 자전적 회고가 포함된 공개 도메인 도서(eBook 69617).
         ("primary", "Project Gutenberg: Pierre Curie by Marie Curie (eBook 69617)", ("url", "https://www.gutenberg.org/ebooks/69617.txt.utf-8")),
+        # 2026-10-23 보강(확인된 답 6개뿐): 위키문헌 영어판 저자 페이지에 올라 있는 마리 퀴리 본인 저술 2편(공개 도메인).
+        ("lecture", "Wikisource: The Discovery of Radium (Marie Curie, 1921 Vassar College lecture)", ("wiki", "en.wikisource.org", "The Discovery of Radium")),
+        ("primary", "Wikisource: Radio-active Substances (Marie Curie, 1903 thesis, 1904 English edition)", ("wiki", "en.wikisource.org", "Radio-active substances")),
     ],
     "marcus_aurelius": lambda: [
         ("bio", "Wikipedia: Marcus Aurelius", ("wiki", "en.wikipedia.org", "Marcus Aurelius")),
