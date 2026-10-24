@@ -945,7 +945,16 @@ def persona_improvement_run():
 
 @app.route("/persona/qbank/answers/<person>", methods=["GET"])
 def persona_qbank_answers(person):
-    return jsonify({"summary": persona_qbank.summary(person), "rows": persona_qbank.load(person)})
+    return jsonify({"summary": persona_qbank.summary(person), "focus": persona_qbank.question_focus(person), "rows": persona_qbank.load(person)})
+
+
+@app.route("/persona/qbank/focus/<person>", methods=["GET"])
+def persona_qbank_focus(person):
+    """원문 근거가 있어 실제로 답할 수 있는 공통/인물 고유 질문만 반환한다."""
+    try:
+        return jsonify(persona_qbank.question_focus(person))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
 
 
 @app.route("/persona/qbank/materials/<person>", methods=["GET"])
@@ -996,7 +1005,8 @@ def persona_qbank_conversation_feedback(person):
     try:
         feedback = persona_qbank.conversation_feedback(person, body.get("question", ""), body.get("answer", ""),
                                                         body.get("verdict", ""), body.get("text", ""),
-                                                        body.get("reviewer", ""), body.get("relation", ""))
+                                                        body.get("reviewer", ""), body.get("relation", ""),
+                                                        body.get("qid", ""))
         profile = persona_qbank.profile(person, regenerate=True, fallback_only=True)
         return jsonify({"feedback": feedback, "profile": profile})
     except ValueError as exc:
@@ -1403,7 +1413,8 @@ def interview_candidates():
 @app.route("/interview/candidates/<cid>/approve", methods=["POST"])
 def interview_candidate_approve(cid):
     try:
-        return jsonify(self_interview.approve_candidate(cid, request.get_json(silent=True) or {}))
+        return jsonify(self_interview.approve_candidate(
+            cid, request.get_json(silent=True) or {}, extract=request.args.get("extract", "1") != "0"))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 

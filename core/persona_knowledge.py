@@ -45,6 +45,7 @@ def sync(person: str, profile: dict | None = None) -> dict:
         for evidence in ranked[:1]:   # 질문 하나당 대표 근거 하나만 대화 컨텍스트에 보관
             item = {
                 "qid": row["qid"], "domain": row["domain"], "question": row["question"],
+                "question_spec": row.get("question_spec", {}),
                 "text": evidence.get("text", "")[:700], "tier": evidence.get("tier", "estimate"),
                 "title": evidence.get("title", ""), "source": evidence.get("source_url"),
             }

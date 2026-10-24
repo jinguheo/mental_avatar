@@ -110,6 +110,108 @@ QUESTIONS = [
     ("z03", D_CHANGE, "위기나 실패 이후 달라진 결정 방식이 있나요?", "Did crisis or failure change how you make decisions?", "crisis failure changed decision lesson later"),
 ]
 
+# 질문은 검색어만으로 처리하지 않는다. 어려운 질문일수록 어떤 기록이 있어야 답할 수
+# 있는지, 어디까지 말할 수 있는지를 명시해야 한 사례를 내면·성격 일반론으로 과장하지 않는다.
+# answers.jsonl에는 이전 형식을 유지하고, load() 시 이 사양을 덧붙여 하위 호환을 보장한다.
+DOMAIN_QUESTION_SPEC = {
+    D_VAL: {"intent": "가치·규범에 관한 입장", "answer_mode": "직접 진술 우선; 없으면 구체 사례로 범위를 제한",
+            "required_evidence": ["직접 발언·저술", "반복되는 공적 결정 기록"],
+            "context_fields": ["발언 시점", "대상·청중", "사건·역할", "당시 제약"],
+            "safe_claim": "기록에서 드러난 특정 가치 또는 판단", "avoid_claim": "단일 사건으로 영구적 신념·도덕성을 확정"},
+    D_WORK: {"intent": "의사결정·업무 방식", "answer_mode": "결정 사례와 그 근거를 함께 요약",
+             "required_evidence": ["결정의 원문·기록", "결과 또는 후속 조치"],
+             "context_fields": ["문제", "선택지", "제약", "결과"],
+             "safe_claim": "해당 상황에서 보인 판단 과정", "avoid_claim": "한 사례를 모든 상황의 습관으로 일반화"},
+    D_EMO: {"intent": "감정·갈등 반응", "answer_mode": "직접 감정 표현이 있을 때만 답변; 없으면 보류",
+            "required_evidence": ["일기·편지·인터뷰의 직접 표현"],
+            "context_fields": ["감정의 대상", "시점", "상황"],
+            "safe_claim": "특정 상황에서 기록된 감정 또는 반응", "avoid_claim": "진단·정신 상태·숨은 동기 추정"},
+    D_REL: {"intent": "관계·대인 태도", "answer_mode": "상대와 상황이 밝혀진 관계 사례로 답변",
+            "required_evidence": ["직접 발언", "상호작용의 동시대 기록"],
+            "context_fields": ["상대", "관계", "권력·역할 차이", "사건"],
+            "safe_claim": "그 관계에서 확인되는 태도", "avoid_claim": "사생활·타인의 내면을 단정"},
+    D_HUM: {"intent": "자기표현·유머", "answer_mode": "실제 표현·인용이 있을 때만 예시 제공",
+            "required_evidence": ["녹취·저술의 실제 표현"], "context_fields": ["매체", "청중", "시점"],
+            "safe_claim": "기록된 표현 방식", "avoid_claim": "새 농담·인용문을 창작"},
+    D_HAB: {"intent": "일상·취향", "answer_mode": "반복 기록 또는 직접 진술이 있을 때만 답변",
+            "required_evidence": ["일기·편지·인터뷰", "복수의 생활 기록"], "context_fields": ["시기", "장소", "기록 빈도"],
+            "safe_claim": "기록된 습관·취향", "avoid_claim": "빈칸을 시대·직업 고정관념으로 채움"},
+    D_LIFE: {"intent": "생애 경험·이력", "answer_mode": "연표 사실과 본인 해석을 분리해 답변",
+             "required_evidence": ["검증된 연표", "본인 회고·동시대 기록"], "context_fields": ["날짜", "장소", "사건", "출처 관점"],
+             "safe_claim": "확인된 사건과 그 기록된 의미", "avoid_claim": "후대 평가를 본인의 의도로 바꾸기"},
+    D_CON: {"intent": "한계·모순·자기비판", "answer_mode": "본인의 인정 또는 검증된 상반 사례가 있을 때만 답변",
+            "required_evidence": ["자기비판의 직접 진술", "상반된 행동의 신뢰 가능한 기록"],
+            "context_fields": ["두 기록의 시점", "상황 차이", "반론"],
+            "safe_claim": "기록 사이의 긴장 또는 본인이 인정한 한계", "avoid_claim": "도덕적 비난·심리적 진단"},
+    D_EXP: {"intent": "전문 지식·문제 해결", "answer_mode": "원리·사례·한계를 함께 설명",
+            "required_evidence": ["저술·강연·작업물", "검증 가능한 사례"], "context_fields": ["분야", "문제", "방법", "한계"],
+            "safe_claim": "자료가 뒷받침하는 전문적 원리", "avoid_claim": "현대 지식을 과거 인물에게 귀속"},
+    D_MBTI: {"intent": "인지·에너지 선호 탐색", "answer_mode": "행동 경향을 낮은 신뢰도로만 서술; MBTI 확정 금지",
+             "required_evidence": ["여러 시기의 자기 기술", "반복 행동 기록"], "context_fields": ["반복성", "상황", "반례"],
+             "safe_claim": "자료에서 보이는 제한적 경향", "avoid_claim": "MBTI·성격 유형의 확정 또는 진단"},
+    D_TRAIT: {"intent": "성격·기질 경향", "answer_mode": "복수 사례의 공통점이 있을 때만 낮은 신뢰도로 요약",
+              "required_evidence": ["서로 독립적인 복수 기록", "직접 자기 기술"], "context_fields": ["기간", "상황 다양성", "반례"],
+              "safe_claim": "자료 기반의 수정 가능한 경향", "avoid_claim": "고정 성격·숨은 동기 단정"},
+    D_STYLE: {"intent": "표현·문체", "answer_mode": "실제 문장·연설·대화 형식에서 특징을 요약",
+              "required_evidence": ["원문 발화·저술", "여러 매체의 예시"], "context_fields": ["매체", "청중", "번역 여부"],
+              "safe_claim": "기록된 말투·표현의 특징", "avoid_claim": "그럴듯한 가짜 인용"},
+    D_CHANGE: {"intent": "시간에 따른 변화", "answer_mode": "서로 다른 시점의 자료를 비교할 때만 답변",
+               "required_evidence": ["날짜가 확인된 복수 자료", "변화를 언급한 직접 진술"], "context_fields": ["이전 시점", "이후 시점", "변화 계기", "반례"],
+               "safe_claim": "기록상 관찰되는 변화", "avoid_claim": "자료 없는 성장 서사"},
+}
+
+QUESTION_SPEC_OVERRIDES = {
+    "v03": {"answer_mode": "종교·신념에 대한 직접 진술이 있을 때만 답변; 없으면 보류", "avoid_claim": "소속·신앙·무신론을 추정"},
+    "v04": {"answer_mode": "죽음에 관한 직접 진술·저술이 있을 때만 답변; 없으면 보류", "avoid_claim": "죽음의 공포·내면 상태 추정"},
+    "h01": {"answer_mode": "실제 농담·유머 사례가 있을 때만 인용·요약; 없으면 유머를 창작하지 않음"},
+    "c01": {"answer_mode": "본인이 직접 인정한 약점이 있을 때만 답변; 없으면 보류"},
+    "c05": {"answer_mode": "본인이 직접 밝힌 부끄러움·후회가 있을 때만 답변; 없으면 보류"},
+}
+
+
+def question_spec(qid: str) -> dict:
+    """질문별 답변 계약. 기존 질문은행 파일을 바꾸지 않는 읽기 시점 메타데이터다."""
+    item = next((row for row in QUESTIONS if row[0] == qid), None)
+    if not item:
+        raise ValueError("알 수 없는 질문")
+    _, domain, ko, en, _ = item
+    spec = dict(DOMAIN_QUESTION_SPEC[domain])
+    spec.update(QUESTION_SPEC_OVERRIDES.get(qid, {}))
+    return {"qid": qid, "domain": domain, "question": ko, "question_en": en, **spec,
+            "conflict_policy": "상반 기록은 함께 표시하고, 해소되지 않으면 단정 대신 보류"}
+
+
+QUESTION_MATCH_STOP = {
+    # _tok은 한국어를 두 글자씩도 자르므로, 질문 문형에서 흔한 조각은 의도 매칭에 쓰지 않는다.
+    "무엇", "엇을", "생각", "각하", "하나", "나요", "어떻", "떻게", "대해", "해서", "하는", "어떤", "인가", "있나",
+    "있어", "까요", "가요", "나요", "통해", "대한", "에서", "에게", "그리", "리는", "또는", "무엇", "가장",
+}
+
+# 단어가 짧고 문형이 반복되는 한국어 질문은 2글자 n-gram만으로 오분류될 수 있다.
+# 개인적·고위험 질문은 명시적 트리거를 먼저 적용하고, 그 밖에는 두 개 이상 의미 토큰이
+# 겹칠 때만 질문은행 계약을 사용한다. 애매하면 계약을 강제하지 않는 편이 안전하다.
+QUESTION_TRIGGER_QIDS = {
+    "mbti": "m01", "죽음": "v04", "사후": "v04", "종교": "v03", "신앙": "v03",
+    "비판": "e03", "두려": "e02", "외로": "e04", "고독": "e04", "후회": "e07",
+    "가족": "r01", "약점": "c01", "단점": "c01", "부끄": "c05", "실패": "w03", "실수": "w03",
+}
+
+
+def _guidance_tokens(text: str) -> set[str]:
+    return {token for token in _tok(text) if token not in QUESTION_MATCH_STOP}
+
+
+def question_guidance(question: str) -> dict:
+    """자유 입력 질문에 가장 가까운 질문 계약을 반환한다. 일치가 약하면 강제 분류하지 않는다."""
+    lowered = question.lower()
+    for trigger, qid in QUESTION_TRIGGER_QIDS.items():
+        if trigger in lowered:
+            return {"matched": True, "score": 99, "spec": question_spec(qid)}
+    tokens = _guidance_tokens(question)
+    scored = [(len(tokens & _guidance_tokens(ko + " " + en)), qid) for qid, _, ko, en, _ in QUESTIONS]
+    score, qid = max(scored, default=(0, ""))
+    return {"matched": score >= 2, "score": score, "spec": question_spec(qid) if score >= 2 else None}
+
 _state = {"running": False, "person": "", "done": 0, "total": 0, "last_error": None, "started": None,
           "queue": [], "queue_index": 0, "queue_total": 0}
 _lock = threading.Lock()
@@ -149,25 +251,19 @@ def _write_improvement_state(state: dict) -> None:
 
 
 def improvement_plan(person: str) -> dict:
-    """근거가 없는 질문을 자동 수집 *후보*로 남긴다.
+    """원문 근거로 답할 수 있는 질문만 활성 질문으로 남긴다.
 
-    네트워크 검색이나 후보를 자동 신뢰하지 않는다. URL과 원문이 코퍼스에 추가된 뒤에만
-    ``run``이 이를 검증 가능한 evidence로 쓸 수 있다.
+    공통 질문은행의 빈칸을 채우지 않는다. 확인된 질문만 공통 또는 인물 고유
+    질문으로 선정하며, 새 원문이 들어온 경우에만 재판정으로 선정 범위가 넓어진다.
     """
     if person not in NAMES:
         raise ValueError("알 수 없는 인물")
-    rows = {row["qid"]: row for row in load(person)}
-    pending = []
-    for qid, domain, ko, en, keywords in QUESTIONS:
-        row = rows.get(qid, {})
-        checked = any(item.get("tier") in REAL_TIERS for item in row.get("evidence", []))
-        if not checked:
-            pending.append({"qid": qid, "domain": domain, "question": ko,
-                            "search_query": (ko if person in KOREAN else en) + " " + keywords,
-                            "reason": "수집 원문에서 확인된 근거가 없음"})
+    focus = question_focus(person)
     plan = {"person": person, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "confirmed": len(QUESTIONS) - len(pending), "pending": pending,
-            "notice": "자동 생성한 검색 후보입니다. 새 자료는 원문·출처를 확인해 코퍼스에 넣은 뒤에만 근거로 사용합니다."}
+            "confirmed": focus["selected_total"], "pending": [],
+            "common": focus["common"], "specific": focus["specific"],
+            "excluded_count": len(QUESTIONS) - focus["selected_total"],
+            "notice": "원문 근거가 없는 질문은 활성 질문·커버리지·자동 수집 대기열에서 제외합니다. 새 원문을 추가한 뒤 재판정으로만 선정합니다."}
     (ROOT / person / IMPROVEMENT_PLAN_FILE).write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     return plan
 
@@ -354,10 +450,39 @@ def judge_label() -> str:
 
 
 REAL_TIERS = {"own", "reported"}   # 수집·저장한 자료에서 확인된 근거. secondary(원문 미확인)·general(출처 미확인)·estimate(추정)는 실제 정보로 세지 않는다
+COMMON_FOCUS_MIN_PEOPLE = 2
 JUDGE_WORKERS = 4        # 근거 판정을 동시에 처리하는 질문 수(모델 병렬 처리 실측 근거는 run() 주석)
 HAND_MADE = {"sejong"}   # answers.jsonl을 사람이 직접 작성한 인물 — 검색 실행으로 덮어쓰지 않는다
 KOREAN = {"songhae", "sejong", "yi_sun_sin"}   # 자료가 한국어인 인물 — 질문도 한국어로 검색·판정한다
 NAMES = {"buffett": "Warren Buffett", "einstein": "Albert Einstein", "feynman": "Richard Feynman", "jobs": "Steve Jobs", "songhae": "Song Hae", "brucelee": "Bruce Lee", "sejong": "King Sejong", "yi_sun_sin": "Yi Sun-sin", "leonardo": "Leonardo da Vinci", "marie_curie": "Marie Curie", "marcus_aurelius": "Marcus Aurelius"}
+
+
+def question_focus(person: str) -> dict:
+    """확인된 질문만 공통/인물 고유로 나눈 활성 질문 집합.
+
+    공통은 두 명 이상에게 독립 원문 근거가 있는 질문뿐이고, 그 밖의 확인 질문은
+    해당 인물 고유 질문이다. 시대·인물 유형을 보지 않으므로 역사 인물도 사료나
+    저작물 근거가 있는 질문만 포함한다.
+    """
+    if person not in NAMES:
+        raise ValueError("알 수 없는 인물")
+    confirmed_by = {}
+    for who in NAMES:
+        for row in load(who):
+            if any(item.get("tier") in REAL_TIERS for item in row.get("evidence", [])):
+                confirmed_by.setdefault(row["qid"], set()).add(who)
+    own_rows = {row["qid"]: row for row in load(person)}
+    common, specific = [], []
+    for qid, _, ko, _, _ in QUESTIONS:
+        row = own_rows.get(qid, {})
+        if not any(item.get("tier") in REAL_TIERS for item in row.get("evidence", [])):
+            continue
+        entry = {"qid": qid, "question": ko, "domain": row.get("domain", ""),
+                 "people_count": len(confirmed_by.get(qid, set()))}
+        (common if entry["people_count"] >= COMMON_FOCUS_MIN_PEOPLE else specific).append(entry)
+    return {"person": person, "selected_total": len(common) + len(specific),
+            "common": common, "specific": specific,
+            "rule": "원문 근거 확인 문항만 선정; 공통은 2명 이상, 나머지는 인물 고유"}
 
 
 def run(person: str, candidates: int = 5) -> dict:
@@ -384,7 +509,8 @@ def run(person: str, candidates: int = 5) -> dict:
                 break   # 본인 글에서 찾았으면 전기 단계는 보지 않는다
         with _lock:
             _state["done"] += 1
-        return {"qid": qid, "domain": domain, "question": ko, "question_en": en, "answered": bool(found), "evidence": found}
+        return {"qid": qid, "domain": domain, "question": ko, "question_en": en,
+                "question_spec": question_spec(qid), "answered": bool(found), "evidence": found}
 
     try:
         # 판정 1건은 3~5초지만 모델은 4건을 동시에 받아도 전체 시간이 거의 늘지 않는다(실측: 4건 동시 4.1초, GPU 5%).
@@ -521,7 +647,8 @@ def infer_missing(person: str, overwrite: bool = False) -> dict:
     # 이 경우 모든 질문을 빈 직접 근거로 시작하며 결과는 supplement.jsonl에만 기록한다.
     rows = ([json.loads(line) for line in answer_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             if answer_path.exists() else
-            [{"qid": qid, "domain": domain, "question": ko, "question_en": en, "answered": False, "evidence": []}
+            [{"qid": qid, "domain": domain, "question": ko, "question_en": en,
+              "question_spec": question_spec(qid), "answered": False, "evidence": []}
              for qid, domain, ko, en, _ in QUESTIONS])
     existing_path = ROOT / person / "supplement.jsonl"
     existing = {}
@@ -604,7 +731,8 @@ def review_add(person: str, qid: str, key: str, reviewer: str, relation: str, ve
     return rec
 
 
-def conversation_feedback(person: str, question: str, answer: str, verdict: str, text: str, reviewer: str, relation: str) -> dict:
+def conversation_feedback(person: str, question: str, answer: str, verdict: str, text: str, reviewer: str, relation: str,
+                          target_qid: str = "") -> dict:
     """대화 중 받은 피드백을 가장 가까운 질문은행 축의 검토 근거로 남긴다.
 
     자동 추출한 대화 문장을 사실로 쓰지 않는다. 사용자가 명시적으로 남긴 평가만
@@ -614,16 +742,26 @@ def conversation_feedback(person: str, question: str, answer: str, verdict: str,
         raise ValueError("알 수 없는 인물")
     if verdict not in ("confirmed", "corrected"):
         raise ValueError("verdict")
-    question_tokens = set(_tok(question))
-    target = max(QUESTIONS, key=lambda item: len(question_tokens & set(_tok(item[2] + " " + item[3]))))
-    qid = target[0]
+    if target_qid:
+        qid = target_qid
+        question_spec(qid)  # 유효하지 않은 qid는 저장 전에 거부한다.
+        mapping = "explicit_qid"
+    else:
+        guide = question_guidance(question)
+        if not guide["matched"]:
+            raise ValueError("연결할 질문 항목을 선택해 주세요")
+        qid = guide["spec"]["qid"]
+        mapping = "token_match"
     note = (text or "").strip()
     if verdict == "confirmed":
         note = "대화 검토에서 적절하다고 확인됨. 질문: " + question[:240] + " / 답변: " + answer[:500]
     elif not note:
         raise ValueError("수정 의견을 입력해 주세요")
-    return review_add(person, qid, "conversation-" + hashlib.sha1((question + answer).encode("utf-8")).hexdigest()[:10],
-                      reviewer or "대화 사용자", relation or "대화 검토", "added", note)
+    result = review_add(person, qid, "conversation-" + hashlib.sha1((question + answer).encode("utf-8")).hexdigest()[:10],
+                        reviewer or "대화 사용자", relation or "대화 검토", "added", note)
+    result["question_spec"] = question_spec(qid)
+    result["mapping"] = mapping
+    return result
 
 
 def load(person: str) -> list[dict]:
@@ -647,6 +785,9 @@ def load(person: str) -> list[dict]:
                     row["evidence"].extend(s["evidence"])
                     row["answered"] = True
     for r in rows:           # 근거마다 원 출처(URL)와 저장 파일을 붙여, 어디서 찾았는지 확인할 수 있게 한다
+        # 이전 answers.jsonl 형식도 읽을 때 질문 계약을 추가한다. 따라서 대량 파일 마이그레이션이나
+        # 다른 창의 사료 작업과 충돌하지 않는다.
+        r["question_spec"] = question_spec(r["qid"])
         for e in r["evidence"]:
             d = sources.get(e["doc"], {})
             e["source_url"] = e.get("source_url") or d.get("source")
@@ -700,7 +841,10 @@ def summary(person: str) -> dict:
         d["real"] += 1 if real(r) else 0
         d["reviewed"] += 1 if any(e["tier"] == "reviewed" or any(x["verdict"] == "confirmed" for x in e.get("reviews", [])) for e in r["evidence"]) else 0
         d["rejected"] += 1 if any(e.get("conflict_status") == "rejected" for e in r["evidence"]) else 0
-    return {"person": person, "total": len(QUESTIONS), "answered": sum(1 for r in rows if r["answered"]),
+    focus = question_focus(person)
+    return {"person": person, "total": len(QUESTIONS), "selected_total": focus["selected_total"],
+            "common_selected": len(focus["common"]), "specific_selected": len(focus["specific"]),
+            "answered": sum(1 for r in rows if r["answered"]),
             "real_answered": sum(1 for r in rows if real(r)),
             "reviewed_answered": sum(1 for r in rows if any(e["tier"] == "reviewed" or any(x["verdict"] == "confirmed" for x in e.get("reviews", [])) for e in r["evidence"])),
             "own_answered": sum(1 for r in rows if any(e["tier"] == "own" for e in r["evidence"])), "by_domain": by_domain}

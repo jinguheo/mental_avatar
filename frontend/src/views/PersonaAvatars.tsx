@@ -10,9 +10,9 @@ type Status = { people: Person[]; root: string; historical_five?: string[] }
 
 const KIND: Record<string, string> = { primary: '본인 글·연설·편지', interview: '인터뷰·질의응답', quotes: '출처 확인된 발언', lecture: '강의·강연', bio: '전기·백과' }
 // 판정 배지는 질문은행에서 실제 자료로 확인된 답 수(real_answered)로 계산한다. 20개 미만은 논문 12절의 '자료 부족' 기준.
-function verdictOf(real: number | undefined, total: number): { text: string; cls: string } | null {
+function verdictOf(real: number | undefined, _total: number): { text: string; cls: string } | null {
   if (real === undefined) return null
-  const label = real + '/' + total + '문항 확인'
+  const label = '원문 근거 ' + real + '개'
   if (real >= 30) return { text: '비교적 충분(' + label + ')', cls: 'bg-green-100 text-green-800' }
   if (real >= 20) return { text: '일부 확보(' + label + ')', cls: 'bg-blue-100 text-blue-800' }
   return { text: '자료 부족(' + label + ', 20 미만)', cls: 'bg-amber-100 text-amber-800' }
@@ -61,7 +61,7 @@ const DOMAINS = ['가치관·신념·윤리', '일과 결정', '감정·갈등',
 type Evidence = { text: string; doc: string; title: string; kind: string; tier: 'own' | 'reported' | 'secondary' | 'general' | 'estimate' | 'reviewed'; score: number; source_url?: string; file?: string; key?: string; observed_at?: string; confidence?: number; approval_status?: string; conflict_status?: string; source_refs?: { doc: string; title: string; kind: string }[]; reviews?: { reviewer: string; relation: string; verdict: string; at: string }[] }
 type AnswerRow = { qid: string; domain: string; question: string; question_en: string; answered: boolean; evidence: Evidence[] }
 type Material = { id: string; title: string; kind: string; source?: string; chars?: number; fetched_at?: string; available: boolean; used_by_questions: number }
-type QSummary = { total: number; answered: number; real_answered?: number; own_answered: number; reviewed_answered?: number; by_domain: Record<string, { total: number; answered: number; own: number; real?: number; reviewed?: number; rejected?: number }> }
+type QSummary = { total: number; selected_total?: number; common_selected?: number; specific_selected?: number; answered: number; real_answered?: number; own_answered: number; reviewed_answered?: number; by_domain: Record<string, { total: number; answered: number; own: number; real?: number; reviewed?: number; rejected?: number }> }
 const REAL = ['own', 'reported']   // 수집한 자료에서 확인된 근거. 나머지(secondary·general·estimate)는 추정·미확인으로 따로 표시한다
 type QStatus = { running: boolean; person: string; done: number; total: number; last_error: string | null; questions: number; queue?: string[]; queue_index?: number; queue_total?: number; people: Record<string, QSummary> }
 type ImprovementStatus = { running?: boolean; last_run?: string | null; last_error?: string | null; changed?: string[]; plans?: Record<string, { pending?: number; generated_at?: string | null }> }
@@ -412,8 +412,8 @@ export default function PersonaAvatars({ selected, onPerson, onGoto }: { selecte
       </section>
 
       <section className="view-panel p-4 sm:p-5">
-        <h2 className="text-lg font-semibold">3-2. 질문 은행으로 찾은 그 사람 고유의 정보 (근거 포함)</h2>
-        <p className="mt-1 text-sm text-gray-600">성격·가치관·결정·감정·관계·유머·습관·이력·모순뿐 아니라 전문성·인지 성향·표현·시간에 따른 변화를 묻는 질문 {qstatus?.questions ?? 78}개를 만들고, 수집한 자료에서 <strong>본인이 직접 답한 대목</strong>을 찾습니다. 찾은 것만 남기고 못 찾은 질문은 "답 없음"입니다(100%를 목표로 하지 않음). 모든 답에 자료 제목·종류·원문 주소와 저장 파일을 붙입니다.</p>
+        <h2 className="text-lg font-semibold">3-2. 원문 근거가 있는 질문만으로 만든 인물 프로필</h2>
+        <p className="mt-1 text-sm text-gray-600">공통 질문 {qstatus?.questions ?? 78}개는 탐색 틀일 뿐, 실제 활성 질문은 수집 원문에서 근거가 확인된 것만입니다. 둘 이상의 인물에 근거가 있는 질문은 공통 비교용으로, 한 인물에게만 근거가 있는 질문은 그 인물 고유 질문으로 씁니다. 역사 인물도 사료·저작물에서 근거가 확인된 경우에만 포함합니다.</p>
         <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
           <select value={who} onChange={event => setWho(event.target.value)} className="rounded-lg border border-gray-300 px-2 py-1.5" aria-label="인물">
             <optgroup label="역사 인물 5명">
@@ -424,23 +424,22 @@ export default function PersonaAvatars({ selected, onPerson, onGoto }: { selecte
             </optgroup>
           </select>
           <button onClick={runQ} disabled={!!qstatus?.running} className="rounded-lg bg-gray-950 px-3 py-1.5 text-white disabled:opacity-50">{qstatus?.running ? (qstatus.person + ' 찾는 중 ' + qstatus.done + '/' + qstatus.total) : '이 인물로 찾기 실행'}</button>
-          <button onClick={runAll} disabled={!!qstatus?.running} className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-emerald-950 disabled:opacity-50">전체 11명 근거 재판정</button>
+          <button onClick={runAll} disabled={!!qstatus?.running} className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-emerald-950 disabled:opacity-50">원문 추가 후 전체 재판정</button>
           <button onClick={runHistorical} disabled={!!qstatus?.running} className="rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-indigo-950 disabled:opacity-50">역사 인물 5명 분석 실행</button>
-          <button onClick={inferMissing} disabled={!!qstatus?.running || !qstatus?.people[who]?.answered} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-amber-950 disabled:opacity-50">답 없는 항목 추정</button>
           <button onClick={runImprovement} disabled={!!improvement?.running} className="rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-violet-950 disabled:opacity-50">{improvement?.running ? '자율 보강 중…' : '자율 보강 지금 실행'}</button>
-          <button onClick={() => setOnly(only === 'all' ? 'answered' : 'all')} className="rounded-lg border border-gray-300 px-2.5 py-1.5">{only === 'all' ? '답 있는 것만 보기' : '답 없는 것도 보기'}</button>
-          {qstatus?.people[who]?.total ? <span className="text-xs text-gray-500"><strong className="text-green-700">자료로 확인 {qstatus.people[who].real_answered ?? 0}/{qstatus.people[who].total}</strong> (본인 직접 {qstatus.people[who].own_answered}) · <strong className="text-amber-700">추정·미확인만 {qstatus.people[who].answered - (qstatus.people[who].real_answered ?? 0)}</strong> · 답 없음 {qstatus.people[who].total - qstatus.people[who].answered}</span> : <span className="text-xs text-gray-500">아직 실행하지 않았습니다.</span>}
+          <button onClick={() => setOnly(only === 'all' ? 'answered' : 'all')} className="rounded-lg border border-gray-300 px-2.5 py-1.5">{only === 'all' ? '선정 질문만 보기' : '탐색 질문 전체 보기'}</button>
+          {qstatus?.people[who]?.total ? <span className="text-xs text-gray-500"><strong className="text-green-700">원문 근거로 선정 {qstatus.people[who].selected_total ?? qstatus.people[who].real_answered ?? 0}개</strong> (공통 {qstatus.people[who].common_selected ?? 0} · 인물 고유 {qstatus.people[who].specific_selected ?? 0} · 본인 직접 {qstatus.people[who].own_answered})</span> : <span className="text-xs text-gray-500">아직 실행하지 않았습니다.</span>}
         </div>
         {qstatus?.running && qstatus.queue_total ? <p className="mt-2 text-xs text-emerald-700">전체 대기열 {qstatus.queue_index}/{qstatus.queue_total}명 · 현재 {qstatus.person} · 질문 {qstatus.done}/{qstatus.total}</p> : null}
         {qstatus?.last_error && <p className="mt-1 text-xs text-amber-700">일부 판정 실패: {qstatus.last_error}</p>}
-        {improvement && <p className="mt-1 text-xs text-violet-700">자율 보강: {improvement.running ? '실행 중' : improvement.last_run ? '최근 ' + improvement.last_run : '아직 실행 전'} · 이 인물 수집 후보 {improvement.plans?.[who]?.pending ?? '—'}개{improvement.last_error ? ' · 오류: ' + improvement.last_error : ''}</p>}
-        {qstatus?.people[who]?.total ? <div className="mt-2 flex flex-wrap gap-1.5 text-xs">{Object.entries(qstatus.people[who].by_domain).map(([domain, value]) => <span key={domain} className="rounded bg-gray-100 px-2 py-1 text-gray-700">{domain} 확인 {value.real ?? 0} · 추정 {value.answered - (value.real ?? 0)} / {value.total}</span>)}</div> : null}
+        {improvement && <p className="mt-1 text-xs text-violet-700">자율 보강: {improvement.running ? '실행 중' : improvement.last_run ? '최근 ' + improvement.last_run : '아직 실행 전'} · 원문 근거 없는 공통 질문은 보강 대상에서 제외{improvement.last_error ? ' · 오류: ' + improvement.last_error : ''}</p>}
+        {qstatus?.people[who]?.total ? <div className="mt-2 flex flex-wrap gap-1.5 text-xs">{Object.entries(qstatus.people[who].by_domain).filter(([, value]) => (value.real ?? 0) > 0).map(([domain, value]) => <span key={domain} className="rounded bg-gray-100 px-2 py-1 text-gray-700">{domain} 원문 근거 {value.real ?? 0}개</span>)}</div> : null}
         <CoverageGaps summary={qstatus?.people[who]} />
         <AllCelebrityCoverage status={status} summaries={qstatus} />
         <PersonaEvidenceRadar person={status?.people.find(person => person.id === who)?.name || who} rows={answers} />
         <p className="mt-3 rounded-lg border border-violet-100 bg-violet-50 p-2 text-xs text-violet-900">이 인물의 성향 거미줄·페르소나 요약은 <button type="button" onClick={() => onGoto?.('library')} className="font-medium underline">② 인물 지식</button>, 시각자료와 대화는 <button type="button" onClick={() => onGoto?.('stage')} className="font-medium underline">③ 대화</button>에서 봅니다.</p>
         <EvidenceSummary rows={answers} />
-        <div className="mt-3 space-y-2">{answers.filter(row => only === 'all' || row.answered).map(row => <details key={row.qid} className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-sm">
+        <div className="mt-3 space-y-2">{answers.filter(row => only === 'all' || row.evidence.some(item => REAL.includes(item.tier))).map(row => <details key={row.qid} className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-sm">
           <summary className="cursor-pointer"><span className="text-xs text-gray-500">{row.domain}</span> · {row.question} <span className={'ml-1 rounded px-1.5 py-0.5 text-xs ' + (row.evidence.some(e => REAL.includes(e.tier)) ? 'bg-green-100 text-green-800' : row.answered ? 'bg-amber-100 text-amber-800' : 'bg-gray-200 text-gray-600')}>{row.evidence.some(e => REAL.includes(e.tier)) ? '자료 확인 ' + row.evidence.filter(e => REAL.includes(e.tier)).length + '건' : row.answered ? '추정·미확인 ' + row.evidence.length + '건' : '답 없음'}</span></summary>
           <div className="mt-2 space-y-2">{row.evidence.map((item, index) => <div key={index} className={'rounded bg-white p-2 border-l-4 ' + (item.tier === 'reviewed' ? 'border-indigo-500' : REAL.includes(item.tier) ? 'border-green-500' : 'border-amber-400')}>
             <p className="whitespace-pre-wrap break-words text-gray-800">{item.text}</p>

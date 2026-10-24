@@ -294,12 +294,17 @@ C) Persona knowledge record (may include estimates; never present an estimate as
 
 Question (Korean): {question}
 
+Question answer contract (internal guardrail; do not mention it):
+{question_contract}
+
 How to combine:
 - Use A for the structure and completeness of the answer, and B/C for {name_en}'s own stance, emphasis, examples and wording.
 - Where B shows what {name_en} actually stresses, lead with that. Where B conflicts with A, follow B. Add nothing from A that clashes with B.
 - Never present content that only comes from A as a quotation, a specific fact, number, date or event of {name_en}'s life.
 - Reply in Korean, in first person, 3 to 5 short sentences, in the speaking style above. {lang_rule}
 - If A is "(none)" and B/C do not directly answer the question (e.g. a private personal fact), reply with exactly: NO_RECORD. Never dodge a question by talking about something else.
+- Follow the answer contract's evidence and scope limits. If it requires a direct statement or multiple dated records and those are absent, reply with exactly NO_RECORD.
+- Never turn a single event into a permanent personality, diagnosis, MBTI type, private motive, or moral verdict.
 - Do not mention "passages", "A/B/C" or "general answer". Never refer to yourself by name or in the third person."""
 
 
@@ -343,8 +348,12 @@ def ask(person: str, question: str) -> dict:
 
     passages = "\n\n".join(f"[{i + 1}] ({h['title']}) {h['text'][:700]}" for i, (_, h) in enumerate(hits)) or "(none)"
     lang_rule = "" if info["lang"] == "en" else "Passages are Korean; paraphrase them naturally."
+    guidance = persona_qbank.question_guidance(question)
+    question_contract = (json.dumps(guidance["spec"], ensure_ascii=False) if guidance["matched"]
+                         else "No matching question-bank contract. Use the strict record-only rules above.")
     prompt = SYNTH.format(name_en=info["name_en"], style=info["style"], expertise=EXPERTISE[person]["expertise"], draft=draft or "(none)",
-                          passages=passages, persona_knowledge=persona_knowledge.context(person)["text"], question=question, lang_rule=lang_rule)
+                          passages=passages, persona_knowledge=persona_knowledge.context(person)["text"], question=question,
+                          question_contract=question_contract, lang_rule=lang_rule)
     text = _ollama(prompt, 380, 0.3)
     if not text or "NO_RECORD" in text.upper():
         return {"state": "ready", "answer": NO_RECORD_TEXT, "sources": [], "grounded": False, "basis": "none", "query": query}

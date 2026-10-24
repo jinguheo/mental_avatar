@@ -199,7 +199,7 @@ def generate_followup(question: str, answer: str, topic: str = "") -> dict:
 
 # ── 답변 저장 ─────────────────────────────────────────
 
-def save_answer(question: str, answer: str, topic: str = "") -> dict:
+def save_answer(question: str, answer: str, topic: str = "", extract: bool = True) -> dict:
     """질문+답을 self_interview 테이블 + KG 노드(source_type='self_interview') + 임베딩으로 저장.
 
     답변 본문에서 엔티티/관계도 추출해 그래프에 연결한다(암묵지가 기존 개념들과 이어지도록).
@@ -223,7 +223,7 @@ def save_answer(question: str, answer: str, topic: str = "") -> dict:
     embeddings.add_document(node_id, title, content, {"source_type": SOURCE_TYPE})
 
     # 답변에서 엔티티/관계 추출해 그래프에 연결 (내용이 충분할 때만)
-    if len(answer) > 60:
+    if extract and len(answer) > 60:
         try:
             kg_ingest._extract_into_graph(node_id, title, answer)
         except Exception as ex:
@@ -244,7 +244,7 @@ def save_answer(question: str, answer: str, topic: str = "") -> dict:
     return {"id": sid, "node_id": node_id}
 
 
-def save_decision_case(data: dict) -> dict:
+def save_decision_case(data: dict, extract: bool = True) -> dict:
     """실제 판단 사례를 구조화해 자문자답·KG와 함께 저장한다.
 
     자유 형식의 인터뷰와 달리, 당시 상황과 선택하지 않은 대안까지 남겨 이후
@@ -323,7 +323,7 @@ def list_candidates(status: str = "pending", decision_type: str = "", limit: int
     return {"items": [dict(r) for r in rows], "counts": counts}
 
 
-def approve_candidate(cid: str, edits: dict | None = None) -> dict:
+def approve_candidate(cid: str, edits: dict | None = None, extract: bool = True) -> dict:
     """후보를 (수정 반영해) 판단 사례로 확정한다. 확신도는 본인 확인이 없으므로 비워 둔다."""
     conn = get_conn()
     row = conn.execute("SELECT * FROM decision_case_candidates WHERE id=?", (cid,)).fetchone()
@@ -342,7 +342,7 @@ def approve_candidate(cid: str, edits: dict | None = None) -> dict:
         "evidence_state": row["evidence_state"],
         "observed_at": row["observed_at"],
     })
-    saved = save_decision_case(payload)
+    saved = save_decision_case(payload, extract=extract)
     conn = get_conn()
     conn.execute("UPDATE decision_case_candidates SET status='approved', case_id=?, reviewed_at=datetime('now','localtime') WHERE id=?",
                  (saved["case_id"], cid))
